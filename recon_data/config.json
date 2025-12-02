@@ -1,0 +1,8 @@
+{
+  "dashboard_file": "/Users/wesleythijs/subScraper/recon_data/dashboard.html",
+  "data_dir": "/Users/wesleythijs/subScraper/recon_data",
+  "default_interval": 30,
+  "default_wordlist": "",
+  "skip_nikto_by_default": false,
+  "state_file": "/Users/wesleythijs/subScraper/recon_data/state.json"
+}
