@@ -1,1 +1,67 @@
-[]
+[
+  {
+    "host": "adssettings.google.be",
+    "msg": "Target IP:          142.251.173.102"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Target Hostname:    adssettings.google.be"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Target Port:        80"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Start Time:         2025-12-12 15:46:56 (GMT1)"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Server: ESF"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "X-XSS-Protection header has been set to disable XSS Protection. There is unlikely to be a good reason for this."
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Root page / redirects to: https://adssettings.google.be/",
+    "uri": "https://adssettings.google.be/"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Uncommon header 'permissions-policy' found, with contents: ch-ua-arch=*, ch-ua-bitness=*, ch-ua-full-version=*, ch-ua-full-version-list=*, ch-ua-model=*, ch-ua-wow64=*, ch-ua-form-factors=*, ch-ua-platform=*, ch-ua-platform-version=*"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Uncommon header 'accept-ch' found, with contents: Sec-CH-UA-Arch, Sec-CH-UA-Bitness, Sec-CH-UA-Full-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Model, Sec-CH-UA-WoW64, Sec-CH-UA-Form-Factors, Sec-CH-UA-Platform, Sec-CH-UA-Platform-Version"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Uncommon header 'cross-origin-opener-policy' found, with contents: same-origin"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "No CGI Directories found (use '-C all' to force check all possible dirs)"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Server banner has changed from 'ESF' to 'gws' which may suggest a WAF, load balancer or proxy is in place"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Uncommon header 'referrer-policy' found, with contents: no-referrer"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "Scan terminated:  12 error(s) and 5 item(s) reported on remote host"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "End Time:           2025-12-12 15:55:37 (GMT1) (521 seconds)"
+  },
+  {
+    "host": "adssettings.google.be",
+    "msg": "1 host(s) tested"
+  }
+]

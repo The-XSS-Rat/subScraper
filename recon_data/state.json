@@ -1,5 +1,5 @@
 {
-  "last_updated": "2025-12-12T14:32:21.215277+00:00",
+  "last_updated": "2025-12-12T15:13:14.619312+00:00",
   "targets": {
     "dracoon.app": {
       "flags": {
@@ -49775,15 +49775,15 @@
     },
     "google.it": {
       "flags": {
-        "amass_done": false,
-        "assetfinder_done": false,
+        "amass_done": true,
+        "assetfinder_done": true,
         "ffuf_done": false,
-        "findomain_done": false,
-        "httpx_done": false,
+        "findomain_done": true,
+        "httpx_done": true,
         "nikto_done": false,
-        "nuclei_done": false,
-        "subfinder_done": false,
-        "sublist3r_done": false
+        "nuclei_done": true,
+        "subfinder_done": true,
+        "sublist3r_done": true
       },
       "subdomains": {
         "accounts.google.it": {
@@ -50066,7 +50066,50 @@
             "webserver": null
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "google.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "google.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "google.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "google.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "google.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "google.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "google.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50218,7 +50261,62 @@
             "webserver": "sffe"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "m.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "m.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "m.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "m.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50273,7 +50371,50 @@
             "webserver": "sffe"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "mobile.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "mobile.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "mobile.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "mobile.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "mobile.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "mobile.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "mobile.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50292,7 +50433,62 @@
             "webserver": "ESF"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "news.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "news.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "news.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "news.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50310,7 +50506,38 @@
             "webserver": "ESF"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "payments.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "payments.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "payments.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "payments.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "payments.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50328,7 +50555,62 @@
             "webserver": "ESF"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "photo.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "photo.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "photo.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50345,7 +50627,56 @@
             "webserver": "sffe"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "photos.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "photos.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "photos.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50363,7 +50694,56 @@
             "webserver": "sffe"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "privacy.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "privacy.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50392,7 +50772,38 @@
             "webserver": "gws"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "shopping.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "shopping.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "shopping.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "shopping.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "shopping.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50413,7 +50824,80 @@
             "webserver": "ESF"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "store.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "store.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "store.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "store.google.it",
+              "name": "SPF Record - Detection",
+              "severity": "info",
+              "template_id": "spf-record-detect"
+            },
+            {
+              "matched_at": "store.google.it",
+              "name": "DNS TXT Record Detected",
+              "severity": "info",
+              "template_id": "txt-fingerprint"
+            },
+            {
+              "matched_at": "store.google.it",
+              "name": "NS Record Detection",
+              "severity": "info",
+              "template_id": "nameserver-fingerprint"
+            },
+            {
+              "matched_at": "_dmarc.store.google.it",
+              "name": "DNS DMARC - Detect",
+              "severity": "info",
+              "template_id": "dmarc-detect"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50431,7 +50915,44 @@
             "webserver": "ESF"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "translate.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "translate.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "translate.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "translate.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "translate.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "translate.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50451,7 +50972,56 @@
             "webserver": "gws"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "video.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "video.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "video.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "video.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "video.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "video.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "video.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "video.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50468,7 +51038,50 @@
             "webserver": null
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "w.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "w.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "w.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "w.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "w.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "w.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "w.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50486,7 +51099,56 @@
             "webserver": "sffe"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "work.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "work.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "work.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "work.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "work.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "work.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "work.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            },
+            {
+              "matched_at": "work.google.it",
+              "name": "DNS SaaS Service Detection",
+              "severity": "info",
+              "template_id": "dns-saas-service-detection"
+            }
+          ],
           "sources": [
             "subfinder"
           ]
@@ -50504,7 +51166,44 @@
             "webserver": "gws"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "ww.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "ww.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "ww.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "ww.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "ww.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "ww.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50524,7 +51223,50 @@
             "webserver": "gws"
           },
           "nikto": [],
-          "nuclei": [],
+          "nuclei": [
+            {
+              "matched_at": "www.google.it:443",
+              "name": "Weak Cipher Suites Detection",
+              "severity": "low",
+              "template_id": "weak-cipher-suites"
+            },
+            {
+              "matched_at": "www.google.it:443",
+              "name": "Deprecated TLS Detection",
+              "severity": "info",
+              "template_id": "deprecated-tls"
+            },
+            {
+              "matched_at": "www.google.it:443",
+              "name": "TLS Version - Detect",
+              "severity": "info",
+              "template_id": "tls-version"
+            },
+            {
+              "matched_at": "www.google.it:443",
+              "name": "Detect SSL Certificate Issuer",
+              "severity": "info",
+              "template_id": "ssl-issuer"
+            },
+            {
+              "matched_at": "www.google.it:443",
+              "name": "SSL DNS Names",
+              "severity": "info",
+              "template_id": "ssl-dns-names"
+            },
+            {
+              "matched_at": "www.google.it:443",
+              "name": "Wildcard TLS Certificate",
+              "severity": "info",
+              "template_id": "wildcard-tls"
+            },
+            {
+              "matched_at": "www.google.it",
+              "name": "CAA Record",
+              "severity": "info",
+              "template_id": "caa-fingerprint"
+            }
+          ],
           "sources": [
             "subfinder",
             "assetfinder"
@@ -50534,15 +51276,15 @@
     },
     "google.nl": {
       "flags": {
-        "amass_done": false,
-        "assetfinder_done": false,
+        "amass_done": true,
+        "assetfinder_done": true,
         "ffuf_done": false,
-        "findomain_done": false,
-        "httpx_done": false,
+        "findomain_done": true,
+        "httpx_done": true,
         "nikto_done": false,
         "nuclei_done": false,
-        "subfinder_done": false,
-        "sublist3r_done": false
+        "subfinder_done": true,
+        "sublist3r_done": true
       },
       "subdomains": {
         "accounts.google.nl": {

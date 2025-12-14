@@ -19,6 +19,7 @@ import argparse
 import csv
 import io
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -32,7 +33,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, unquote
 
 # ====================== CONFIG ======================
 
@@ -42,6 +43,7 @@ HTML_DASHBOARD_FILE = DATA_DIR / "dashboard.html"
 LOCK_FILE = DATA_DIR / ".lock"
 CONFIG_FILE = DATA_DIR / "config.json"
 HISTORY_DIR = DATA_DIR / "history"
+SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 
 DEFAULT_INTERVAL = 30
 HTML_REFRESH_SECONDS = DEFAULT_INTERVAL  # default; can be overridden
@@ -58,7 +60,8 @@ TOOLS = {
     "ffuf": "ffuf",
     "httpx": "httpx",
     "nuclei": "nuclei",
-    "nikto": "nikto"
+    "nikto": "nikto",
+    "gowitness": "gowitness",
 }
 
 CONFIG_LOCK = threading.Lock()
@@ -107,12 +110,13 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "ffuf": ToolGate(1),
     "nuclei": ToolGate(1),
     "nikto": ToolGate(1),
+    "gowitness": ToolGate(1),
 }
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -134,6 +138,7 @@ def log(msg: str) -> None:
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
@@ -142,9 +147,15 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         MAX_RUNNING_JOBS = max(1, int(cfg.get("max_running_jobs", 1)))
     except (TypeError, ValueError):
         MAX_RUNNING_JOBS = 1
-    for tool in ("ffuf", "nuclei", "nikto"):
+    parallel_fields = {
+        "ffuf": "max_parallel_ffuf",
+        "nuclei": "max_parallel_nuclei",
+        "nikto": "max_parallel_nikto",
+        "gowitness": "max_parallel_gowitness",
+    }
+    for tool, field in parallel_fields.items():
         gate = TOOL_GATES.setdefault(tool, ToolGate(1))
-        limit = cfg.get(f"max_parallel_{tool}", 1)
+        limit = cfg.get(field, 1)
         try:
             limit_int = max(1, int(limit))
         except (TypeError, ValueError):
@@ -202,6 +213,7 @@ def default_config() -> Dict[str, Any]:
         "default_interval": DEFAULT_INTERVAL,
         "default_wordlist": "",
         "skip_nikto_by_default": False,
+        "enable_screenshots": True,
         "enable_amass": True,
         "amass_timeout": 600,
         "enable_subfinder": True,
@@ -214,6 +226,7 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_ffuf": 1,
         "max_parallel_nuclei": 1,
         "max_parallel_nikto": 1,
+        "max_parallel_gowitness": 1,
         "max_running_jobs": 1,
     }
 
@@ -306,7 +319,7 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             cfg["enable_amass"] = new_amass
             changed = True
 
-    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r"]:
+    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots"]:
         if key in values:
             new_value = bool_from_value(values.get(key), cfg.get(key, True))
             if cfg.get(key, True) != new_value:
@@ -322,6 +335,7 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         "assetfinder_threads": "Assetfinder threads",
         "findomain_threads": "Findomain threads",
         "amass_timeout": "Amass timeout (seconds)",
+        "max_parallel_gowitness": "Screenshot parallel slots",
     }
     for field, label in concurrency_fields.items():
         if field in values:
@@ -931,6 +945,7 @@ def harvest_enumerator_outputs(
 def run_downstream_pipeline(
     domain: str,
     wordlist: Optional[str],
+    config: Dict[str, Any],
     skip_nikto: bool,
     interval: int,
     job_domain: Optional[str],
@@ -1012,6 +1027,38 @@ def run_downstream_pipeline(
         httpx_processed.update(new_hosts)
         save_state(state)
         job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
+
+    # ---------- screenshots ----------
+    state = load_state()
+    flags = ensure_target_state(state, domain)["flags"]
+    if not config.get("enable_screenshots", True):
+        update_step("screenshots", status="skipped", message="Screenshots disabled in settings.", progress=0)
+        flags["screenshots_done"] = True
+        save_state(state)
+    else:
+        screenshot_targets = gather_screenshot_targets(state, domain)
+        if not screenshot_targets:
+            update_step("screenshots", status="skipped", message="No HTTP targets available for screenshots.", progress=0)
+            flags["screenshots_done"] = True
+            save_state(state)
+        else:
+            update_step("screenshots", status="running", message=f"Capturing screenshots for {len(screenshot_targets)} hosts", progress=40)
+            if job_domain:
+                job_log_append(job_domain, "Waiting for screenshot slot...", "scheduler")
+            with TOOL_GATES["gowitness"]:
+                if job_domain:
+                    job_log_append(job_domain, "Screenshot slot acquired.", "scheduler")
+                screenshot_map = capture_screenshots(screenshot_targets, domain, job_domain=job_domain)
+            if not screenshot_map:
+                job_log_append(job_domain, "Screenshot batch failed.", "screenshots")
+                update_step("screenshots", status="error", message="Screenshot capture failed.", progress=100)
+            else:
+                state = load_state()
+                enrich_state_with_screenshots(state, domain, screenshot_map)
+                ensure_target_state(state, domain)["flags"]["screenshots_done"] = True
+                save_state(state)
+                job_log_append(job_domain, f"Captured screenshots for {len(screenshot_map)} hosts.", "screenshots")
+                update_step("screenshots", status="completed", message=f"Screenshots captured for {len(screenshot_map)} hosts.", progress=100)
 
     # ---------- nuclei ----------
     nuclei_processed: set = set()
@@ -1164,6 +1211,105 @@ def httpx_scan(subs_file: Path, domain: str, job_domain: Optional[str] = None) -
     return out_json if success and out_json.exists() else None
 
 
+def _normalize_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def gather_screenshot_targets(state: Dict[str, Any], domain: str) -> List[Tuple[str, str]]:
+    tgt = ensure_target_state(state, domain)
+    submap = tgt.get("subdomains", {})
+    targets: List[Tuple[str, str]] = []
+    seen_urls = set()
+    for host, info in submap.items():
+        httpx_info = info.get("httpx") or {}
+        url = httpx_info.get("url")
+        if not url:
+            continue
+        norm = url.strip()
+        if not norm or norm in seen_urls:
+            continue
+        seen_urls.add(norm)
+        targets.append((host, norm))
+    return targets
+
+
+def capture_screenshots(
+    targets: List[Tuple[str, str]],
+    domain: str,
+    job_domain: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if not targets:
+        return {}
+    if not ensure_tool_installed("gowitness"):
+        return {}
+
+    dest_dir = SCREENSHOTS_DIR / domain
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target_file = dest_dir / f"{domain}_gowitness_targets.txt"
+    db_path = dest_dir / f"{domain}_gowitness.sqlite3"
+    try:
+        with open(target_file, "w", encoding="utf-8") as f:
+            for _, url in targets:
+                f.write(url.strip() + "\n")
+    except Exception as exc:
+        log(f"Failed writing screenshot target file: {exc}")
+        return {}
+
+    run_started = time.time()
+    cmd = [
+        TOOLS["gowitness"],
+        "file",
+        "-f", str(target_file),
+        "-P", str(dest_dir),
+        "--db", str(db_path),
+        "--log-level", "error",
+    ]
+    success = run_subprocess(cmd, job_domain=job_domain, step="screenshots")
+    try:
+        target_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if not success:
+        return {}
+
+    recent_files: Dict[str, Path] = {}
+    cutoff = run_started - 5
+    for path in dest_dir.rglob("*.png"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+        key = _normalize_identifier(path.stem)
+        recent_files[key] = path
+
+    mapping: Dict[str, Dict[str, Any]] = {}
+    captured_ts = datetime.now(timezone.utc).isoformat()
+    for host, url in targets:
+        normalized_candidates = [
+            _normalize_identifier(url),
+            _normalize_identifier(host),
+        ]
+        screenshot_path: Optional[Path] = None
+        for candidate in normalized_candidates:
+            screenshot_path = recent_files.get(candidate)
+            if screenshot_path:
+                break
+        if not screenshot_path or not screenshot_path.exists():
+            continue
+        try:
+            rel_path = screenshot_path.relative_to(SCREENSHOTS_DIR)
+        except ValueError:
+            rel_path = screenshot_path
+        mapping[host] = {
+            "path": str(rel_path).replace("\\", "/"),
+            "url": url,
+            "captured_at": captured_ts,
+        }
+    return mapping
+
+
 def nuclei_scan(subs_file: Path, domain: str, job_domain: Optional[str] = None) -> Path:
     if not ensure_tool_installed("nuclei"):
         return None
@@ -1275,6 +1421,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
             "sublist3r_done": False,
             "ffuf_done": False,
             "httpx_done": False,
+            "screenshots_done": False,
             "nuclei_done": False,
             "nikto_done": False,
         }
@@ -1283,7 +1430,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     tgt.setdefault("subdomains", {})
     tgt.setdefault("flags", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
-              "ffuf_done", "httpx_done", "nuclei_done", "nikto_done"]:
+              "ffuf_done", "httpx_done", "screenshots_done", "nuclei_done", "nikto_done"]:
         tgt["flags"].setdefault(k, False)
     return tgt
 
@@ -1300,6 +1447,7 @@ def add_subdomains_to_state(state: Dict[str, Any], domain: str, subs: List[str],
             "httpx": None,
             "nuclei": [],
             "nikto": [],
+            "screenshot": None,
         })
         if "sources" not in entry:
             entry["sources"] = []
@@ -1331,6 +1479,7 @@ def enrich_state_with_httpx(state: Dict[str, Any], domain: str, httpx_json: Path
                     "httpx": None,
                     "nuclei": [],
                     "nikto": [],
+                    "screenshot": None,
                 })
                 entry["httpx"] = {
                     "url": obj.get("url"),
@@ -1368,6 +1517,7 @@ def enrich_state_with_nuclei(state: Dict[str, Any], domain: str, nuclei_json: Pa
                     "httpx": None,
                     "nuclei": [],
                     "nikto": [],
+                    "screenshot": None,
                 })
                 finding = {
                     "template_id": obj.get("template-id"),
@@ -1399,6 +1549,7 @@ def enrich_state_with_nikto(state: Dict[str, Any], domain: str, nikto_json: Path
                 "httpx": None,
                 "nuclei": [],
                 "nikto": [],
+                "screenshot": None,
             })
             vulns = obj.get("vulnerabilities") or obj.get("vulns")
             if not vulns:
@@ -1418,6 +1569,22 @@ def enrich_state_with_nikto(state: Dict[str, Any], domain: str, nikto_json: Path
             entry.setdefault("nikto", []).extend(normalized_vulns)
     except Exception as e:
         log(f"Error enriching state with nikto data: {e}")
+
+
+def enrich_state_with_screenshots(state: Dict[str, Any], domain: str, mapping: Dict[str, Dict[str, Any]]) -> None:
+    if not mapping:
+        return
+    tgt = ensure_target_state(state, domain)
+    submap = tgt["subdomains"]
+    for host, data in mapping.items():
+        entry = submap.setdefault(host, {
+            "sources": [],
+            "httpx": None,
+            "nuclei": [],
+            "nikto": [],
+            "screenshot": None,
+        })
+        entry["screenshot"] = data
 
 
 # ================== DASHBOARD GENERATION ==================
@@ -1474,6 +1641,7 @@ def generate_html_dashboard(state: Optional[Dict[str, Any]] = None) -> None:
             f"<span class='badge'>Sublist3r: {'✅' if flags.get('sublist3r_done') else '⏳'}</span>"
             f"<span class='badge'>ffuf: {'✅' if flags.get('ffuf_done') else '⏳'}</span>"
             f"<span class='badge'>httpx: {'✅' if flags.get('httpx_done') else '⏳'}</span>"
+            f"<span class='badge'>Screenshots: {'✅' if flags.get('screenshots_done') else '⏳'}</span>"
             f"<span class='badge'>nuclei: {'✅' if flags.get('nuclei_done') else '⏳'}</span>"
             f"<span class='badge'>nikto: {'✅' if flags.get('nikto_done') else '⏳'}</span>"
             "</p>"
@@ -1486,6 +1654,7 @@ def generate_html_dashboard(state: Optional[Dict[str, Any]] = None) -> None:
             "<th>Subdomain</th>"
             "<th>Sources</th>"
             "<th>HTTP</th>"
+            "<th>Screenshot</th>"
             "<th>Nuclei Findings</th>"
             "<th>Nikto Findings</th>"
             "</tr>"
@@ -1493,6 +1662,7 @@ def generate_html_dashboard(state: Optional[Dict[str, Any]] = None) -> None:
         for idx, (sub, info) in enumerate(sorted(subs.items(), key=lambda x: x[0]), start=1):
             sources = info.get("sources", [])
             httpx = info.get("httpx") or {}
+            screenshot = info.get("screenshot") or {}
             nuclei = info.get("nuclei") or []
             nikto = info.get("nikto") or []
 
@@ -1523,12 +1693,20 @@ def generate_html_dashboard(state: Optional[Dict[str, Any]] = None) -> None:
             if nikto:
                 nikto_html = f"{len(nikto)} findings"
 
+            screenshot_html = ""
+            screenshot_path = screenshot.get("path")
+            if screenshot_path:
+                screenshot_html = (
+                    f"<a href='/screenshots/{screenshot_path}' target='_blank'>View</a>"
+                )
+
             html_parts.append(
                 "<tr>"
                 f"<td>{idx}</td>"
                 f"<td>{sub}</td>"
                 f"<td>{', '.join(sources)}</td>"
                 f"<td>{http_summary}</td>"
+                f"<td>{screenshot_html or '—'}</td>"
                 f"<td>{nuclei_html}</td>"
                 f"<td>{nikto_html}</td>"
                 "</tr>"
@@ -1595,7 +1773,7 @@ def run_pipeline(
         downstream_started.set()
         t = threading.Thread(
             target=run_downstream_pipeline,
-            args=(domain, wordlist, skip_nikto, interval, job_domain, enumerators_done_event),
+            args=(domain, wordlist, config, skip_nikto, interval, job_domain, enumerators_done_event),
             daemon=True,
         )
         downstream_thread_holder["thread"] = t
@@ -1729,7 +1907,7 @@ def run_pipeline(
     if downstream_thread:
         downstream_thread.join()
     else:
-        run_downstream_pipeline(domain, wordlist, skip_nikto, interval, job_domain, enumerators_done_event)
+        run_downstream_pipeline(domain, wordlist, config, skip_nikto, interval, job_domain, enumerators_done_event)
 
 
 # ================== JOB SCHEDULER ==================
@@ -2130,6 +2308,10 @@ button:hover { background:#1d4ed8; }
                 Skip Nikto by default
               </label>
               <label class="checkbox">
+                <input id="settings-enable-screenshots" type="checkbox" name="enable_screenshots" />
+                Enable screenshots
+              </label>
+              <label class="checkbox">
                 <input id="settings-enable-amass" type="checkbox" name="enable_amass" />
                 Enable Amass
               </label>
@@ -2172,6 +2354,9 @@ button:hover { background:#1d4ed8; }
               </label>
               <label>Nikto parallel slots
                 <input id="settings-nikto" type="number" name="max_parallel_nikto" min="1" />
+              </label>
+              <label>Screenshot parallel slots
+                <input id="settings-gowitness" type="number" name="max_parallel_gowitness" min="1" />
               </label>
               <button type="submit">Save Settings</button>
             </form>
@@ -2233,6 +2418,7 @@ const settingsForm = document.getElementById('settings-form');
 const settingsWordlist = document.getElementById('settings-wordlist');
 const settingsInterval = document.getElementById('settings-interval');
 const settingsSkipNikto = document.getElementById('settings-skip-nikto');
+const settingsEnableScreenshots = document.getElementById('settings-enable-screenshots');
 const settingsEnableAmass = document.getElementById('settings-enable-amass');
 const settingsAmassTimeout = document.getElementById('settings-amass-timeout');
 const settingsEnableSubfinder = document.getElementById('settings-enable-subfinder');
@@ -2246,6 +2432,7 @@ const settingsMaxJobs = document.getElementById('settings-max-jobs');
 const settingsFFUF = document.getElementById('settings-ffuf');
 const settingsNuclei = document.getElementById('settings-nuclei');
 const settingsNikto = document.getElementById('settings-nikto');
+const settingsGowitness = document.getElementById('settings-gowitness');
 const settingsStatus = document.getElementById('settings-status');
 const settingsSummary = document.getElementById('settings-summary');
 const statActive = document.getElementById('stat-active');
@@ -2433,6 +2620,8 @@ function renderTargets(targets) {
       const sources = Array.isArray(entry.sources) ? entry.sources.join(', ') : '';
       const httpx = entry.httpx || {};
       const httpSummary = httpx.status_code ? `${httpx.status_code} ${escapeHtml(httpx.title || '')} [${escapeHtml(httpx.webserver || '')}]` : '';
+      const screenshot = entry.screenshot || {};
+      const screenshotLink = screenshot.path ? `<a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">View</a>` : '';
       const nuclei = Array.isArray(entry.nuclei) ? entry.nuclei : [];
       const nucleiBits = nuclei.map(n => `<span class="badge">${escapeHtml((n.severity || '').toUpperCase())}: ${escapeHtml(n.template_id || '')}</span>`).join(' ');
       const nikto = Array.isArray(entry.nikto) ? entry.nikto : [];
@@ -2443,6 +2632,7 @@ function renderTargets(targets) {
           <td><button class="link-btn sub-link" data-domain="${escapeHtml(domain)}" data-sub="${escapeHtml(sub)}">${escapeHtml(sub)}</button></td>
           <td>${escapeHtml(sources)}</td>
           <td>${escapeHtml(httpSummary)}</td>
+          <td>${screenshotLink || '—'}</td>
           <td>${nucleiBits}</td>
           <td>${escapeHtml(niktoText)}</td>
         </tr>
@@ -2457,6 +2647,7 @@ function renderTargets(targets) {
       <span class="badge">Sublist3r: ${flags.sublist3r_done ? '✅' : '⏳'}</span>
       <span class="badge">ffuf: ${flags.ffuf_done ? '✅' : '⏳'}</span>
       <span class="badge">httpx: ${flags.httpx_done ? '✅' : '⏳'}</span>
+      <span class="badge">Screenshots: ${flags.screenshots_done ? '✅' : '⏳'}</span>
       <span class="badge">nuclei: ${flags.nuclei_done ? '✅' : '⏳'}</span>
       <span class="badge">nikto: ${flags.nikto_done ? '✅' : '⏳'}</span>
     `;
@@ -2469,6 +2660,7 @@ function renderTargets(targets) {
               <th>Subdomain</th>
               <th>Sources</th>
               <th>HTTP</th>
+              <th>Screenshot</th>
               <th>Nuclei</th>
               <th>Nikto</th>
             </tr>
@@ -2553,6 +2745,7 @@ async function fetchHistory(domain) {
 function buildDetailHtml(domain, sub, info, history) {
   const sources = info.sources || [];
   const httpx = info.httpx || {};
+  const screenshot = info.screenshot || {};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
   const filteredHistory = history.filter(event => {
@@ -2572,6 +2765,11 @@ function buildDetailHtml(domain, sub, info, history) {
         <h4>HTTP</h4>
         <p>${httpx.status_code || '—'} ${escapeHtml(httpx.title || '')}</p>
         <p>${escapeHtml(httpx.webserver || '')}</p>
+      </div>
+      <div>
+        <h4>Screenshot</h4>
+        ${screenshot.path ? `<p><a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">Open image</a></p>` : '<p>None</p>'}
+        ${screenshot.captured_at ? `<p class="muted">Captured ${fmtTime(screenshot.captured_at)}</p>` : ''}
       </div>
       <div>
         <h4>Nuclei Findings</h4>
@@ -2982,6 +3180,26 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/settings":
             self._send_json({"config": get_config()})
+            return
+        if self.path.startswith("/screenshots/"):
+            rel_path = unquote(self.path[len("/screenshots/"):]).lstrip("/")
+            if not rel_path:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            requested = (SCREENSHOTS_DIR / rel_path).resolve()
+            base = SCREENSHOTS_DIR.resolve()
+            try:
+                if not str(requested).startswith(str(base)):
+                    raise ValueError("Outside screenshots dir")
+            except Exception:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            if not requested.exists() or not requested.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            mime, _ = mimetypes.guess_type(str(requested))
+            data = requested.read_bytes()
+            self._send_bytes(data, status=HTTPStatus.OK, content_type=mime or "application/octet-stream")
             return
         if self.path.startswith("/api/history"):
             parsed = urlparse(self.path)
