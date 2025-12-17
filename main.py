@@ -3454,10 +3454,24 @@ button:hover { background:#1d4ed8; }
 .link-btn { background:none; border:none; color:#93c5fd; cursor:pointer; text-decoration:underline; padding:0; font:inherit; }
 .modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(2,6,23,0.85); display:none; align-items:center; justify-content:center; z-index:1000; }
 .modal-overlay.show { display:flex; }
-.modal { width:90%; max-width:900px; max-height:90vh; overflow-y:auto; background:#0f172a; border:1px solid #1e293b; border-radius:16px; padding:24px; box-shadow:0 25px 60px rgba(0,0,0,0.5); }
+.modal { width:90%; max-width:1100px; max-height:90vh; overflow-y:auto; background:#0f172a; border:1px solid #1e293b; border-radius:16px; padding:24px; box-shadow:0 25px 60px rgba(0,0,0,0.5); }
 .modal h3 { margin-top:0; color:#fbbf24; }
+.modal h4 { color:#a5b4fc; margin-top:20px; margin-bottom:12px; }
+.modal h5 { color:#94a3b8; margin-top:12px; margin-bottom:8px; font-size:14px; }
 .modal-close { position:absolute; top:16px; right:24px; background:none; border:none; color:#f87171; font-size:24px; cursor:pointer; }
+.detail-section { margin-bottom:24px; padding:16px; background:#0b152c; border:1px solid #1e293b; border-radius:12px; }
 .detail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-bottom:16px; }
+.detail-grid div { padding:8px 0; }
+.detail-grid strong { color:#a5b4fc; display:block; margin-bottom:4px; font-size:12px; text-transform:uppercase; }
+.detail-table { width:100%; border-collapse:collapse; margin-top:12px; }
+.detail-table th { background:#050b18; padding:10px; text-align:left; color:#94a3b8; font-size:12px; text-transform:uppercase; border-bottom:2px solid #1e293b; }
+.detail-table td { padding:10px; border-bottom:1px solid #1e293b; }
+.detail-table tbody tr:hover { background:#0b152c; }
+.url-list { max-height:300px; overflow-y:auto; border:1px solid #1e293b; border-radius:8px; padding:12px; background:#050b18; }
+.url-item { padding:4px 0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.url-item a { color:#60a5fa; }
+.url-item a:hover { color:#93c5fd; }
+.code-block { background:#050b18; border:1px solid #1e293b; border-radius:8px; padding:12px; overflow-x:auto; font-size:12px; color:#94a3b8; max-height:300px; }
 .timeline { max-height:250px; overflow:auto; border:1px solid #1e293b; border-radius:12px; padding:12px; background:#050b18; }
 .timeline-entry { margin-bottom:10px; }
 .timeline-entry .meta { color:var(--muted); font-size:11px; margin-bottom:3px; }
@@ -4650,47 +4664,206 @@ function buildDetailHtml(domain, sub, info, history) {
   const screenshot = info.screenshot || {};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
+  const nmap = info.nmap || {};
+  const waybackurls = info.waybackurls || [];
+  const gau = info.gau || [];
+  
   const filteredHistory = history.filter(event => {
     const text = (event.text || '').toLowerCase();
     const src = (event.source || '').toLowerCase();
     const needle = (sub || '').toLowerCase();
     return needle && (text.includes(needle) || src.includes(needle));
   });
+  
+  // HTTP Info section
+  const httpSection = httpx.url ? `
+    <div class="detail-section">
+      <h4>HTTP Information</h4>
+      <div class="detail-grid">
+        <div>
+          <strong>URL:</strong> <a href="${escapeHtml(httpx.url)}" target="_blank">${escapeHtml(httpx.url)}</a>
+        </div>
+        <div>
+          <strong>Status Code:</strong> ${httpx.status_code || '—'}
+        </div>
+        <div>
+          <strong>Title:</strong> ${escapeHtml(httpx.title || '—')}
+        </div>
+        <div>
+          <strong>Web Server:</strong> ${escapeHtml(httpx.webserver || '—')}
+        </div>
+        ${httpx.content_type ? `<div><strong>Content Type:</strong> ${escapeHtml(httpx.content_type)}</div>` : ''}
+        ${httpx.content_length ? `<div><strong>Content Length:</strong> ${escapeHtml(httpx.content_length)}</div>` : ''}
+        ${httpx.tech ? `<div><strong>Technologies:</strong> ${escapeHtml(Array.isArray(httpx.tech) ? httpx.tech.join(', ') : httpx.tech)}</div>` : ''}
+      </div>
+    </div>
+  ` : '<div class="detail-section"><h4>HTTP Information</h4><p class="muted">No HTTP data available</p></div>';
+  
+  // Screenshot section
+  const screenshotSection = screenshot.path ? `
+    <div class="detail-section">
+      <h4>Screenshot</h4>
+      <div style="text-align: center;">
+        <a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">
+          <img src="/screenshots/${escapeHtml(screenshot.path)}" 
+               alt="Screenshot of ${escapeHtml(sub)}" 
+               style="max-width: 100%; height: auto; border: 1px solid #1e293b; border-radius: 8px; cursor: pointer;" />
+        </a>
+        ${screenshot.captured_at ? `<p class="muted" style="margin-top: 8px;">Captured: ${fmtTime(screenshot.captured_at)}</p>` : ''}
+      </div>
+    </div>
+  ` : '<div class="detail-section"><h4>Screenshot</h4><p class="muted">No screenshot available</p></div>';
+  
+  // Nmap section
+  const nmapSection = (nmap.ports && nmap.ports.length) || nmap.raw ? `
+    <div class="detail-section">
+      <h4>Port Scan Results (Nmap)</h4>
+      ${nmap.ports && nmap.ports.length ? `
+        <table class="detail-table">
+          <thead>
+            <tr>
+              <th>Port</th>
+              <th>State</th>
+              <th>Service</th>
+              <th>Version</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${nmap.ports.map(port => `
+              <tr>
+                <td>${escapeHtml(String(port.port || ''))}</td>
+                <td><span class="status-pill ${port.state === 'open' ? 'status-completed' : ''}">${escapeHtml(port.state || 'unknown')}</span></td>
+                <td>${escapeHtml(port.service || '—')}</td>
+                <td>${escapeHtml(port.version || '—')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : ''}
+      ${nmap.raw ? `<pre class="code-block">${escapeHtml(nmap.raw)}</pre>` : ''}
+      ${nmap.scanned_at ? `<p class="muted">Scanned: ${fmtTime(nmap.scanned_at)}</p>` : ''}
+    </div>
+  ` : '';
+  
+  // URL Discovery section
+  const urlsSection = (waybackurls.length > 0 || gau.length > 0) ? `
+    <div class="detail-section">
+      <h4>Discovered URLs</h4>
+      ${waybackurls.length > 0 ? `
+        <h5>Wayback URLs (${waybackurls.length})</h5>
+        <div class="url-list">
+          ${waybackurls.slice(0, 50).map(url => `<div class="url-item"><a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a></div>`).join('')}
+          ${waybackurls.length > 50 ? `<p class="muted">... and ${waybackurls.length - 50} more</p>` : ''}
+        </div>
+      ` : ''}
+      ${gau.length > 0 ? `
+        <h5 style="margin-top: 16px;">GAU URLs (${gau.length})</h5>
+        <div class="url-list">
+          ${gau.slice(0, 50).map(url => `<div class="url-item"><a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a></div>`).join('')}
+          ${gau.length > 50 ? `<p class="muted">... and ${gau.length - 50} more</p>` : ''}
+        </div>
+      ` : ''}
+    </div>
+  ` : '';
+  
+  // Nuclei section
+  const nucleiSection = nuclei.length ? `
+    <div class="detail-section">
+      <h4>Nuclei Findings (${nuclei.length})</h4>
+      <table class="detail-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Template</th>
+            <th>Name</th>
+            <th>Location</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${nuclei.map(finding => {
+            const severity = normalizeSeverity(finding && finding.severity, 'INFO');
+            return `
+              <tr>
+                <td><span class="severity-pill ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
+                <td>${escapeHtml(finding.template_id || finding['template-id'] || '—')}</td>
+                <td>${escapeHtml(finding.name || '—')}</td>
+                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(finding.matched_at || finding['matched-at'] || finding.url || '')}">${escapeHtml(finding.matched_at || finding['matched-at'] || finding.url || '—')}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '<div class="detail-section"><h4>Nuclei Findings</h4><p class="muted">No nuclei findings</p></div>';
+  
+  // Nikto section
+  const niktoSection = nikto.length ? `
+    <div class="detail-section">
+      <h4>Nikto Findings (${nikto.length})</h4>
+      <table class="detail-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Message</th>
+            <th>Reference</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${nikto.map(finding => {
+            const severity = normalizeSeverity((finding && (finding.severity || finding.risk)) || 'INFO', 'INFO');
+            return `
+              <tr>
+                <td><span class="severity-pill ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
+                <td>${escapeHtml(finding.msg || finding.description || finding.raw || '—')}</td>
+                <td>${escapeHtml(finding.uri || (finding.osvdb ? \`OSVDB-\${finding.osvdb}\` : '—'))}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '<div class="detail-section"><h4>Nikto Findings</h4><p class="muted">No nikto findings</p></div>';
+  
+  // Sources and metadata section
+  const metadataSection = `
+    <div class="detail-section">
+      <h4>Metadata</h4>
+      <div class="detail-grid">
+        <div>
+          <strong>Parent Domain:</strong> ${escapeHtml(domain)}
+        </div>
+        <div>
+          <strong>Discovery Sources:</strong> ${sources.length ? escapeHtml(sources.join(', ')) : 'Unknown'}
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Timeline section
+  const timelineSection = `
+    <div class="detail-section">
+      <h4>Timeline & History</h4>
+      <div class="timeline">
+        ${filteredHistory.length ? filteredHistory.map(evt => `
+          <div class="timeline-entry">
+            <div class="meta">${escapeHtml(evt.ts || '')} — ${escapeHtml(evt.source || '')}</div>
+            <div>${escapeHtml(evt.text || '')}</div>
+          </div>
+        `).join('') : '<p class="muted">No history for this subdomain yet.</p>'}
+      </div>
+    </div>
+  `;
+  
   return `
     <h3>${escapeHtml(sub)} <span class="badge">${escapeHtml(domain)}</span></h3>
-    <div class="detail-grid">
-      <div>
-        <h4>Sources</h4>
-        <p>${sources.join(', ') || 'Unknown'}</p>
-      </div>
-      <div>
-        <h4>HTTP</h4>
-        <p>${httpx.status_code || '—'} ${escapeHtml(httpx.title || '')}</p>
-        <p>${escapeHtml(httpx.webserver || '')}</p>
-      </div>
-      <div>
-        <h4>Screenshot</h4>
-        ${screenshot.path ? `<p><a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">Open image</a></p>` : '<p>None</p>'}
-        ${screenshot.captured_at ? `<p class="muted">Captured ${fmtTime(screenshot.captured_at)}</p>` : ''}
-      </div>
-      <div>
-        <h4>Nuclei Findings</h4>
-        ${nuclei.length ? nuclei.map(n => `<div><strong>${escapeHtml(n.template_id || '')}</strong> (${escapeHtml((n.severity || '').toUpperCase())})<br>${escapeHtml(n.matched_at || '')}</div>`).join('') : '<p>None</p>'}
-      </div>
-      <div>
-        <h4>Nikto Findings</h4>
-        ${nikto.length ? nikto.map(n => `<div>${escapeHtml(n.msg || n.raw || '')}</div>`).join('') : '<p>None</p>'}
-      </div>
-    </div>
-    <h4>Timeline</h4>
-    <div class="timeline">
-      ${filteredHistory.length ? filteredHistory.map(evt => `
-        <div class="timeline-entry">
-          <div class="meta">${escapeHtml(evt.ts || '')} — ${escapeHtml(evt.source || '')}</div>
-          <div>${escapeHtml(evt.text || '')}</div>
-        </div>
-      `).join('') : '<p class="muted">No history for this subdomain yet.</p>'}
-    </div>
+    ${metadataSection}
+    ${httpSection}
+    ${screenshotSection}
+    ${nmapSection}
+    ${urlsSection}
+    ${nucleiSection}
+    ${niktoSection}
+    ${timelineSection}
   `;
 }
 
