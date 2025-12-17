@@ -192,6 +192,143 @@ curl http://127.0.0.1:8342/api/gallery/example.com
 
 ---
 
+## 4. System Resource Monitoring
+
+### What It Does
+Provides real-time monitoring of system resources (CPU, memory, disk, network) to help ensure reconnaissance scans don't overwhelm the system. Features automatic warnings when resource usage exceeds safe thresholds.
+
+### How to Use
+1. Navigate to the **System Resources** tab in the web UI
+2. View real-time metrics updated every 5 seconds
+3. Monitor historical usage trends over the last 5 minutes
+4. Check for automatic warnings when thresholds are exceeded
+
+### What You'll See
+- **CPU Usage**: Overall utilization, per-core breakdown, load averages, frequency
+- **Memory Usage**: RAM consumption, available memory, swap usage
+- **Disk Usage**: Storage consumption, I/O operations (reads/writes)
+- **Network I/O**: Data transfer statistics, packet counts, errors
+- **Application Metrics**: Process-specific CPU/memory usage, thread counts
+
+### Warning Thresholds
+The system automatically generates warnings when resources exceed safe levels:
+- **CPU**: Warning at 75%, Critical at 90%
+- **Memory**: Warning at 80%, Critical at 90%
+- **Disk**: Warning at 85%, Critical at 95%
+- **Swap**: Warning at 50% (indicates memory pressure)
+
+### Visual Indicators
+- 🟢 **Green cards**: Normal operation
+- 🟠 **Orange cards**: Warning threshold exceeded
+- 🔴 **Red cards**: Critical threshold exceeded
+
+### Features
+- **Real-time Updates**: Metrics refresh automatically every 5 seconds
+- **Historical Charts**: Sparkline visualizations show usage trends
+- **Persistent State**: History saved to `recon_data/system_resources.json`
+- **API Access**: Programmatic access via `/api/system-resources`
+- **Cross-platform**: Works on Linux, macOS, and Windows (via psutil)
+
+### Dependencies
+The feature requires the `psutil` library:
+```bash
+pip3 install -r requirements.txt
+```
+
+If psutil is not available, the System Resources tab will display a message indicating monitoring is disabled.
+
+### API Usage
+```bash
+# Get current system resources and history
+curl http://127.0.0.1:8342/api/system-resources | jq
+```
+
+**Response**:
+```json
+{
+  "current": {
+    "available": true,
+    "timestamp": "2025-12-17T17:30:00Z",
+    "cpu": {
+      "percent": 45.2,
+      "per_core": [52.1, 38.3, 41.0, 49.5],
+      "count_logical": 4,
+      "count_physical": 2,
+      "frequency_mhz": 2400.0,
+      "load_avg_1m": 2.5,
+      "load_avg_5m": 2.2,
+      "load_avg_15m": 1.8
+    },
+    "memory": {
+      "total_gb": 16.0,
+      "used_gb": 8.5,
+      "available_gb": 7.5,
+      "percent": 53.1
+    },
+    "disk": {
+      "total_gb": 512.0,
+      "used_gb": 128.5,
+      "free_gb": 383.5,
+      "percent": 25.1
+    },
+    "process": {
+      "count": 3,
+      "cpu_percent": 12.5,
+      "memory_mb": 245.3,
+      "threads": 15,
+      "pid": 12345
+    },
+    "warnings": [
+      {
+        "severity": "warning",
+        "resource": "cpu",
+        "message": "CPU usage high at 76.5%",
+        "value": 76.5,
+        "threshold": 75
+      }
+    ]
+  },
+  "history": [
+    {
+      "timestamp": "2025-12-17T17:25:00Z",
+      "cpu_percent": 42.1,
+      "memory_percent": 51.2,
+      "disk_percent": 25.1,
+      "process_cpu_percent": 10.5,
+      "process_memory_mb": 240.1,
+      "warnings_count": 0
+    }
+  ]
+}
+```
+
+### Use Cases
+1. **System Health Monitoring**: Ensure scans aren't overwhelming the system
+2. **Performance Tuning**: Identify resource bottlenecks and adjust concurrency settings
+3. **Capacity Planning**: Understand resource requirements for different scan types
+4. **Troubleshooting**: Diagnose performance issues and memory leaks
+5. **Compliance**: Document system resource usage for security assessments
+
+### Tips & Tricks
+- Monitor the System Resources tab before starting large scans
+- Adjust concurrency settings in the Settings tab if warnings appear frequently
+- Use the historical charts to identify usage patterns and trends
+- Check swap usage - high swap usage indicates the system needs more RAM
+- Process metrics show the application's specific resource consumption
+
+### Troubleshooting
+
+**Issue**: "psutil not installed" message
+- **Solution**: Run `pip3 install -r requirements.txt` to install dependencies
+
+**Issue**: Metrics not updating
+- **Solution**: Check browser console for errors, refresh the page
+
+**Issue**: High resource warnings
+- **Solution**: Reduce max_running_jobs or tool-specific concurrency limits in Settings
+
+---
+
 ## Browser Compatibility
 
 All features work in modern browsers:
@@ -214,13 +351,14 @@ All features work in modern browsers:
 - Screenshot paths are validated against directory traversal
 - HTML output is properly escaped
 - No external dependencies or CDNs used
+- System resource monitoring uses read-only system APIs
 
 ---
 
 ## Contributing
 
 Found a bug or have a feature request? Please open an issue on GitHub with:
-- Feature name (Resume All, Subdomain Details, or Screenshots Gallery)
+- Feature name (Resume All, Subdomain Details, Screenshots Gallery, or System Resources)
 - Steps to reproduce
 - Expected vs actual behavior
 - Browser and version

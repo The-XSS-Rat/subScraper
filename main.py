@@ -40,6 +40,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse, unquote
 from urllib.request import Request, urlopen
 
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available. System resource monitoring will be disabled.")
+
 # ====================== CONFIG ======================
 
 DATA_DIR = Path("recon_data")
@@ -327,6 +334,15 @@ MONITOR_THREAD: Optional[threading.Thread] = None
 MONITOR_POLL_INTERVAL = 10
 DEFAULT_MONITOR_INTERVAL = 300
 MAX_MONITOR_ENTRIES = 200
+
+# System Resource Monitoring
+SYSTEM_RESOURCE_LOCK = threading.Lock()
+SYSTEM_RESOURCE_STATE: Dict[str, Any] = {}
+SYSTEM_RESOURCE_THREAD: Optional[threading.Thread] = None
+SYSTEM_RESOURCE_POLL_INTERVAL = 5  # Poll every 5 seconds
+SYSTEM_RESOURCE_HISTORY_SIZE = 720  # Keep 1 hour of history at 5-second intervals
+SYSTEM_RESOURCE_HISTORY: List[Dict[str, Any]] = []
+SYSTEM_RESOURCE_FILE = DATA_DIR / "system_resources.json"
 
 
 # ================== UTILITIES =======================
@@ -752,6 +768,340 @@ def start_monitor_worker() -> None:
     thread.start()
     with MONITOR_LOCK:
         MONITOR_THREAD = thread
+
+
+# ================== SYSTEM RESOURCE MONITORING ==================
+
+
+def collect_system_resources() -> Dict[str, Any]:
+    """
+    Collect current system resource metrics.
+    Returns comprehensive data about CPU, memory, disk, network, and process usage.
+    """
+    if not PSUTIL_AVAILABLE:
+        return {
+            "available": False,
+            "error": "psutil not installed",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    try:
+        # Basic system info
+        cpu_count_logical = psutil.cpu_count(logical=True)
+        cpu_count_physical = psutil.cpu_count(logical=False)
+        
+        # CPU metrics (use interval=None for non-blocking measurement based on previous call)
+        cpu_percent = psutil.cpu_percent(interval=None)
+        cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
+        cpu_freq = psutil.cpu_freq()
+        load_avg = psutil.getloadavg() if hasattr(psutil, 'getloadavg') else (0, 0, 0)
+        
+        # Memory metrics
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        # Disk metrics
+        disk = psutil.disk_usage('/')
+        disk_io = psutil.disk_io_counters()
+        
+        # Network metrics
+        net_io = psutil.net_io_counters()
+        
+        # Process metrics - get current process and its children
+        current_process = psutil.Process()
+        try:
+            children = current_process.children(recursive=True)
+            process_count = 1 + len(children)
+            
+            # Sum up resources for main process and children (use interval=None)
+            total_process_cpu = current_process.cpu_percent(interval=None)
+            total_process_mem = current_process.memory_info().rss
+            total_process_threads = current_process.num_threads()
+            
+            for child in children:
+                try:
+                    total_process_cpu += child.cpu_percent(interval=None)
+                    total_process_mem += child.memory_info().rss
+                    total_process_threads += child.num_threads()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            process_count = 1
+            total_process_cpu = current_process.cpu_percent(interval=None)
+            total_process_mem = current_process.memory_info().rss
+            total_process_threads = current_process.num_threads()
+        
+        return {
+            "available": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "cpu": {
+                "percent": round(cpu_percent, 2),
+                "per_core": [round(p, 2) for p in cpu_per_core],
+                "count_logical": cpu_count_logical,
+                "count_physical": cpu_count_physical,
+                "frequency_mhz": round(cpu_freq.current, 2) if cpu_freq else None,
+                "load_avg_1m": round(load_avg[0], 2),
+                "load_avg_5m": round(load_avg[1], 2),
+                "load_avg_15m": round(load_avg[2], 2),
+            },
+            "memory": {
+                "total_bytes": mem.total,
+                "available_bytes": mem.available,
+                "used_bytes": mem.used,
+                "percent": round(mem.percent, 2),
+                "total_gb": round(mem.total / (1024**3), 2),
+                "available_gb": round(mem.available / (1024**3), 2),
+                "used_gb": round(mem.used / (1024**3), 2),
+            },
+            "swap": {
+                "total_bytes": swap.total,
+                "used_bytes": swap.used,
+                "free_bytes": swap.free,
+                "percent": round(swap.percent, 2),
+                "total_gb": round(swap.total / (1024**3), 2),
+                "used_gb": round(swap.used / (1024**3), 2),
+            },
+            "disk": {
+                "total_bytes": disk.total,
+                "used_bytes": disk.used,
+                "free_bytes": disk.free,
+                "percent": round(disk.percent, 2),
+                "total_gb": round(disk.total / (1024**3), 2),
+                "used_gb": round(disk.used / (1024**3), 2),
+                "free_gb": round(disk.free / (1024**3), 2),
+                "read_bytes": disk_io.read_bytes if disk_io else 0,
+                "write_bytes": disk_io.write_bytes if disk_io else 0,
+                "read_count": disk_io.read_count if disk_io else 0,
+                "write_count": disk_io.write_count if disk_io else 0,
+            },
+            "network": {
+                "bytes_sent": net_io.bytes_sent,
+                "bytes_recv": net_io.bytes_recv,
+                "packets_sent": net_io.packets_sent,
+                "packets_recv": net_io.packets_recv,
+                "errin": net_io.errin,
+                "errout": net_io.errout,
+                "dropin": net_io.dropin,
+                "dropout": net_io.dropout,
+            },
+            "process": {
+                "count": process_count,
+                "cpu_percent": round(total_process_cpu, 2),
+                "memory_bytes": total_process_mem,
+                "memory_mb": round(total_process_mem / (1024**2), 2),
+                "threads": total_process_threads,
+                "pid": current_process.pid,
+            }
+        }
+    except Exception as exc:
+        log(f"Error collecting system resources: {exc}")
+        return {
+            "available": False,
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+
+def check_resource_thresholds(metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Check if resource usage exceeds safe thresholds and return warnings.
+    """
+    warnings = []
+    
+    if not metrics.get("available"):
+        return warnings
+    
+    # CPU thresholds
+    cpu_percent = metrics.get("cpu", {}).get("percent", 0)
+    if cpu_percent > 90:
+        warnings.append({
+            "severity": "critical",
+            "resource": "cpu",
+            "message": f"CPU usage critically high at {cpu_percent}%",
+            "value": cpu_percent,
+            "threshold": 90
+        })
+    elif cpu_percent > 75:
+        warnings.append({
+            "severity": "warning",
+            "resource": "cpu",
+            "message": f"CPU usage high at {cpu_percent}%",
+            "value": cpu_percent,
+            "threshold": 75
+        })
+    
+    # Memory thresholds
+    mem_percent = metrics.get("memory", {}).get("percent", 0)
+    if mem_percent > 90:
+        warnings.append({
+            "severity": "critical",
+            "resource": "memory",
+            "message": f"Memory usage critically high at {mem_percent}%",
+            "value": mem_percent,
+            "threshold": 90
+        })
+    elif mem_percent > 80:
+        warnings.append({
+            "severity": "warning",
+            "resource": "memory",
+            "message": f"Memory usage high at {mem_percent}%",
+            "value": mem_percent,
+            "threshold": 80
+        })
+    
+    # Disk thresholds
+    disk_percent = metrics.get("disk", {}).get("percent", 0)
+    if disk_percent > 95:
+        warnings.append({
+            "severity": "critical",
+            "resource": "disk",
+            "message": f"Disk usage critically high at {disk_percent}%",
+            "value": disk_percent,
+            "threshold": 95
+        })
+    elif disk_percent > 85:
+        warnings.append({
+            "severity": "warning",
+            "resource": "disk",
+            "message": f"Disk usage high at {disk_percent}%",
+            "value": disk_percent,
+            "threshold": 85
+        })
+    
+    # Swap usage warning
+    swap_percent = metrics.get("swap", {}).get("percent", 0)
+    if swap_percent > 50:
+        warnings.append({
+            "severity": "warning",
+            "resource": "swap",
+            "message": f"Swap usage at {swap_percent}%, system may be under memory pressure",
+            "value": swap_percent,
+            "threshold": 50
+        })
+    
+    return warnings
+
+
+def save_system_resource_state() -> None:
+    """Save current system resource state and history to disk."""
+    ensure_dirs()
+    with SYSTEM_RESOURCE_LOCK:
+        payload = {
+            "current": SYSTEM_RESOURCE_STATE,
+            "history": SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:],
+        }
+        tmp_path = SYSTEM_RESOURCE_FILE.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        tmp_path.replace(SYSTEM_RESOURCE_FILE)
+
+
+def load_system_resource_state() -> Dict[str, Any]:
+    """Load system resource state from disk."""
+    global SYSTEM_RESOURCE_HISTORY
+    ensure_dirs()
+    if SYSTEM_RESOURCE_FILE.exists():
+        try:
+            with open(SYSTEM_RESOURCE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with SYSTEM_RESOURCE_LOCK:
+                SYSTEM_RESOURCE_STATE.clear()
+                SYSTEM_RESOURCE_STATE.update(data.get("current", {}))
+                SYSTEM_RESOURCE_HISTORY.clear()
+                SYSTEM_RESOURCE_HISTORY.extend(data.get("history", []))
+        except Exception as exc:
+            log(f"Error loading system resource state: {exc}")
+    return get_system_resource_snapshot()
+
+
+def get_system_resource_snapshot() -> Dict[str, Any]:
+    """Get a snapshot of current system resources and history."""
+    with SYSTEM_RESOURCE_LOCK:
+        return {
+            "current": copy.deepcopy(SYSTEM_RESOURCE_STATE),
+            "history": copy.deepcopy(SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:]),
+        }
+
+
+def system_resource_worker_loop() -> None:
+    """Background worker that continuously monitors system resources."""
+    log("System resource monitoring worker started.")
+    
+    last_save_time = time.time()
+    save_interval = 60  # Save every 60 seconds
+    
+    while True:
+        try:
+            # Collect current metrics
+            metrics = collect_system_resources()
+            
+            # Check for threshold warnings
+            warnings = check_resource_thresholds(metrics)
+            metrics["warnings"] = warnings
+            
+            # Log critical warnings
+            for warning in warnings:
+                if warning["severity"] == "critical":
+                    log(f"⚠️  RESOURCE WARNING: {warning['message']}")
+            
+            # Update state
+            with SYSTEM_RESOURCE_LOCK:
+                SYSTEM_RESOURCE_STATE.clear()
+                SYSTEM_RESOURCE_STATE.update(metrics)
+                
+                # Add to history
+                history_entry = {
+                    "timestamp": metrics["timestamp"],
+                    "cpu_percent": metrics.get("cpu", {}).get("percent", 0),
+                    "memory_percent": metrics.get("memory", {}).get("percent", 0),
+                    "disk_percent": metrics.get("disk", {}).get("percent", 0),
+                    "process_cpu_percent": metrics.get("process", {}).get("cpu_percent", 0),
+                    "process_memory_mb": metrics.get("process", {}).get("memory_mb", 0),
+                    "warnings_count": len(warnings),
+                }
+                SYSTEM_RESOURCE_HISTORY.append(history_entry)
+                
+                # Trim history to max size
+                if len(SYSTEM_RESOURCE_HISTORY) > SYSTEM_RESOURCE_HISTORY_SIZE:
+                    SYSTEM_RESOURCE_HISTORY[:] = SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:]
+            
+            # Save state periodically using timestamp-based approach
+            current_time = time.time()
+            if current_time - last_save_time >= save_interval:
+                try:
+                    save_system_resource_state()
+                    last_save_time = current_time
+                except Exception as exc:
+                    log(f"Error saving system resource state: {exc}")
+            
+        except Exception as exc:
+            log(f"Error in system resource monitoring: {exc}")
+        
+        time.sleep(SYSTEM_RESOURCE_POLL_INTERVAL)
+
+
+def start_system_resource_worker() -> None:
+    """Start the system resource monitoring worker thread."""
+    global SYSTEM_RESOURCE_THREAD
+    
+    if not PSUTIL_AVAILABLE:
+        log("System resource monitoring disabled: psutil not available")
+        return
+    
+    with SYSTEM_RESOURCE_LOCK:
+        already_running = SYSTEM_RESOURCE_THREAD and SYSTEM_RESOURCE_THREAD.is_alive()
+    
+    if already_running:
+        return
+    
+    load_system_resource_state()
+    thread = threading.Thread(target=system_resource_worker_loop, name="resource-monitor", daemon=True)
+    thread.start()
+    
+    with SYSTEM_RESOURCE_LOCK:
+        SYSTEM_RESOURCE_THREAD = thread
+    
+    log("System resource monitoring worker initialized.")
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
@@ -3476,6 +3826,40 @@ button:hover { background:#1d4ed8; }
 .worker-card.rate-limit-active { border-color:#f59e0b; box-shadow:0 10px 20px rgba(245,158,11,0.15); }
 .worker-card .metric.warning { color:#f59e0b; }
 .worker-progress { margin-top:10px; }
+
+.resource-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; margin-bottom:24px; }
+.resource-card { background:var(--panel-alt); border-radius:14px; padding:20px; border:1px solid #1f2937; box-shadow:0 10px 20px rgba(0,0,0,0.2); transition:all 0.3s ease; }
+.resource-card h3 { margin:0 0 8px 0; font-size:15px; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; }
+.resource-metric { font-size:36px; font-weight:700; margin:8px 0; }
+.resource-card.warning { border-color:#f59e0b; box-shadow:0 10px 20px rgba(245,158,11,0.2); }
+.resource-card.warning .resource-metric { color:#f59e0b; }
+.resource-card.critical { border-color:#dc2626; box-shadow:0 10px 20px rgba(220,38,38,0.2); }
+.resource-card.critical .resource-metric { color:#dc2626; }
+.resource-details { margin-top:12px; padding-top:12px; border-top:1px solid #1f2937; }
+.resource-detail-item { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; }
+.resource-label { color:var(--muted); }
+.resource-value { color:var(--text); font-weight:500; }
+
+.resource-warnings-section { background:var(--panel-alt); border-radius:14px; padding:20px; margin-bottom:24px; border-left:4px solid #f59e0b; }
+.resource-warnings-section h3 { margin:0 0 16px 0; color:#f59e0b; }
+.resource-warning { padding:12px 16px; margin-bottom:8px; border-radius:8px; font-size:14px; }
+.resource-warning.warning { background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); color:#fbbf24; }
+.resource-warning.critical { background:rgba(220,38,38,0.1); border:1px solid rgba(220,38,38,0.3); color:#ef4444; }
+
+.resource-history { background:var(--panel-alt); border-radius:14px; padding:20px; margin-bottom:24px; border:1px solid #1f2937; }
+.resource-history h3 { margin:0 0 16px 0; font-size:15px; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; }
+.resource-history-grid { display:grid; gap:16px; }
+.resource-history-item { display:grid; grid-template-columns:80px 1fr 60px; align-items:center; gap:12px; padding:12px; background:var(--panel); border-radius:8px; }
+.resource-history-label { font-size:13px; font-weight:600; color:var(--muted); }
+.resource-history-sparkline { display:flex; align-items:flex-end; gap:2px; height:50px; }
+.sparkline-bar { flex:1; min-width:2px; border-radius:2px 2px 0 0; transition:all 0.3s ease; }
+.resource-history-current { font-size:16px; font-weight:700; text-align:right; }
+
+.resource-network { background:var(--panel-alt); border-radius:14px; padding:20px; border:1px solid #1f2937; }
+.resource-network h3 { margin:0 0 16px 0; font-size:15px; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; }
+.resource-network-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+.resource-network-item { padding:12px; background:var(--panel); border-radius:8px; display:flex; justify-content:space-between; }
+
 .workflow-stage { margin-bottom:24px; }
 .workflow-stage-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
 .workflow-stage-title::before { content:'▸'; color:#3b82f6; }
@@ -3651,6 +4035,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="launch" href="#launch">Launch Scan</a>
       <a class="nav-link" data-view="jobs" href="#jobs">Active Jobs</a>
       <a class="nav-link" data-view="workers" href="#workers">Workers</a>
+      <a class="nav-link" data-view="resources" href="#resources">System Resources</a>
       <a class="nav-link" data-view="queue" href="#queue">Queue</a>
       <a class="nav-link" data-view="reports" href="#reports">Reports</a>
       <a class="nav-link" data-view="gallery" href="#gallery">Gallery</a>
@@ -3749,6 +4134,16 @@ button:hover { background:#1d4ed8; }
       <div class="module-header"><h2>Workers</h2></div>
       <div class="module-body" id="workers-body">
         <div class="section-placeholder">Loading worker data…</div>
+      </div>
+    </section>
+
+    <section class="module" data-view="resources">
+      <div class="module-header">
+        <h2>System Resources</h2>
+        <p class="muted">Real-time monitoring of system resource usage</p>
+      </div>
+      <div class="module-body" id="resources-body">
+        <div class="section-placeholder">Loading system resource data…</div>
       </div>
     </section>
 
@@ -4877,6 +5272,241 @@ function renderWorkers(workers) {
     }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
   workersBody.innerHTML = `<div class="worker-grid">${jobCard}${rateLimitCard}${toolCards}</div>`;
+}
+
+function renderSystemResources(data) {
+  const resourcesBody = document.getElementById('resources-body');
+  if (!resourcesBody) return;
+  
+  if (!data || !data.current || !data.current.available) {
+    const errorMsg = data && data.current ? data.current.error : 'System resource monitoring unavailable';
+    resourcesBody.innerHTML = `<div class="section-placeholder">⚠️ ${escapeHtml(errorMsg)}</div>`;
+    return;
+  }
+  
+  const current = data.current;
+  const history = data.history || [];
+  
+  // Helper to get status class
+  function getStatusClass(percent, criticalThreshold, warningThreshold) {
+    if (percent >= criticalThreshold) return 'critical';
+    if (percent >= warningThreshold) return 'warning';
+    return 'normal';
+  }
+  
+  // CPU metrics
+  const cpu = current.cpu || {};
+  const cpuPercent = cpu.percent || 0;
+  const cpuClass = getStatusClass(cpuPercent, 90, 75);
+  
+  // Memory metrics
+  const memory = current.memory || {};
+  const memPercent = memory.percent || 0;
+  const memClass = getStatusClass(memPercent, 90, 80);
+  
+  // Disk metrics
+  const disk = current.disk || {};
+  const diskPercent = disk.percent || 0;
+  const diskClass = getStatusClass(diskPercent, 95, 85);
+  
+  // Process metrics
+  const process = current.process || {};
+  
+  // Warnings
+  const warnings = current.warnings || [];
+  let warningsHtml = '';
+  if (warnings.length > 0) {
+    const criticalWarnings = warnings.filter(w => w.severity === 'critical');
+    const normalWarnings = warnings.filter(w => w.severity !== 'critical');
+    
+    const warningItems = [...criticalWarnings, ...normalWarnings].map(w => {
+      const icon = w.severity === 'critical' ? '🔴' : '⚠️';
+      const cls = w.severity === 'critical' ? 'critical' : 'warning';
+      return `<div class="resource-warning ${cls}">${icon} ${escapeHtml(w.message)}</div>`;
+    }).join('');
+    
+    warningsHtml = `
+      <div class="resource-warnings-section">
+        <h3>⚠️ Resource Warnings (${warnings.length})</h3>
+        ${warningItems}
+      </div>
+    `;
+  }
+  
+  // Build main metrics grid
+  const metricsHtml = `
+    <div class="resource-grid">
+      <div class="resource-card ${cpuClass}">
+        <h3>CPU Usage</h3>
+        <div class="resource-metric">${cpuPercent.toFixed(1)}%</div>
+        <div class="muted">${cpu.count_logical || 0} logical cores</div>
+        <div class="worker-progress">${renderProgress(cpuPercent, cpuClass === 'normal' ? 'completed' : 'running')}</div>
+        <div class="resource-details">
+          <div class="resource-detail-item">
+            <span class="resource-label">Load Average:</span>
+            <span class="resource-value">${cpu.load_avg_1m || 0} / ${cpu.load_avg_5m || 0} / ${cpu.load_avg_15m || 0}</span>
+          </div>
+          ${cpu.frequency_mhz ? `
+          <div class="resource-detail-item">
+            <span class="resource-label">Frequency:</span>
+            <span class="resource-value">${cpu.frequency_mhz} MHz</span>
+          </div>
+          ` : ''}
+        </div>
+      </div>
+      
+      <div class="resource-card ${memClass}">
+        <h3>Memory Usage</h3>
+        <div class="resource-metric">${memPercent.toFixed(1)}%</div>
+        <div class="muted">${memory.used_gb || 0} / ${memory.total_gb || 0} GB</div>
+        <div class="worker-progress">${renderProgress(memPercent, memClass === 'normal' ? 'completed' : 'running')}</div>
+        <div class="resource-details">
+          <div class="resource-detail-item">
+            <span class="resource-label">Available:</span>
+            <span class="resource-value">${memory.available_gb || 0} GB</span>
+          </div>
+        </div>
+      </div>
+      
+      <div class="resource-card ${diskClass}">
+        <h3>Disk Usage</h3>
+        <div class="resource-metric">${diskPercent.toFixed(1)}%</div>
+        <div class="muted">${disk.used_gb || 0} / ${disk.total_gb || 0} GB</div>
+        <div class="worker-progress">${renderProgress(diskPercent, diskClass === 'normal' ? 'completed' : 'running')}</div>
+        <div class="resource-details">
+          <div class="resource-detail-item">
+            <span class="resource-label">Free:</span>
+            <span class="resource-value">${disk.free_gb || 0} GB</span>
+          </div>
+        </div>
+      </div>
+      
+      <div class="resource-card">
+        <h3>Application</h3>
+        <div class="resource-metric">${process.cpu_percent || 0}%</div>
+        <div class="muted">${process.memory_mb || 0} MB used</div>
+        <div class="resource-details">
+          <div class="resource-detail-item">
+            <span class="resource-label">Processes:</span>
+            <span class="resource-value">${process.count || 1}</span>
+          </div>
+          <div class="resource-detail-item">
+            <span class="resource-label">Threads:</span>
+            <span class="resource-value">${process.threads || 0}</span>
+          </div>
+          <div class="resource-detail-item">
+            <span class="resource-label">PID:</span>
+            <span class="resource-value">${process.pid || 'N/A'}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Build history chart (simple ASCII-style visualization)
+  let historyHtml = '';
+  if (history.length > 0) {
+    const recentHistory = history.slice(-60); // Last 5 minutes at 5s intervals
+    const maxDataPoints = Math.min(recentHistory.length, 60);
+    const step = Math.ceil(recentHistory.length / maxDataPoints);
+    const chartData = [];
+    
+    for (let i = 0; i < recentHistory.length; i += step) {
+      chartData.push(recentHistory[i]);
+    }
+    
+    // Create simple chart representation
+    const chartWidth = 100;
+    const cpuPoints = chartData.map(d => d.cpu_percent || 0);
+    const memPoints = chartData.map(d => d.memory_percent || 0);
+    
+    const cpuLine = cpuPoints.map(v => Math.round(v)).join(', ');
+    const memLine = memPoints.map(v => Math.round(v)).join(', ');
+    
+    historyHtml = `
+      <div class="resource-history">
+        <h3>Usage History (Last 5 Minutes)</h3>
+        <div class="resource-history-grid">
+          <div class="resource-history-item">
+            <span class="resource-history-label">CPU:</span>
+            <div class="resource-history-sparkline">
+              ${cpuPoints.map((v, i) => {
+                const height = Math.min(100, Math.max(5, v));
+                const color = v > 90 ? '#dc2626' : v > 75 ? '#f59e0b' : '#10b981';
+                return `<div class="sparkline-bar" style="height: ${height}%; background: ${color};" title="${v.toFixed(1)}%"></div>`;
+              }).join('')}
+            </div>
+            <span class="resource-history-current">${cpuPercent.toFixed(1)}%</span>
+          </div>
+          <div class="resource-history-item">
+            <span class="resource-history-label">Memory:</span>
+            <div class="resource-history-sparkline">
+              ${memPoints.map((v, i) => {
+                const height = Math.min(100, Math.max(5, v));
+                const color = v > 90 ? '#dc2626' : v > 80 ? '#f59e0b' : '#3b82f6';
+                return `<div class="sparkline-bar" style="height: ${height}%; background: ${color};" title="${v.toFixed(1)}%"></div>`;
+              }).join('')}
+            </div>
+            <span class="resource-history-current">${memPercent.toFixed(1)}%</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  
+  // Additional system info
+  const networkHtml = `
+    <div class="resource-network">
+      <h3>Network I/O</h3>
+      <div class="resource-network-grid">
+        <div class="resource-network-item">
+          <span class="resource-label">Sent:</span>
+          <span class="resource-value">${formatBytes(current.network?.bytes_sent || 0)}</span>
+        </div>
+        <div class="resource-network-item">
+          <span class="resource-label">Received:</span>
+          <span class="resource-value">${formatBytes(current.network?.bytes_recv || 0)}</span>
+        </div>
+        <div class="resource-network-item">
+          <span class="resource-label">Packets Sent:</span>
+          <span class="resource-value">${formatNumber(current.network?.packets_sent || 0)}</span>
+        </div>
+        <div class="resource-network-item">
+          <span class="resource-label">Packets Received:</span>
+          <span class="resource-value">${formatNumber(current.network?.packets_recv || 0)}</span>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  resourcesBody.innerHTML = warningsHtml + metricsHtml + historyHtml + networkHtml;
+}
+
+// Helper functions for formatting
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function formatNumber(num) {
+  return num.toString().replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",");
+}
+
+async function fetchSystemResources() {
+  try {
+    const resp = await fetch('/api/system-resources');
+    if (!resp.ok) throw new Error('Failed to fetch system resources');
+    const data = await resp.json();
+    renderSystemResources(data);
+  } catch (err) {
+    const resourcesBody = document.getElementById('resources-body');
+    if (resourcesBody) {
+      resourcesBody.innerHTML = `<div class="section-placeholder">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
 }
 
 function closeDetailModal() {
@@ -6075,6 +6705,9 @@ async function fetchState() {
     renderReports(data.targets || {});
     renderMonitors(data.monitors || []);
     renderGallery(data.targets || {});
+    
+    // Fetch and render system resources
+    await fetchSystemResources();
     
     // Update logs view if visible
     const logsSection = document.querySelector('[data-view="logs"]');
@@ -7644,6 +8277,9 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/monitors":
             self._send_json({"monitors": list_monitors()})
             return
+        if self.path == "/api/system-resources":
+            self._send_json(get_system_resource_snapshot())
+            return
         if self.path.startswith("/screenshots/"):
             rel_path = unquote(self.path[len("/screenshots/"):]).lstrip("/")
             if not rel_path:
@@ -7832,6 +8468,7 @@ def run_server(host: str, port: int, interval: int) -> None:
     HTML_REFRESH_SECONDS = max(5, refresh)
     ensure_dirs()
     start_monitor_worker()
+    start_system_resource_worker()  # Start system resource monitoring
     generate_html_dashboard()
     server = ThreadingHTTPServer((host, port), CommandCenterHandler)
     log(f"Recon Command Center available at http://{host}:{port}")
