@@ -59,6 +59,7 @@ HISTORY_DIR = DATA_DIR / "history"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 MONITORS_FILE = DATA_DIR / "monitors.json"
 BACKUPS_DIR = DATA_DIR / "backups"
+COMPLETED_JOBS_FILE = DATA_DIR / "completed_jobs.json"
 
 DEFAULT_INTERVAL = 30
 HTML_REFRESH_SECONDS = DEFAULT_INTERVAL  # default; can be overridden
@@ -158,6 +159,8 @@ TOOL_GATES: Dict[str, ToolGate] = {
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
+COMPLETED_JOBS: Dict[str, Dict[str, Any]] = {}  # Store completed job reports
+MAX_COMPLETED_JOBS_PER_DOMAIN = 10  # Keep last N completed jobs per domain
 JOB_LOCK = threading.Lock()
 PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nmap", "nuclei", "nikto"]
 
@@ -1344,6 +1347,10 @@ def create_backup(name: Optional[str] = None) -> Tuple[bool, str, Optional[str]]
             if SYSTEM_RESOURCE_FILE.exists():
                 tar.add(SYSTEM_RESOURCE_FILE, arcname="system_resources.json")
             
+            # Add completed jobs file
+            if COMPLETED_JOBS_FILE.exists():
+                tar.add(COMPLETED_JOBS_FILE, arcname="completed_jobs.json")
+            
             # Add history directory
             if HISTORY_DIR.exists():
                 tar.add(HISTORY_DIR, arcname="history")
@@ -1402,6 +1409,10 @@ def restore_backup(backup_filename: str) -> Tuple[bool, str]:
                 shutil.copy2(temp_restore / "system_resources.json", SYSTEM_RESOURCE_FILE)
                 restored_files.append("system_resources.json")
             
+            if (temp_restore / "completed_jobs.json").exists():
+                shutil.copy2(temp_restore / "completed_jobs.json", COMPLETED_JOBS_FILE)
+                restored_files.append("completed_jobs.json")
+            
             if (temp_restore / "history").exists():
                 if HISTORY_DIR.exists():
                     shutil.rmtree(HISTORY_DIR)
@@ -1423,6 +1434,13 @@ def restore_backup(backup_filename: str) -> Tuple[bool, str]:
         load_config()
         load_monitors_state()
         load_system_resource_state()
+        
+        # Reload completed jobs
+        global COMPLETED_JOBS
+        loaded_jobs = load_completed_jobs()
+        with JOB_LOCK:
+            COMPLETED_JOBS.clear()
+            COMPLETED_JOBS.update(loaded_jobs)
         
         log(f"✅ Backup restored: {backup_filename} ({len(restored_files)} items)")
         return True, f"Backup restored successfully: {', '.join(restored_files)}"
@@ -1917,6 +1935,71 @@ def save_state(state: Dict[str, Any]) -> None:
         generate_html_dashboard(state)
     except Exception as e:
         log(f"Error refreshing dashboard HTML: {e}")
+
+
+def load_completed_jobs() -> Dict[str, Dict[str, Any]]:
+    """Load completed jobs from disk."""
+    ensure_dirs()
+    if not COMPLETED_JOBS_FILE.exists():
+        return {}
+    try:
+        with open(COMPLETED_JOBS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "jobs" in data:
+            return data["jobs"]
+        return {}
+    except Exception as e:
+        log(f"Error loading completed_jobs.json: {e}")
+        return {}
+
+
+def save_completed_jobs() -> None:
+    """Save completed jobs to disk."""
+    ensure_dirs()
+    with JOB_LOCK:
+        jobs_to_save = copy.deepcopy(COMPLETED_JOBS)
+    
+    try:
+        payload = {
+            "version": 1,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "jobs": jobs_to_save,
+        }
+        tmp_path = COMPLETED_JOBS_FILE.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        tmp_path.replace(COMPLETED_JOBS_FILE)
+    except Exception as e:
+        log(f"Error saving completed_jobs.json: {e}")
+
+
+def add_completed_job(domain: str, job_data: Dict[str, Any]) -> None:
+    """
+    Add a completed job to the completed jobs storage.
+    Keeps only the last MAX_COMPLETED_JOBS_PER_DOMAIN jobs per domain.
+    """
+    with JOB_LOCK:
+        # Remove thread reference as it's not serializable
+        job_copy = copy.deepcopy(job_data)
+        job_copy.pop("thread", None)
+        
+        # Add completion timestamp
+        job_copy["completed_at"] = datetime.now(timezone.utc).isoformat()
+        
+        # Store with a unique key that includes timestamp to allow multiple runs
+        job_key = f"{domain}_{int(time.time())}"
+        COMPLETED_JOBS[job_key] = job_copy
+        
+        # Cleanup old completed jobs for this domain
+        domain_jobs = [(k, v) for k, v in COMPLETED_JOBS.items() if k.startswith(f"{domain}_")]
+        if len(domain_jobs) > MAX_COMPLETED_JOBS_PER_DOMAIN:
+            # Sort by completion time and keep only the most recent
+            domain_jobs.sort(key=lambda x: x[1].get("completed_at", ""), reverse=True)
+            for old_key, _ in domain_jobs[MAX_COMPLETED_JOBS_PER_DOMAIN:]:
+                COMPLETED_JOBS.pop(old_key, None)
+    
+    # Save to disk
+    save_completed_jobs()
 
 
 def _candidate_tool_paths(exe: str) -> List[str]:
@@ -4081,7 +4164,11 @@ def _start_job_thread(job: Dict[str, Any]) -> None:
             log(f"Recon pipeline failed for {domain}: {exc}")
             job_set_status(domain, "failed", f"Fatal error: {exc}")
         finally:
+            # Save the completed job before removing it from running jobs
             with JOB_LOCK:
+                job_record = RUNNING_JOBS.get(domain)
+                if job_record:
+                    add_completed_job(domain, job_record)
                 RUNNING_JOBS.pop(domain, None)
             schedule_jobs()
             cleanup_job_control(domain)
@@ -8066,6 +8153,8 @@ setInterval(fetchState, POLL_INTERVAL);
 def snapshot_running_jobs() -> List[Dict[str, Any]]:
     with JOB_LOCK:
         results = []
+        
+        # Add running jobs
         for domain, job in RUNNING_JOBS.items():
             steps = {name: dict(data) for name, data in (job.get("steps") or {}).items()}
             thread_alive = bool(job.get("thread") and job["thread"].is_alive())
@@ -8084,7 +8173,30 @@ def snapshot_running_jobs() -> List[Dict[str, Any]]:
                 "thread_alive": thread_alive,
                 "steps": steps,
                 "logs": logs,
+                "completed_at": None,
             })
+        
+        # Add completed jobs
+        for job_key, job in COMPLETED_JOBS.items():
+            steps = {name: dict(data) for name, data in (job.get("steps") or {}).items()}
+            logs = [dict(entry) for entry in job.get("logs", [])]
+            results.append({
+                "domain": job.get("domain"),
+                "started": job.get("started"),
+                "queued_at": job.get("queued_at"),
+                "wordlist": job.get("wordlist") or "",
+                "skip_nikto": job.get("skip_nikto", False),
+                "interval": job.get("interval", DEFAULT_INTERVAL),
+                "status": job.get("status", "completed"),
+                "message": job.get("message", ""),
+                "progress": job.get("progress", 100),
+                "last_update": job.get("last_update"),
+                "thread_alive": False,
+                "steps": steps,
+                "logs": logs,
+                "completed_at": job.get("completed_at"),
+            })
+        
         return results
 
 
@@ -9350,11 +9462,19 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str, port: int, interval: int) -> None:
-    global HTML_REFRESH_SECONDS
+    global HTML_REFRESH_SECONDS, COMPLETED_JOBS
     config = get_config()
     refresh = interval or config.get("default_interval", DEFAULT_INTERVAL)
     HTML_REFRESH_SECONDS = max(5, refresh)
     ensure_dirs()
+    
+    # Load completed jobs from disk
+    loaded_jobs = load_completed_jobs()
+    with JOB_LOCK:
+        COMPLETED_JOBS.clear()
+        COMPLETED_JOBS.update(loaded_jobs)
+    log(f"Loaded {len(loaded_jobs)} completed job(s) from disk.")
+    
     start_monitor_worker()
     start_system_resource_worker()  # Start system resource monitoring
     generate_html_dashboard()
