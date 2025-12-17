@@ -156,6 +156,14 @@ PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r",
 RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_LAST_CALL = 0.0
 GLOBAL_RATE_LIMIT_DELAY = 0.0  # seconds between tool calls (0 = no rate limit)
+
+# Timeout tracking for intelligent rate limit adjustment
+TIMEOUT_TRACKER_LOCK = threading.Lock()
+TIMEOUT_TRACKER: Dict[str, Dict[str, Any]] = {}  # domain -> {errors: int, last_error_time: float, backoff_delay: float}
+TIMEOUT_ERROR_THRESHOLD = 3  # Number of errors before increasing rate limit
+TIMEOUT_BACKOFF_INCREMENT = 2.0  # Seconds to add to delay after threshold
+MAX_AUTO_BACKOFF_DELAY = 30.0  # Maximum automatic backoff delay
+
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -196,6 +204,102 @@ class JobControl:
         with self._cond:
             while self._pause_requested:
                 self._cond.wait()
+
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """
+    Check if an error indicates rate limiting or too many requests.
+    """
+    error_str = str(error).lower()
+    error_type = type(error).__name__.lower()
+    
+    # Check for HTTP 429 (Too Many Requests) or 503 (Service Unavailable)
+    if isinstance(error, HTTPError):
+        if error.code in (429, 503):
+            return True
+    
+    # Check for timeout errors
+    if "timeout" in error_str or "timed out" in error_str:
+        return True
+    
+    # Check for connection errors that might indicate rate limiting
+    if "connection" in error_str and ("refused" in error_str or "reset" in error_str):
+        return True
+    
+    # Check for rate limit keywords in error message
+    rate_limit_keywords = ["rate limit", "too many requests", "throttle", "slow down"]
+    if any(keyword in error_str for keyword in rate_limit_keywords):
+        return True
+    
+    return False
+
+
+def track_timeout_error(domain: str, error: Exception, job_domain: Optional[str] = None) -> None:
+    """
+    Track timeout/rate-limit errors for a domain and automatically adjust rate limiting.
+    """
+    global GLOBAL_RATE_LIMIT_DELAY
+    
+    if not is_rate_limit_error(error):
+        return
+    
+    with TIMEOUT_TRACKER_LOCK:
+        if domain not in TIMEOUT_TRACKER:
+            TIMEOUT_TRACKER[domain] = {
+                "errors": 0,
+                "last_error_time": 0.0,
+                "backoff_delay": 0.0,
+            }
+        
+        tracker = TIMEOUT_TRACKER[domain]
+        current_time = time.time()
+        
+        # Reset counter if last error was more than 5 minutes ago
+        if current_time - tracker["last_error_time"] > 300:
+            tracker["errors"] = 0
+            tracker["backoff_delay"] = 0.0
+        
+        tracker["errors"] += 1
+        tracker["last_error_time"] = current_time
+        
+        # If we've hit the threshold, increase rate limiting
+        if tracker["errors"] >= TIMEOUT_ERROR_THRESHOLD:
+            old_delay = GLOBAL_RATE_LIMIT_DELAY
+            new_delay = min(old_delay + TIMEOUT_BACKOFF_INCREMENT, MAX_AUTO_BACKOFF_DELAY)
+            
+            if new_delay > old_delay:
+                GLOBAL_RATE_LIMIT_DELAY = new_delay
+                tracker["backoff_delay"] = new_delay
+                
+                log_msg = (
+                    f"⚠️  Rate limiting detected for {domain} ({tracker['errors']} errors). "
+                    f"Automatically increasing global rate limit from {old_delay:.1f}s to {new_delay:.1f}s. "
+                    f"Error: {str(error)[:100]}"
+                )
+                log(log_msg)
+                
+                if job_domain:
+                    job_log_append(
+                        job_domain,
+                        f"Rate limiting detected. Slowing down requests (delay now {new_delay:.1f}s)",
+                        source="rate-limiter"
+                    )
+                
+                # Reset error counter after adjustment
+                tracker["errors"] = 0
+            else:
+                log_msg = (
+                    f"⚠️  Rate limiting detected for {domain} but already at max backoff "
+                    f"({GLOBAL_RATE_LIMIT_DELAY:.1f}s). Error: {str(error)[:100]}"
+                )
+                log(log_msg)
+                
+                if job_domain:
+                    job_log_append(
+                        job_domain,
+                        f"Rate limiting detected (already at max delay {GLOBAL_RATE_LIMIT_DELAY:.1f}s)",
+                        source="rate-limiter"
+                    )
 
 
 def apply_rate_limit() -> None:
@@ -566,6 +670,8 @@ def process_monitor(monitor_id: str) -> None:
                 target["next_check_ts"] = time.time() + interval
                 _save_monitors_locked()
         log(f"Monitor {monitor_id} fetch failed: {exc}")
+        # Track timeout/rate-limit errors for monitors
+        track_timeout_error(url, exc, None)
         return
     entries = parse_monitor_entries(content)
     entries_map = monitor_copy.get("entries") or {}
@@ -1232,7 +1338,23 @@ def run_subprocess(
                 + display_cmd
                 + "\nstderr: " + stderr_preview
             )
+            
+            # Check if stderr contains rate limit indicators and track them
+            combined_output = stdout + stderr
+            if any(keyword in combined_output.lower() for keyword in 
+                   ["rate limit", "too many requests", "429", "throttle", "slow down"]):
+                if job_domain:
+                    track_timeout_error(job_domain, Exception(stderr_preview), job_domain)
+            
             return False
+
+    except subprocess.TimeoutExpired as e:
+        log(f"Command timeout: {display_cmd}")
+        if job_domain:
+            job_log_append(job_domain, f"Command timeout after {timeout}s", source=step or "system")
+            # Track timeout errors
+            track_timeout_error(job_domain, e, job_domain)
+        return False
 
     except FileNotFoundError:
         log(f"Command not found: {cmd[0]}")
@@ -1244,6 +1366,8 @@ def run_subprocess(
         log("Error running command " + display_cmd + f": {e}")
         if job_domain:
             job_log_append(job_domain, f"Error: {e}", source=step or "system")
+            # Track potential rate limit errors
+            track_timeout_error(job_domain, e, job_domain)
         return False
 
     return True
@@ -1464,6 +1588,8 @@ def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
         log(f"crt.sh enumeration failed for {domain}: {exc}")
         if job_domain:
             job_log_append(job_domain, f"crt.sh error: {exc}", source="crtsh")
+        # Track timeout/rate-limit errors for intelligent backoff
+        track_timeout_error(domain, exc, job_domain)
     return sorted(subs)
 
 
@@ -1777,6 +1903,12 @@ def run_downstream_pipeline(
                 job_log_append(job_domain, "waybackurls slot acquired.", "scheduler")
             urls = waybackurls_enum(domain, job_domain=job_domain)
         log(f"waybackurls found {len(urls)} URLs.")
+        # Store endpoints in state
+        tgt = ensure_target_state(state, domain)
+        existing_endpoints = set(tgt.get("endpoints", []))
+        for url in urls:
+            if url and url not in existing_endpoints:
+                tgt["endpoints"].append(url)
         flags["waybackurls_done"] = True
         save_state(state)
         update_step("waybackurls", status="completed", message=f"waybackurls found {len(urls)} URLs.", progress=100)
@@ -1798,6 +1930,12 @@ def run_downstream_pipeline(
                 job_log_append(job_domain, "gau slot acquired.", "scheduler")
             urls = gau_enum(domain, job_domain=job_domain)
         log(f"gau found {len(urls)} URLs.")
+        # Store endpoints in state
+        tgt = ensure_target_state(state, domain)
+        existing_endpoints = set(tgt.get("endpoints", []))
+        for url in urls:
+            if url and url not in existing_endpoints:
+                tgt["endpoints"].append(url)
         flags["gau_done"] = True
         save_state(state)
         update_step("gau", status="completed", message=f"gau found {len(urls)} URLs.", progress=100)
@@ -2440,6 +2578,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     targets = state.setdefault("targets", {})
     tgt = targets.setdefault(domain, {
         "subdomains": {},
+        "endpoints": [],  # Store discovered URLs from waybackurls and gau
         "flags": {
             "amass_done": False,
             "subfinder_done": False,
@@ -2456,6 +2595,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     })
     # Normalize missing keys
     tgt.setdefault("subdomains", {})
+    tgt.setdefault("endpoints", [])
     tgt.setdefault("flags", {})
     tgt.setdefault("options", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
@@ -3332,6 +3472,9 @@ button:hover { background:#1d4ed8; }
 .worker-card h3 { margin:0 0 8px 0; font-size:15px; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; }
 .worker-card .metric { font-size:32px; font-weight:600; }
 .worker-card .muted { margin-top:4px; }
+.worker-card .warning { margin-top:4px; color:#f59e0b; font-size:12px; }
+.worker-card.rate-limit-active { border-color:#f59e0b; box-shadow:0 10px 20px rgba(245,158,11,0.15); }
+.worker-card .metric.warning { color:#f59e0b; }
 .worker-progress { margin-top:10px; }
 .workflow-stage { margin-bottom:24px; }
 .workflow-stage-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
@@ -3478,6 +3621,15 @@ button:hover { background:#1d4ed8; }
 .error-source { color:#f87171; font-weight:600; }
 .sort-indicator { margin-left:4px; font-size:10px; color:var(--muted); }
 .filter-bar select, .filter-bar input[type="search"] { width:100%; padding:8px; border-radius:8px; border:1px solid #1f2937; background:#0b152c; color:var(--text); }
+.gallery-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:20px; margin-top:20px; }
+.gallery-card { background:var(--panel-alt); border-radius:12px; overflow:hidden; border:1px solid #1f2937; transition:transform .2s ease; }
+.gallery-card:hover { transform:translateY(-4px); }
+.gallery-image { width:100%; height:180px; object-fit:cover; cursor:pointer; background:#0f172a; }
+.gallery-info { padding:14px; }
+.gallery-subdomain { font-weight:600; color:#f1f5f9; margin-bottom:6px; word-break:break-all; font-size:13px; }
+.gallery-url { color:#60a5fa; text-decoration:none; font-size:12px; word-break:break-all; display:block; margin-bottom:8px; }
+.gallery-url:hover { text-decoration:underline; }
+.gallery-meta { font-size:11px; color:var(--muted); }
 @media (max-width: 900px) {
   .app-shell { flex-direction:column; }
   .sidebar { width:100%; height:auto; position:relative; }
@@ -3501,6 +3653,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="workers" href="#workers">Workers</a>
       <a class="nav-link" data-view="queue" href="#queue">Queue</a>
       <a class="nav-link" data-view="reports" href="#reports">Reports</a>
+      <a class="nav-link" data-view="gallery" href="#gallery">Gallery</a>
       <a class="nav-link" data-view="logs" href="#logs">Logs</a>
       <a class="nav-link" data-view="monitors" href="#monitors">Monitors</a>
       <a class="nav-link" data-view="targets" href="#targets">Targets</a>
@@ -3611,6 +3764,21 @@ button:hover { background:#1d4ed8; }
       <div class="module-header"><h2>Reports & Export</h2></div>
       <div class="module-body" id="reports-body">
         <div class="section-placeholder">No data yet.</div>
+      </div>
+    </section>
+
+    <section class="module" data-view="gallery">
+      <div class="module-header"><h2>Screenshot Gallery</h2></div>
+      <div class="module-body" id="gallery-body">
+        <div class="section-placeholder">Select a target from the dropdown to view screenshots.</div>
+        <div style="margin: 20px 0;">
+          <label>Select Target
+            <select id="gallery-target-select" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #1f2937; background: #0b152c; color: var(--text);">
+              <option value="">-- Select a target --</option>
+            </select>
+          </label>
+        </div>
+        <div id="gallery-grid" class="gallery-grid"></div>
       </div>
     </section>
 
@@ -4655,6 +4823,30 @@ function renderWorkers(workers) {
       <div class="worker-progress">${renderProgress(jobPct, (job.active || 0) >= (job.limit || 1) ? 'running' : 'completed')}</div>
     </div>
   `;
+  
+  // Add rate limiting card
+  const rateLimiting = workers.rate_limiting || {};
+  const currentDelay = rateLimiting.current_delay || 0;
+  const maxBackoff = rateLimiting.max_auto_backoff || 30;
+  const timeoutTracker = rateLimiting.timeout_tracker || {};
+  const activeRateLimits = Object.keys(timeoutTracker).length;
+  
+  let rateLimitStatus = 'inactive';
+  let rateLimitClass = 'muted';
+  if (currentDelay > 0) {
+    rateLimitStatus = 'active';
+    rateLimitClass = 'warning';
+  }
+  
+  const rateLimitCard = `
+    <div class="worker-card ${currentDelay > 0 ? 'rate-limit-active' : ''}">
+      <h3>Rate Limiting</h3>
+      <div class="metric ${rateLimitClass}">${currentDelay.toFixed(1)}s</div>
+      <div class="muted">delay between calls</div>
+      ${activeRateLimits > 0 ? `<div class="warning">⚠️ ${activeRateLimits} tracked domain(s)</div>` : ''}
+    </div>
+  `;
+  
   const tools = workers.tools || {};
   const toolCards = Object.keys(tools).sort().map(name => {
     const info = tools[name] || {};
@@ -4684,7 +4876,7 @@ function renderWorkers(workers) {
       `;
     }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
-  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${toolCards}</div>`;
+  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${rateLimitCard}${toolCards}</div>`;
 }
 
 function closeDetailModal() {
@@ -5414,6 +5606,33 @@ function renderReportDetail(domain) {
       ${buildStepChecklist(info)}
     </div>
   `;
+  // Endpoints section (URLs from waybackurls and gau)
+  const endpoints = info.endpoints || [];
+  const endpointsTitle = `Endpoints (${endpoints.length})`;
+  const endpointsBody = endpoints.length > 0 ? `
+    <div class="filter-bar">
+      <input type="search" class="report-search" placeholder="Search endpoints…" data-endpoint-search />
+    </div>
+    <div class="table-wrapper">
+      <table class="targets-table" id="endpoints-table">
+        <thead>
+          <tr>
+            <th>URL</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${endpoints.slice(0, 500).map(url => `
+            <tr data-endpoint="${escapeHtml(url.toLowerCase())}">
+              <td><a href="${escapeHtml(url)}" target="_blank" class="link-btn">${escapeHtml(url)}</a></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${endpoints.length > 500 ? `<p class="muted">Showing first 500 of ${endpoints.length} endpoints</p>` : ''}
+    <div class="table-pagination" id="endpoints-pagination"></div>
+  ` : '<p class="muted">No endpoints discovered yet.</p>';
+  
   const subPaginationId = 'subdomains-pagination';
   const nucleiPaginationId = 'nuclei-pagination';
   const niktoPaginationId = 'nikto-pagination';
@@ -5501,6 +5720,7 @@ function renderReportDetail(domain) {
     </div>
     ${renderCollapsibleSection('overview', 'Overview', overviewBody, true)}
     ${renderCollapsibleSection('subdomains', subdomainsTitle, subdomainsBody, true)}
+    ${endpoints.length > 0 ? renderCollapsibleSection('endpoints', endpointsTitle, endpointsBody, false) : ''}
     ${renderCollapsibleSection('nuclei', nucleiTitle, nucleiContent, nucleiRows.length > 0)}
     ${renderCollapsibleSection('nikto', niktoTitle, niktoContent, false)}
     ${renderCollapsibleSection('commands', 'Command History', commandsBody, false)}
@@ -5511,6 +5731,10 @@ function renderReportDetail(domain) {
   initPagination(detail.querySelector('#subdomains-table'), detail.querySelector('#' + subPaginationId), DEFAULT_PAGE_SIZE);
   initPagination(detail.querySelector('#nuclei-table'), detail.querySelector('#' + nucleiPaginationId), DEFAULT_PAGE_SIZE);
   initPagination(detail.querySelector('#nikto-table'), detail.querySelector('#' + niktoPaginationId), DEFAULT_PAGE_SIZE);
+  if (endpoints.length > 0) {
+    initPagination(detail.querySelector('#endpoints-table'), detail.querySelector('#endpoints-pagination'), DEFAULT_PAGE_SIZE);
+    attachEndpointFilter(detail);
+  }
   attachSubdomainFilters(detail);
   attachSeverityFilter(detail.querySelector('[data-nuclei-filter]'), detail.querySelector('#nuclei-table'));
   attachSeverityFilter(detail.querySelector('[data-nikto-filter]'), detail.querySelector('#nikto-table'));
@@ -5565,6 +5789,27 @@ function attachSeverityFilter(wrapper, table) {
     refreshPagination(table);
   };
   checkboxes.forEach(cb => cb.addEventListener('change', apply));
+  apply();
+}
+
+function attachEndpointFilter(detailEl) {
+  const table = detailEl.querySelector('#endpoints-table');
+  if (!table) return;
+  const searchInput = detailEl.querySelector('[data-endpoint-search]');
+  if (!searchInput) return;
+  
+  const apply = () => {
+    const query = (searchInput.value || '').trim().toLowerCase();
+    const rows = table.tBodies[0] ? Array.from(table.tBodies[0].rows) : [];
+    rows.forEach(row => {
+      const endpoint = row.dataset.endpoint || '';
+      const matchesSearch = !query || endpoint.includes(query);
+      row.dataset.filterHidden = matchesSearch ? 'false' : 'true';
+    });
+    refreshPagination(table);
+  };
+  
+  searchInput.addEventListener('input', apply);
   apply();
 }
 
@@ -5829,6 +6074,7 @@ async function fetchState() {
     renderWorkers(data.workers || {});
     renderReports(data.targets || {});
     renderMonitors(data.monitors || []);
+    renderGallery(data.targets || {});
     
     // Update logs view if visible
     const logsSection = document.querySelector('[data-view="logs"]');
@@ -6197,6 +6443,182 @@ if (logClearFilters) {
 // Load saved filters on page load
 loadLogFilters();
 
+// ================== GALLERY RENDERING ==================
+
+const galleryTargetSelect = document.getElementById('gallery-target-select');
+const galleryGrid = document.getElementById('gallery-grid');
+
+function renderGallery(targets) {
+  // Update target dropdown
+  if (galleryTargetSelect) {
+    const options = '<option value="">-- Select a target --</option>' +
+      Object.keys(targets).sort().map(domain => 
+        `<option value="${escapeHtml(domain)}">${escapeHtml(domain)}</option>`
+      ).join('');
+    galleryTargetSelect.innerHTML = options;
+  }
+}
+
+if (galleryTargetSelect) {
+  galleryTargetSelect.addEventListener('change', async (e) => {
+    const domain = e.target.value;
+    if (!domain || !galleryGrid) {
+      if (galleryGrid) galleryGrid.innerHTML = '';
+      return;
+    }
+    
+    galleryGrid.innerHTML = '<div class="section-placeholder">Loading screenshots...</div>';
+    
+    try {
+      const resp = await fetch(`/api/gallery/${encodeURIComponent(domain)}`);
+      if (!resp.ok) throw new Error('Failed to load gallery');
+      const data = await resp.json();
+      
+      if (!data.success) {
+        galleryGrid.innerHTML = `<div class="section-placeholder">${escapeHtml(data.message || 'Failed to load gallery')}</div>`;
+        return;
+      }
+      
+      const screenshots = data.screenshots || [];
+      if (screenshots.length === 0) {
+        galleryGrid.innerHTML = '<div class="section-placeholder">No screenshots available for this target.</div>';
+        return;
+      }
+      
+      const html = screenshots.map(shot => {
+        const statusClass = shot.status_code >= 200 && shot.status_code < 300 ? 'status-2xx' :
+                            shot.status_code >= 300 && shot.status_code < 400 ? 'status-3xx' :
+                            shot.status_code >= 400 && shot.status_code < 500 ? 'status-4xx' : 'status-5xx';
+        const statusBadge = shot.status_code ? `<span class="status-badge ${statusClass}">${shot.status_code}</span>` : '';
+        
+        return `
+          <div class="gallery-card">
+            <img class="gallery-image" src="/screenshots/${escapeHtml(shot.path)}" 
+                 alt="${escapeHtml(shot.subdomain)}" 
+                 onclick="window.open('/screenshots/${escapeHtml(shot.path)}', '_blank')" />
+            <div class="gallery-info">
+              <div class="gallery-subdomain">${escapeHtml(shot.subdomain)}</div>
+              <a href="${escapeHtml(shot.url)}" target="_blank" class="gallery-url">${escapeHtml(shot.url)}</a>
+              <div class="gallery-meta">
+                ${statusBadge}
+                ${shot.title ? `<span class="badge">${escapeHtml(shot.title)}</span>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+      
+      galleryGrid.innerHTML = html;
+    } catch (err) {
+      galleryGrid.innerHTML = `<div class="section-placeholder">Error: ${escapeHtml(err.message)}</div>`;
+    }
+  });
+}
+
+// ================== FILTER PERSISTENCE ==================
+
+// Save and restore report filters
+function saveReportFilters(domain, filters) {
+  try {
+    const key = `reportFilters_${domain}`;
+    localStorage.setItem(key, JSON.stringify(filters));
+  } catch (e) {
+    // Ignore localStorage errors
+  }
+}
+
+function loadReportFilters(domain) {
+  try {
+    const key = `reportFilters_${domain}`;
+    const saved = localStorage.getItem(key);
+    return saved ? JSON.parse(saved) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Save checkbox states
+function saveCheckboxState(id, checked) {
+  try {
+    localStorage.setItem(`checkbox_${id}`, checked ? '1' : '0');
+  } catch (e) {
+    // Ignore
+  }
+}
+
+function loadCheckboxState(id, defaultValue = false) {
+  try {
+    const saved = localStorage.getItem(`checkbox_${id}`);
+    return saved === '1' ? true : saved === '0' ? false : defaultValue;
+  } catch (e) {
+    return defaultValue;
+  }
+}
+
+// Apply to all checkboxes on page
+document.querySelectorAll('input[type="checkbox"][id]').forEach(checkbox => {
+  const savedState = loadCheckboxState(checkbox.id);
+  if (savedState !== null) {
+    checkbox.checked = savedState;
+  }
+  checkbox.addEventListener('change', () => {
+    saveCheckboxState(checkbox.id, checkbox.checked);
+  });
+});
+
+// Enhance attachSubdomainFilters to persist state
+const originalAttachSubdomainFilters = attachSubdomainFilters;
+attachSubdomainFilters = function(detailEl) {
+  originalAttachSubdomainFilters(detailEl);
+  
+  // Load saved filter state if available
+  const domain = detailEl.querySelector('[data-domain]')?.getAttribute('data-domain');
+  if (domain) {
+    const saved = loadReportFilters(domain);
+    if (saved) {
+      const statusGroup = detailEl.querySelector('[data-status-filter]');
+      const searchInput = detailEl.querySelector('[data-sub-search]');
+      
+      if (saved.statusFilters && statusGroup) {
+        statusGroup.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+          if (saved.statusFilters.includes(cb.value)) {
+            cb.checked = true;
+          } else {
+            cb.checked = false;
+          }
+        });
+      }
+      
+      if (saved.searchQuery && searchInput) {
+        searchInput.value = saved.searchQuery;
+      }
+    }
+  }
+  
+  // Save on change
+  const statusGroup = detailEl.querySelector('[data-status-filter]');
+  const searchInput = detailEl.querySelector('[data-sub-search]');
+  
+  const saveFilters = () => {
+    if (domain) {
+      const statusFilters = statusGroup 
+        ? Array.from(statusGroup.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value)
+        : [];
+      const searchQuery = searchInput ? searchInput.value : '';
+      saveReportFilters(domain, { statusFilters, searchQuery });
+    }
+  };
+  
+  if (statusGroup) {
+    statusGroup.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', saveFilters);
+    });
+  }
+  if (searchInput) {
+    searchInput.addEventListener('input', saveFilters);
+  }
+};
+
 renderWorkflowDiagram();
 fetchState();
 setInterval(fetchState, POLL_INTERVAL);
@@ -6266,6 +6688,17 @@ def snapshot_workers() -> Dict[str, Any]:
                 "limit": None,
                 "active": 0,
             }
+    
+    # Include timeout tracking statistics
+    timeout_stats = {}
+    with TIMEOUT_TRACKER_LOCK:
+        for domain, tracker in TIMEOUT_TRACKER.items():
+            timeout_stats[domain] = {
+                "errors": tracker["errors"],
+                "last_error_time": tracker["last_error_time"],
+                "backoff_delay": tracker["backoff_delay"],
+            }
+    
     return {
         "job_slots": {
             "limit": MAX_RUNNING_JOBS,
@@ -6273,6 +6706,11 @@ def snapshot_workers() -> Dict[str, Any]:
             "queue": queue_len,
         },
         "tools": tool_stats,
+        "rate_limiting": {
+            "current_delay": GLOBAL_RATE_LIMIT_DELAY,
+            "max_auto_backoff": MAX_AUTO_BACKOFF_DELAY,
+            "timeout_tracker": timeout_stats,
+        },
     }
 
 
