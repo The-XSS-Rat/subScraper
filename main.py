@@ -6500,6 +6500,33 @@ def build_state_payload() -> Dict[str, Any]:
     }
 
 
+def generate_sidebar_navigation() -> str:
+    """Generate the sidebar navigation HTML for standalone pages."""
+    return """
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">🔍</div>
+      <div class="brand-title">Recon<br>Dashboard</div>
+    </div>
+    <nav class="nav">
+      <a class="nav-link" href="/">Overview</a>
+      <a class="nav-link" href="/#launch">Launch Scan</a>
+      <a class="nav-link" href="/#jobs">Active Jobs</a>
+      <a class="nav-link" href="/#workers">Workers</a>
+      <a class="nav-link" href="/#queue">Queue</a>
+      <a class="nav-link" href="/#reports">Reports</a>
+      <a class="nav-link" href="/#logs">Logs</a>
+      <a class="nav-link" href="/#monitors">Monitors</a>
+      <a class="nav-link" href="/#targets">Targets</a>
+      <a class="nav-link" href="/#settings">Settings</a>
+      <a class="nav-link" href="/#guide">User Guide</a>
+    </nav>
+    <div class="sidebar-footer">
+      <code>subScraper v1.0</code>
+    </div>
+  </aside>"""
+
+
 def generate_subdomain_detail_page(domain: str, subdomain: str) -> str:
     """Generate a standalone page for subdomain details."""
     return f"""<!DOCTYPE html>
@@ -6671,28 +6698,7 @@ img {{
 </head>
 <body>
 <div class="app-shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-icon">🔍</div>
-      <div class="brand-title">Recon<br>Dashboard</div>
-    </div>
-    <nav class="nav">
-      <a class="nav-link" href="/">Overview</a>
-      <a class="nav-link" href="/#launch">Launch Scan</a>
-      <a class="nav-link" href="/#jobs">Active Jobs</a>
-      <a class="nav-link" href="/#workers">Workers</a>
-      <a class="nav-link" href="/#queue">Queue</a>
-      <a class="nav-link" href="/#reports">Reports</a>
-      <a class="nav-link" href="/#logs">Logs</a>
-      <a class="nav-link" href="/#monitors">Monitors</a>
-      <a class="nav-link" href="/#targets">Targets</a>
-      <a class="nav-link" href="/#settings">Settings</a>
-      <a class="nav-link" href="/#guide">User Guide</a>
-    </nav>
-    <div class="sidebar-footer">
-      <code>subScraper v1.0</code>
-    </div>
-  </aside>
+  {generate_sidebar_navigation()}
   <div class="main-content">
     <div class="container">
       <div class="header">
@@ -7083,28 +7089,7 @@ h1 {{
 </head>
 <body>
 <div class="app-shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-icon">🔍</div>
-      <div class="brand-title">Recon<br>Dashboard</div>
-    </div>
-    <nav class="nav">
-      <a class="nav-link" href="/">Overview</a>
-      <a class="nav-link" href="/#launch">Launch Scan</a>
-      <a class="nav-link" href="/#jobs">Active Jobs</a>
-      <a class="nav-link" href="/#workers">Workers</a>
-      <a class="nav-link" href="/#queue">Queue</a>
-      <a class="nav-link" href="/#reports">Reports</a>
-      <a class="nav-link" href="/#logs">Logs</a>
-      <a class="nav-link" href="/#monitors">Monitors</a>
-      <a class="nav-link" href="/#targets">Targets</a>
-      <a class="nav-link" href="/#settings">Settings</a>
-      <a class="nav-link" href="/#guide">User Guide</a>
-    </nav>
-    <div class="sidebar-footer">
-      <code>subScraper v1.0</code>
-    </div>
-  </aside>
+  {generate_sidebar_navigation()}
   <div class="main-content">
     <div class="container">
       <div class="header">
