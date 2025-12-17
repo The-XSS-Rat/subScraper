@@ -68,6 +68,7 @@ TOOLS = {
     "nuclei": "nuclei",
     "nikto": "nikto",
     "gowitness": "gowitness",
+    "nmap": "nmap",
 }
 
 CONFIG_LOCK = threading.Lock()
@@ -83,6 +84,7 @@ TEMPLATE_AWARE_TOOLS = [
     "nuclei",
     "nikto",
     "gowitness",
+    "nmap",
 ]
 
 
@@ -129,12 +131,13 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "nuclei": ToolGate(1),
     "nikto": ToolGate(1),
     "gowitness": ToolGate(1),
+    "nmap": ToolGate(1),
 }
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nmap", "nuclei", "nikto"]
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -262,6 +265,7 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         "nuclei": "max_parallel_nuclei",
         "nikto": "max_parallel_nikto",
         "gowitness": "max_parallel_gowitness",
+        "nmap": "max_parallel_nmap",
     }
     for tool, field in parallel_fields.items():
         gate = TOOL_GATES.setdefault(tool, ToolGate(1))
@@ -339,6 +343,8 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_nuclei": 1,
         "max_parallel_nikto": 1,
         "max_parallel_gowitness": 1,
+        "max_parallel_nmap": 1,
+        "enable_nmap": True,
         "max_running_jobs": 1,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
     }
@@ -1548,6 +1554,54 @@ def run_downstream_pipeline(
             job_log_append(job_domain, f"Captured screenshots for {len(screenshot_map)} hosts.", "screenshots")
             update_step("screenshots", status="running", message=f"Captured {len(screenshot_map)} screenshots. Waiting for new hosts…", progress=75)
 
+    # ---------- nmap ----------
+    if not config.get("enable_nmap", True):
+        state = load_state()
+        flags = ensure_target_state(state, domain)["flags"]
+        update_step("nmap", status="skipped", message="Nmap disabled in settings.", progress=0)
+        flags["nmap_done"] = True
+        save_state(state)
+    else:
+        nmap_processed: set = set()
+        while True:
+            state = load_state()
+            tgt_state = ensure_target_state(state, domain)
+            flags = tgt_state["flags"]
+            submap = tgt_state["subdomains"]
+            # Only scan hosts with HTTP services detected
+            new_hosts = [
+                host for host in sorted(submap.keys())
+                if host not in nmap_processed 
+                and (submap.get(host) or {}).get("httpx")
+                and not (submap.get(host) or {}).get("scans", {}).get("nmap")
+            ]
+            if not flags.get("nmap_done") and not nmap_processed:
+                log(f"=== nmap scan for {domain} ({len(new_hosts)} hosts with HTTP) ===")
+            if not new_hosts:
+                if enumerators_done_event.is_set():
+                    flags["nmap_done"] = True
+                    save_state(state)
+                    update_step("nmap", status="completed", message="Nmap scan finished.", progress=100)
+                    break
+                job_sleep(job_domain, 5)
+                continue
+            update_step("nmap", status="running", message=f"Nmap scanning {len(new_hosts)} pending hosts", progress=40)
+            if job_domain:
+                job_log_append(job_domain, "Waiting for nmap slot...", "scheduler")
+            with TOOL_GATES["nmap"]:
+                if job_domain:
+                    job_log_append(job_domain, "Nmap slot acquired.", "scheduler")
+                nmap_json = nmap_scan(new_hosts, domain, config=config, job_domain=job_domain)
+            if not nmap_json:
+                job_log_append(job_domain, "Nmap batch failed.", "nmap")
+                update_step("nmap", status="error", message="Nmap batch failed. Check logs for details.", progress=100)
+                break
+            enrich_state_with_nmap(state, domain, nmap_json)
+            mark_hosts_scanned(state, domain, new_hosts, "nmap")
+            nmap_processed.update(new_hosts)
+            save_state(state)
+            job_log_append(job_domain, f"Nmap scanned {len(new_hosts)} hosts.", "nmap")
+
     # ---------- nuclei ----------
     nuclei_processed: set = set()
     while True:
@@ -1986,6 +2040,85 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
     return out_json if out_json.exists() else None
 
 
+def nmap_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
+              job_domain: Optional[str] = None) -> Path:
+    """
+    Run nmap port scan on discovered subdomains with live HTTP services.
+    """
+    if not ensure_tool_installed("nmap"):
+        return None
+    out_json = DATA_DIR / f"nmap_{domain}.json"
+
+    results: List[Dict[str, Any]] = []
+    for host in subs:
+        cmd = [
+            TOOLS["nmap"],
+            "-sV",  # Service version detection
+            "-T4",  # Faster timing
+            "--top-ports", "100",  # Scan top 100 ports
+            "-oX", "-",  # Output XML to stdout
+            host,
+        ]
+        context = {
+            "DOMAIN": domain,
+            "SUBDOMAIN": host,
+            "OUTPUT": str(out_json),
+        }
+        cmd = apply_template_flags("nmap", cmd, context, config)
+        log(f"Running nmap against {host}")
+        if job_domain:
+            job_log_append(job_domain, f"Nmap scanning {host}", source="nmap")
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=300,  # 5 minute timeout per host
+            )
+        except FileNotFoundError:
+            log("Nmap binary not found during run.")
+            return None
+        except subprocess.TimeoutExpired:
+            log(f"Nmap timeout for {host}")
+            if job_domain:
+                job_log_append(job_domain, f"Nmap timeout for {host}", source="nmap")
+            continue
+        except Exception as e:
+            log(f"Nmap error for {host}: {e}")
+            if job_domain:
+                job_log_append(job_domain, f"Nmap error for {host}: {e}", source="nmap")
+            continue
+
+        stdout_text = proc.stdout or ""
+        stderr_text = proc.stderr or ""
+        if job_domain and stderr_text:
+            job_log_append(job_domain, stderr_text, source="nmap stderr")
+
+        # Parse basic nmap output - just store the raw XML for now
+        # In a production system, you'd parse the XML properly
+        if stdout_text.strip():
+            results.append({
+                "host": host,
+                "scan_output": stdout_text[:5000],  # Limit output size
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            if job_domain:
+                # Log a summary instead of full output
+                log_summary = f"Nmap completed for {host} ({len(stdout_text)} bytes)"
+                job_log_append(job_domain, log_summary, source="nmap")
+
+    try:
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+    except Exception as e:
+        log(f"Error writing Nmap JSON: {e}")
+        return None
+
+    return out_json if out_json.exists() else None
+
+
 # ================== STATE ENRICHMENT ==================
 
 
@@ -1995,6 +2128,7 @@ def make_subdomain_entry() -> Dict[str, Any]:
         "httpx": None,
         "nuclei": [],
         "nikto": [],
+        "nmap": None,
         "screenshot": None,
         "scans": {},
     }
@@ -2013,6 +2147,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
             "ffuf_done": False,
             "httpx_done": False,
             "screenshots_done": False,
+            "nmap_done": False,
             "nuclei_done": False,
             "nikto_done": False,
         }
@@ -2022,7 +2157,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     tgt.setdefault("flags", {})
     tgt.setdefault("options", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
-              "ffuf_done", "httpx_done", "screenshots_done", "nuclei_done", "nikto_done"]:
+              "ffuf_done", "httpx_done", "screenshots_done", "nmap_done", "nuclei_done", "nikto_done"]:
         tgt["flags"].setdefault(k, False)
     for sub, entry in list(tgt["subdomains"].items()):
         if not isinstance(entry, dict):
@@ -2032,6 +2167,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
         entry.setdefault("httpx", None)
         entry.setdefault("nuclei", [])
         entry.setdefault("nikto", [])
+        entry.setdefault("nmap", None)
         entry.setdefault("screenshot", None)
         entry.setdefault("scans", {})
     return tgt
@@ -2155,6 +2291,31 @@ def enrich_state_with_nikto(state: Dict[str, Any], domain: str, nikto_json: Path
             entry.setdefault("nikto", []).extend(normalized_vulns)
     except Exception as e:
         log(f"Error enriching state with nikto data: {e}")
+
+
+def enrich_state_with_nmap(state: Dict[str, Any], domain: str, nmap_json: Path) -> None:
+    if not nmap_json or not nmap_json.exists():
+        return
+    tgt = ensure_target_state(state, domain)
+    submap = tgt["subdomains"]
+    try:
+        data = json.loads(nmap_json.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            data = [data]
+        for obj in data:
+            host = obj.get("host")
+            if not host:
+                continue
+            host = str(host).lower()
+            entry = submap.setdefault(host, make_subdomain_entry())
+            entry.setdefault("scans", {})
+            # Store nmap scan data
+            entry["nmap"] = {
+                "scan_output": obj.get("scan_output", ""),
+                "timestamp": obj.get("timestamp"),
+            }
+    except Exception as e:
+        log(f"Error enriching state with nmap data: {e}")
 
 
 def enrich_state_with_screenshots(state: Dict[str, Any], domain: str, mapping: Dict[str, Dict[str, Any]]) -> None:
