@@ -68,6 +68,7 @@ TOOLS = {
     "nuclei": "nuclei",
     "nikto": "nikto",
     "gowitness": "gowitness",
+    "nmap": "nmap",
 }
 
 CONFIG_LOCK = threading.Lock()
@@ -83,6 +84,7 @@ TEMPLATE_AWARE_TOOLS = [
     "nuclei",
     "nikto",
     "gowitness",
+    "nmap",
 ]
 
 
@@ -129,12 +131,13 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "nuclei": ToolGate(1),
     "nikto": ToolGate(1),
     "gowitness": ToolGate(1),
+    "nmap": ToolGate(1),
 }
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nmap", "nuclei", "nikto"]
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -262,6 +265,7 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         "nuclei": "max_parallel_nuclei",
         "nikto": "max_parallel_nikto",
         "gowitness": "max_parallel_gowitness",
+        "nmap": "max_parallel_nmap",
     }
     for tool, field in parallel_fields.items():
         gate = TOOL_GATES.setdefault(tool, ToolGate(1))
@@ -339,6 +343,10 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_nuclei": 1,
         "max_parallel_nikto": 1,
         "max_parallel_gowitness": 1,
+        "max_parallel_nmap": 1,
+        "enable_nmap": True,
+        "nmap_timeout": 300,
+        "max_nmap_output_size": 5000,
         "max_running_jobs": 1,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
     }
@@ -1548,6 +1556,54 @@ def run_downstream_pipeline(
             job_log_append(job_domain, f"Captured screenshots for {len(screenshot_map)} hosts.", "screenshots")
             update_step("screenshots", status="running", message=f"Captured {len(screenshot_map)} screenshots. Waiting for new hosts…", progress=75)
 
+    # ---------- nmap ----------
+    if not config.get("enable_nmap", True):
+        state = load_state()
+        flags = ensure_target_state(state, domain)["flags"]
+        update_step("nmap", status="skipped", message="Nmap disabled in settings.", progress=0)
+        flags["nmap_done"] = True
+        save_state(state)
+    else:
+        nmap_processed: set = set()
+        while True:
+            state = load_state()
+            tgt_state = ensure_target_state(state, domain)
+            flags = tgt_state["flags"]
+            submap = tgt_state["subdomains"]
+            # Only scan hosts with HTTP services detected
+            new_hosts = [
+                host for host in sorted(submap.keys())
+                if host not in nmap_processed 
+                and (submap.get(host) or {}).get("httpx")
+                and not (submap.get(host) or {}).get("scans", {}).get("nmap")
+            ]
+            if not flags.get("nmap_done") and not nmap_processed:
+                log(f"=== nmap scan for {domain} ({len(new_hosts)} hosts with HTTP) ===")
+            if not new_hosts:
+                if enumerators_done_event.is_set():
+                    flags["nmap_done"] = True
+                    save_state(state)
+                    update_step("nmap", status="completed", message="Nmap scan finished.", progress=100)
+                    break
+                job_sleep(job_domain, 5)
+                continue
+            update_step("nmap", status="running", message=f"Nmap scanning {len(new_hosts)} pending hosts", progress=40)
+            if job_domain:
+                job_log_append(job_domain, "Waiting for nmap slot...", "scheduler")
+            with TOOL_GATES["nmap"]:
+                if job_domain:
+                    job_log_append(job_domain, "Nmap slot acquired.", "scheduler")
+                nmap_json = nmap_scan(new_hosts, domain, config=config, job_domain=job_domain)
+            if not nmap_json:
+                job_log_append(job_domain, "Nmap batch failed.", "nmap")
+                update_step("nmap", status="error", message="Nmap batch failed. Check logs for details.", progress=100)
+                break
+            enrich_state_with_nmap(state, domain, nmap_json)
+            mark_hosts_scanned(state, domain, new_hosts, "nmap")
+            nmap_processed.update(new_hosts)
+            save_state(state)
+            job_log_append(job_domain, f"Nmap scanned {len(new_hosts)} hosts.", "nmap")
+
     # ---------- nuclei ----------
     nuclei_processed: set = set()
     while True:
@@ -1986,6 +2042,95 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
     return out_json if out_json.exists() else None
 
 
+def nmap_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
+              job_domain: Optional[str] = None) -> Path:
+    """
+    Run nmap port scan on discovered subdomains with live HTTP services.
+    """
+    if not ensure_tool_installed("nmap"):
+        return None
+    out_json = DATA_DIR / f"nmap_{domain}.json"
+
+    results: List[Dict[str, Any]] = []
+    for host in subs:
+        cmd = [
+            TOOLS["nmap"],
+            "-sV",  # Service version detection
+            "-T4",  # Faster timing
+            "--top-ports", "100",  # Scan top 100 ports
+            "-oX", "-",  # Output XML to stdout
+            host,
+        ]
+        context = {
+            "DOMAIN": domain,
+            "SUBDOMAIN": host,
+            "OUTPUT": str(out_json),
+        }
+        cmd = apply_template_flags("nmap", cmd, context, config)
+        log(f"Running nmap against {host}")
+        if job_domain:
+            job_log_append(job_domain, f"Nmap scanning {host}", source="nmap")
+        
+        # Get configurable timeout, default to 300 seconds (5 minutes)
+        nmap_timeout = 300
+        if config:
+            try:
+                nmap_timeout = max(60, int(config.get("nmap_timeout", 300)))
+            except (TypeError, ValueError):
+                nmap_timeout = 300
+        
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=nmap_timeout,
+            )
+        except FileNotFoundError:
+            log("Nmap binary not found during run.")
+            return None
+        except subprocess.TimeoutExpired:
+            log(f"Nmap timeout for {host}")
+            if job_domain:
+                job_log_append(job_domain, f"Nmap timeout for {host}", source="nmap")
+            continue
+        except Exception as e:
+            log(f"Nmap error for {host}: {e}")
+            if job_domain:
+                job_log_append(job_domain, f"Nmap error for {host}: {e}", source="nmap")
+            continue
+
+        stdout_text = proc.stdout or ""
+        stderr_text = proc.stderr or ""
+        if job_domain and stderr_text:
+            job_log_append(job_domain, stderr_text, source="nmap stderr")
+
+        # Store nmap XML output (raw format for future parsing)
+        # Output is stored as-is; consider implementing XML parsing for structured data extraction
+        if stdout_text.strip():
+            max_output_size = config.get("max_nmap_output_size", 5000) if config else 5000
+            results.append({
+                "host": host,
+                "scan_output": stdout_text[:max_output_size],  # Limit output size to prevent excessive storage
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            if job_domain:
+                # Log a summary instead of full output
+                log_summary = f"Nmap completed for {host} ({len(stdout_text)} bytes)"
+                job_log_append(job_domain, log_summary, source="nmap")
+
+    try:
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+    except Exception as e:
+        log(f"Error writing Nmap JSON: {e}")
+        return None
+
+    return out_json if out_json.exists() else None
+
+
 # ================== STATE ENRICHMENT ==================
 
 
@@ -1995,6 +2140,7 @@ def make_subdomain_entry() -> Dict[str, Any]:
         "httpx": None,
         "nuclei": [],
         "nikto": [],
+        "nmap": None,
         "screenshot": None,
         "scans": {},
     }
@@ -2013,6 +2159,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
             "ffuf_done": False,
             "httpx_done": False,
             "screenshots_done": False,
+            "nmap_done": False,
             "nuclei_done": False,
             "nikto_done": False,
         }
@@ -2022,7 +2169,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     tgt.setdefault("flags", {})
     tgt.setdefault("options", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
-              "ffuf_done", "httpx_done", "screenshots_done", "nuclei_done", "nikto_done"]:
+              "ffuf_done", "httpx_done", "screenshots_done", "nmap_done", "nuclei_done", "nikto_done"]:
         tgt["flags"].setdefault(k, False)
     for sub, entry in list(tgt["subdomains"].items()):
         if not isinstance(entry, dict):
@@ -2032,6 +2179,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
         entry.setdefault("httpx", None)
         entry.setdefault("nuclei", [])
         entry.setdefault("nikto", [])
+        entry.setdefault("nmap", None)
         entry.setdefault("screenshot", None)
         entry.setdefault("scans", {})
     return tgt
@@ -2155,6 +2303,31 @@ def enrich_state_with_nikto(state: Dict[str, Any], domain: str, nikto_json: Path
             entry.setdefault("nikto", []).extend(normalized_vulns)
     except Exception as e:
         log(f"Error enriching state with nikto data: {e}")
+
+
+def enrich_state_with_nmap(state: Dict[str, Any], domain: str, nmap_json: Path) -> None:
+    if not nmap_json or not nmap_json.exists():
+        return
+    tgt = ensure_target_state(state, domain)
+    submap = tgt["subdomains"]
+    try:
+        data = json.loads(nmap_json.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            data = [data]
+        for obj in data:
+            host = obj.get("host")
+            if not host:
+                continue
+            host = str(host).lower()
+            entry = submap.setdefault(host, make_subdomain_entry())
+            entry.setdefault("scans", {})
+            # Store nmap scan data
+            entry["nmap"] = {
+                "scan_output": obj.get("scan_output", ""),
+                "timestamp": obj.get("timestamp"),
+            }
+    except Exception as e:
+        log(f"Error enriching state with nmap data: {e}")
 
 
 def enrich_state_with_screenshots(state: Dict[str, Any], domain: str, mapping: Dict[str, Dict[str, Any]]) -> None:
@@ -2850,6 +3023,18 @@ button:hover { background:#1d4ed8; }
 .worker-card .metric { font-size:32px; font-weight:600; }
 .worker-card .muted { margin-top:4px; }
 .worker-progress { margin-top:10px; }
+.workflow-stage { margin-bottom:24px; }
+.workflow-stage-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.workflow-stage-title::before { content:'▸'; color:#3b82f6; }
+.workflow-tools { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.workflow-tool { background:#0b152c; border:1px solid #1f2937; border-radius:8px; padding:8px 14px; font-size:12px; font-weight:500; color:#e2e8f0; display:inline-flex; align-items:center; gap:6px; }
+.workflow-tool.enumeration { border-color:#8b5cf6; background:rgba(139,92,246,0.1); color:#c4b5fd; }
+.workflow-tool.brute-force { border-color:#f59e0b; background:rgba(245,158,11,0.1); color:#fcd34d; }
+.workflow-tool.probing { border-color:#06b6d4; background:rgba(6,182,212,0.1); color:#a5f3fc; }
+.workflow-tool.scanning { border-color:#10b981; background:rgba(16,185,129,0.1); color:#a7f3d0; }
+.workflow-tool.capture { border-color:#6366f1; background:rgba(99,102,241,0.1); color:#c7d2fe; }
+.workflow-arrow { color:#64748b; font-size:18px; }
+.workflow-description { font-size:12px; color:var(--muted); margin-top:8px; margin-left:20px; }
 .btn { display:inline-block; padding:8px 16px; border-radius:8px; background:var(--accent); color:white; font-weight:600; border:none; cursor:pointer; transition:background .2s ease; text-decoration:none; }
 .btn.secondary { background:#1f2937; }
 .btn.small { padding:6px 12px; font-size:13px; }
@@ -3026,6 +3211,11 @@ button:hover { background:#1d4ed8; }
             <div class="label">Known Subdomains</div>
             <div class="value" id="stat-subdomains">0</div>
           </div>
+        </div>
+        <div class="card" style="margin: 24px 0;">
+          <h3>Workflow Pipeline</h3>
+          <p class="muted">Visual representation of how data flows through the reconnaissance tools</p>
+          <div id="workflow-diagram" style="margin-top: 20px;"></div>
         </div>
         <div class="grid-two">
           <div class="card">
@@ -3803,6 +3993,88 @@ function renderTargets(targets) {
   targetsList.innerHTML = cards.join('');
 }
 
+function renderWorkflowDiagram() {
+  const diagram = document.getElementById('workflow-diagram');
+  if (!diagram) return;
+  
+  const html = `
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 1: Subdomain Enumeration</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool enumeration">Amass</span>
+        <span class="workflow-tool enumeration">Subfinder</span>
+        <span class="workflow-tool enumeration">Assetfinder</span>
+        <span class="workflow-tool enumeration">Findomain</span>
+        <span class="workflow-tool enumeration">Sublist3r</span>
+      </div>
+      <div class="workflow-description">Passive and active subdomain discovery using multiple data sources</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 2: Subdomain Brute Force</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool brute-force">FFUF</span>
+      </div>
+      <div class="workflow-description">DNS brute-forcing using wordlist to discover additional subdomains</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 3: HTTP Probing</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool probing">HTTPX</span>
+      </div>
+      <div class="workflow-description">Probe subdomains for live HTTP services and gather response metadata</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool capture">Gowitness</span>
+      </div>
+      <div class="workflow-description">Capture screenshots of live web applications for visual analysis</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 5: Port Scanning</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool scanning">Nmap</span>
+      </div>
+      <div class="workflow-description">Port and service detection on hosts with live HTTP services</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool scanning">Nuclei</span>
+        <span class="workflow-tool scanning">Nikto</span>
+      </div>
+      <div class="workflow-description">Automated vulnerability scanning and security checks on discovered targets</div>
+    </div>
+  `;
+  
+  diagram.innerHTML = html;
+}
+
 function renderWorkers(workers) {
   if (!workers || !workers.job_slots) {
     workersBody.innerHTML = '<div class="section-placeholder">No worker data.</div>';
@@ -3821,17 +4093,31 @@ function renderWorkers(workers) {
   const tools = workers.tools || {};
   const toolCards = Object.keys(tools).sort().map(name => {
     const info = tools[name] || {};
-    const limit = info.limit || 1;
+    const limit = info.limit;
     const active = info.active || 0;
-    const pct = limit ? Math.min(100, Math.round(active / limit * 100)) : 0;
-    return `
-      <div class="worker-card">
-        <h3>${escapeHtml(name)}</h3>
-        <div class="metric">${active}/${limit}</div>
-        <div class="muted">slots in use</div>
-        <div class="worker-progress">${renderProgress(pct, active >= limit ? 'running' : 'completed')}</div>
-      </div>
-    `;
+    
+    // Handle tools with and without concurrency gates
+    if (limit == null) {
+      // Tool without gate - just show as available
+      return `
+        <div class="worker-card">
+          <h3>${escapeHtml(name)}</h3>
+          <div class="metric">Available</div>
+          <div class="muted">no concurrency limit</div>
+        </div>
+      `;
+    } else {
+      // Tool with gate - show active/limit
+      const pct = limit ? Math.min(100, Math.round(active / limit * 100)) : 0;
+      return `
+        <div class="worker-card">
+          <h3>${escapeHtml(name)}</h3>
+          <div class="metric">${active}/${limit}</div>
+          <div class="muted">slots in use</div>
+          <div class="worker-progress">${renderProgress(pct, active >= limit ? 'running' : 'completed')}</div>
+        </div>
+      `;
+    }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
   workersBody.innerHTML = `<div class="worker-grid">${jobCard}${toolCards}</div>`;
 }
@@ -3919,6 +4205,8 @@ function computeReportStats(info) {
   let niktoCount = 0;
   let screenshotCount = 0;
   let maxSeverity = 'NONE';
+  let maxNucleiSeverity = 'NONE';
+  let maxNiktoSeverity = 'NONE';
   let processedSubdomains = 0;
   let pendingSubdomains = 0;
   let pendingHttp = 0;
@@ -3955,11 +4243,17 @@ function computeReportStats(info) {
       if (severityIsHigher(sev, maxSeverity)) {
         maxSeverity = sev;
       }
+      if (severityIsHigher(sev, maxNucleiSeverity)) {
+        maxNucleiSeverity = sev;
+      }
     });
     (entry && entry.nikto || []).forEach(finding => {
       const sev = normalizeSeverity(finding && finding.severity, 'INFO');
       if (severityIsHigher(sev, maxSeverity)) {
         maxSeverity = sev;
+      }
+      if (severityIsHigher(sev, maxNiktoSeverity)) {
+        maxNiktoSeverity = sev;
       }
     });
   });
@@ -3970,6 +4264,8 @@ function computeReportStats(info) {
     nikto: niktoCount,
     screenshots: screenshotCount,
     maxSeverity,
+    maxNucleiSeverity,
+    maxNiktoSeverity,
     processed_subdomains: processedSubdomains,
     pending_subdomains: pendingSubdomains,
     pending_http: pendingHttp,
@@ -4300,6 +4596,12 @@ function renderReportDetail(domain) {
   const maxSeverity = stats.maxSeverity || 'NONE';
   const maxSeverityText = formatSeverityLabel(maxSeverity);
   const maxSeverityFlag = `<span class="severity-flag ${escapeHtml(maxSeverity)}">Max: ${escapeHtml(maxSeverityText)}</span>`;
+  const maxNucleiSeverity = stats.maxNucleiSeverity || 'NONE';
+  const maxNucleiSeverityText = formatSeverityLabel(maxNucleiSeverity);
+  const maxNucleiSeverityFlag = `<span class="severity-flag ${escapeHtml(maxNucleiSeverity)}">Nuclei: ${escapeHtml(maxNucleiSeverityText)}</span>`;
+  const maxNiktoSeverity = stats.maxNiktoSeverity || 'NONE';
+  const maxNiktoSeverityText = formatSeverityLabel(maxNiktoSeverity);
+  const maxNiktoSeverityFlag = `<span class="severity-flag ${escapeHtml(maxNiktoSeverity)}">Nikto: ${escapeHtml(maxNiktoSeverityText)}</span>`;
   const activeJob = hasActiveJob(domain);
   const canResume = info.pending && !activeJob;
   const resumeButton = canResume ? `<button class="btn small" data-resume-target="${escapeHtml(domain)}">Resume Scan</button>` : '';
@@ -4391,8 +4693,16 @@ function renderReportDetail(domain) {
         <div class="value">${stats.screenshots}</div>
       </div>
       <div class="report-stat">
-        <div class="label">Max severity</div>
+        <div class="label">Max severity (Overall)</div>
         <div class="value">${maxSeverityFlag}</div>
+      </div>
+      <div class="report-stat">
+        <div class="label">Highest Nuclei</div>
+        <div class="value">${maxNucleiSeverityFlag}</div>
+      </div>
+      <div class="report-stat">
+        <div class="label">Highest Nikto</div>
+        <div class="value">${maxNiktoSeverityFlag}</div>
       </div>
     </div>
     <div class="report-stats-grid">
@@ -4945,6 +5255,7 @@ if (monitorsList) {
   });
 }
 
+renderWorkflowDiagram();
 fetchState();
 setInterval(fetchState, POLL_INTERVAL);
 </script>
@@ -5001,10 +5312,18 @@ def snapshot_workers() -> Dict[str, Any]:
     with JOB_LOCK:
         active_jobs = count_active_jobs_locked()
         queue_len = len(JOB_QUEUE)
-    tool_stats = {
-        name: gate.snapshot()
-        for name, gate in TOOL_GATES.items()
-    }
+    # Include all tools with their gate information if they have one
+    tool_stats = {}
+    for name in TOOLS.keys():
+        if name in TOOL_GATES:
+            # Tool has a gate, show active/limit
+            tool_stats[name] = TOOL_GATES[name].snapshot()
+        else:
+            # Tool without gate, show as available but no concurrency limit
+            tool_stats[name] = {
+                "limit": None,
+                "active": 0,
+            }
     return {
         "job_slots": {
             "limit": MAX_RUNNING_JOBS,
