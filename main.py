@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
@@ -1198,13 +1199,17 @@ def calculate_optimal_jobs() -> int:
         # Reduce if CPU is high
         if cpu_percent > DYNAMIC_MODE_CPU_THRESHOLD:
             # Scale down based on how much we're over threshold
-            overage = (cpu_percent - DYNAMIC_MODE_CPU_THRESHOLD) / (100 - DYNAMIC_MODE_CPU_THRESHOLD)
+            # Avoid division by zero when threshold is 100%
+            denominator = max(1.0, 100 - DYNAMIC_MODE_CPU_THRESHOLD)
+            overage = (cpu_percent - DYNAMIC_MODE_CPU_THRESHOLD) / denominator
             reduction = int((DYNAMIC_MODE_MAX_JOBS - DYNAMIC_MODE_BASE_JOBS) * overage)
             recommended_jobs = max(DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS - reduction)
         
         # Reduce if memory is high
         if memory_percent > DYNAMIC_MODE_MEMORY_THRESHOLD:
-            overage = (memory_percent - DYNAMIC_MODE_MEMORY_THRESHOLD) / (100 - DYNAMIC_MODE_MEMORY_THRESHOLD)
+            # Avoid division by zero when threshold is 100%
+            denominator = max(1.0, 100 - DYNAMIC_MODE_MEMORY_THRESHOLD)
+            overage = (memory_percent - DYNAMIC_MODE_MEMORY_THRESHOLD) / denominator
             reduction = int((DYNAMIC_MODE_MAX_JOBS - DYNAMIC_MODE_BASE_JOBS) * overage)
             recommended_jobs = min(recommended_jobs, max(DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS - reduction))
         
@@ -1322,7 +1327,6 @@ def create_backup(name: Optional[str] = None) -> Tuple[bool, str, Optional[str]]
         backup_path = BACKUPS_DIR / backup_name
         
         # Create tarball
-        import tarfile
         with tarfile.open(backup_path, "w:gz") as tar:
             # Add state file
             if STATE_FILE.exists():
@@ -1373,7 +1377,6 @@ def restore_backup(backup_filename: str) -> Tuple[bool, str]:
         temp_restore.mkdir(exist_ok=True)
         
         # Extract backup
-        import tarfile
         with tarfile.open(backup_path, "r:gz") as tar:
             tar.extractall(temp_restore)
         
@@ -9093,16 +9096,27 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/backup/download/"):
             backup_filename = unquote(self.path[len("/api/backup/download/"):])
             backup_path = BACKUPS_DIR / backup_filename
-            if not backup_path.exists() or not backup_path.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND, "Backup not found")
-                return
-            # Security check
+            
+            # Security check: prevent path traversal and symlink attacks
             try:
-                if not str(backup_path.resolve()).startswith(str(BACKUPS_DIR.resolve())):
+                resolved_backup = backup_path.resolve()
+                resolved_backups_dir = BACKUPS_DIR.resolve()
+                
+                # Check if resolved path is within backups directory
+                if not str(resolved_backup).startswith(str(resolved_backups_dir) + os.sep):
                     raise ValueError("Outside backups dir")
+                
+                # Check if it's a symlink (additional security)
+                if backup_path.is_symlink():
+                    raise ValueError("Symlinks not allowed")
+                
+                # Verify file exists and is a regular file
+                if not resolved_backup.exists() or not resolved_backup.is_file():
+                    raise ValueError("Not a valid file")
             except Exception:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
+            
             data = backup_path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/gzip")
