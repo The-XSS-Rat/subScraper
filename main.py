@@ -156,6 +156,14 @@ PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r",
 RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_LAST_CALL = 0.0
 GLOBAL_RATE_LIMIT_DELAY = 0.0  # seconds between tool calls (0 = no rate limit)
+
+# Timeout tracking for intelligent rate limit adjustment
+TIMEOUT_TRACKER_LOCK = threading.Lock()
+TIMEOUT_TRACKER: Dict[str, Dict[str, Any]] = {}  # domain -> {errors: int, last_error_time: float, backoff_delay: float}
+TIMEOUT_ERROR_THRESHOLD = 3  # Number of errors before increasing rate limit
+TIMEOUT_BACKOFF_INCREMENT = 2.0  # Seconds to add to delay after threshold
+MAX_AUTO_BACKOFF_DELAY = 30.0  # Maximum automatic backoff delay
+
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -196,6 +204,102 @@ class JobControl:
         with self._cond:
             while self._pause_requested:
                 self._cond.wait()
+
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """
+    Check if an error indicates rate limiting or too many requests.
+    """
+    error_str = str(error).lower()
+    error_type = type(error).__name__.lower()
+    
+    # Check for HTTP 429 (Too Many Requests) or 503 (Service Unavailable)
+    if isinstance(error, HTTPError):
+        if error.code in (429, 503):
+            return True
+    
+    # Check for timeout errors
+    if "timeout" in error_str or "timed out" in error_str:
+        return True
+    
+    # Check for connection errors that might indicate rate limiting
+    if "connection" in error_str and ("refused" in error_str or "reset" in error_str):
+        return True
+    
+    # Check for rate limit keywords in error message
+    rate_limit_keywords = ["rate limit", "too many requests", "throttle", "slow down"]
+    if any(keyword in error_str for keyword in rate_limit_keywords):
+        return True
+    
+    return False
+
+
+def track_timeout_error(domain: str, error: Exception, job_domain: Optional[str] = None) -> None:
+    """
+    Track timeout/rate-limit errors for a domain and automatically adjust rate limiting.
+    """
+    global GLOBAL_RATE_LIMIT_DELAY
+    
+    if not is_rate_limit_error(error):
+        return
+    
+    with TIMEOUT_TRACKER_LOCK:
+        if domain not in TIMEOUT_TRACKER:
+            TIMEOUT_TRACKER[domain] = {
+                "errors": 0,
+                "last_error_time": 0.0,
+                "backoff_delay": 0.0,
+            }
+        
+        tracker = TIMEOUT_TRACKER[domain]
+        current_time = time.time()
+        
+        # Reset counter if last error was more than 5 minutes ago
+        if current_time - tracker["last_error_time"] > 300:
+            tracker["errors"] = 0
+            tracker["backoff_delay"] = 0.0
+        
+        tracker["errors"] += 1
+        tracker["last_error_time"] = current_time
+        
+        # If we've hit the threshold, increase rate limiting
+        if tracker["errors"] >= TIMEOUT_ERROR_THRESHOLD:
+            old_delay = GLOBAL_RATE_LIMIT_DELAY
+            new_delay = min(old_delay + TIMEOUT_BACKOFF_INCREMENT, MAX_AUTO_BACKOFF_DELAY)
+            
+            if new_delay > old_delay:
+                GLOBAL_RATE_LIMIT_DELAY = new_delay
+                tracker["backoff_delay"] = new_delay
+                
+                log_msg = (
+                    f"⚠️  Rate limiting detected for {domain} ({tracker['errors']} errors). "
+                    f"Automatically increasing global rate limit from {old_delay:.1f}s to {new_delay:.1f}s. "
+                    f"Error: {str(error)[:100]}"
+                )
+                log(log_msg)
+                
+                if job_domain:
+                    job_log_append(
+                        job_domain,
+                        f"Rate limiting detected. Slowing down requests (delay now {new_delay:.1f}s)",
+                        source="rate-limiter"
+                    )
+                
+                # Reset error counter after adjustment
+                tracker["errors"] = 0
+            else:
+                log_msg = (
+                    f"⚠️  Rate limiting detected for {domain} but already at max backoff "
+                    f"({GLOBAL_RATE_LIMIT_DELAY:.1f}s). Error: {str(error)[:100]}"
+                )
+                log(log_msg)
+                
+                if job_domain:
+                    job_log_append(
+                        job_domain,
+                        f"Rate limiting detected (already at max delay {GLOBAL_RATE_LIMIT_DELAY:.1f}s)",
+                        source="rate-limiter"
+                    )
 
 
 def apply_rate_limit() -> None:
@@ -566,6 +670,8 @@ def process_monitor(monitor_id: str) -> None:
                 target["next_check_ts"] = time.time() + interval
                 _save_monitors_locked()
         log(f"Monitor {monitor_id} fetch failed: {exc}")
+        # Track timeout/rate-limit errors for monitors
+        track_timeout_error(url, exc, None)
         return
     entries = parse_monitor_entries(content)
     entries_map = monitor_copy.get("entries") or {}
@@ -1232,7 +1338,23 @@ def run_subprocess(
                 + display_cmd
                 + "\nstderr: " + stderr_preview
             )
+            
+            # Check if stderr contains rate limit indicators and track them
+            combined_output = stdout + stderr
+            if any(keyword in combined_output.lower() for keyword in 
+                   ["rate limit", "too many requests", "429", "throttle", "slow down"]):
+                if job_domain:
+                    track_timeout_error(job_domain, Exception(stderr_preview), job_domain)
+            
             return False
+
+    except subprocess.TimeoutExpired as e:
+        log(f"Command timeout: {display_cmd}")
+        if job_domain:
+            job_log_append(job_domain, f"Command timeout after {timeout}s", source=step or "system")
+            # Track timeout errors
+            track_timeout_error(job_domain, e, job_domain)
+        return False
 
     except FileNotFoundError:
         log(f"Command not found: {cmd[0]}")
@@ -1244,6 +1366,8 @@ def run_subprocess(
         log("Error running command " + display_cmd + f": {e}")
         if job_domain:
             job_log_append(job_domain, f"Error: {e}", source=step or "system")
+            # Track potential rate limit errors
+            track_timeout_error(job_domain, e, job_domain)
         return False
 
     return True
@@ -1464,6 +1588,8 @@ def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
         log(f"crt.sh enumeration failed for {domain}: {exc}")
         if job_domain:
             job_log_append(job_domain, f"crt.sh error: {exc}", source="crtsh")
+        # Track timeout/rate-limit errors for intelligent backoff
+        track_timeout_error(domain, exc, job_domain)
     return sorted(subs)
 
 
@@ -3332,6 +3458,9 @@ button:hover { background:#1d4ed8; }
 .worker-card h3 { margin:0 0 8px 0; font-size:15px; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; }
 .worker-card .metric { font-size:32px; font-weight:600; }
 .worker-card .muted { margin-top:4px; }
+.worker-card .warning { margin-top:4px; color:#f59e0b; font-size:12px; }
+.worker-card.rate-limit-active { border-color:#f59e0b; box-shadow:0 10px 20px rgba(245,158,11,0.15); }
+.worker-card .metric.warning { color:#f59e0b; }
 .worker-progress { margin-top:10px; }
 .workflow-stage { margin-bottom:24px; }
 .workflow-stage-title { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#93c5fd; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
@@ -4655,6 +4784,30 @@ function renderWorkers(workers) {
       <div class="worker-progress">${renderProgress(jobPct, (job.active || 0) >= (job.limit || 1) ? 'running' : 'completed')}</div>
     </div>
   `;
+  
+  // Add rate limiting card
+  const rateLimiting = workers.rate_limiting || {};
+  const currentDelay = rateLimiting.current_delay || 0;
+  const maxBackoff = rateLimiting.max_auto_backoff || 30;
+  const timeoutTracker = rateLimiting.timeout_tracker || {};
+  const activeRateLimits = Object.keys(timeoutTracker).length;
+  
+  let rateLimitStatus = 'inactive';
+  let rateLimitClass = 'muted';
+  if (currentDelay > 0) {
+    rateLimitStatus = 'active';
+    rateLimitClass = 'warning';
+  }
+  
+  const rateLimitCard = `
+    <div class="worker-card ${currentDelay > 0 ? 'rate-limit-active' : ''}">
+      <h3>Rate Limiting</h3>
+      <div class="metric ${rateLimitClass}">${currentDelay.toFixed(1)}s</div>
+      <div class="muted">delay between calls</div>
+      ${activeRateLimits > 0 ? `<div class="warning">⚠️ ${activeRateLimits} tracked domain(s)</div>` : ''}
+    </div>
+  `;
+  
   const tools = workers.tools || {};
   const toolCards = Object.keys(tools).sort().map(name => {
     const info = tools[name] || {};
@@ -4684,7 +4837,7 @@ function renderWorkers(workers) {
       `;
     }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
-  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${toolCards}</div>`;
+  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${rateLimitCard}${toolCards}</div>`;
 }
 
 function closeDetailModal() {
@@ -6266,6 +6419,17 @@ def snapshot_workers() -> Dict[str, Any]:
                 "limit": None,
                 "active": 0,
             }
+    
+    # Include timeout tracking statistics
+    timeout_stats = {}
+    with TIMEOUT_TRACKER_LOCK:
+        for domain, tracker in TIMEOUT_TRACKER.items():
+            timeout_stats[domain] = {
+                "errors": tracker["errors"],
+                "last_error_time": tracker["last_error_time"],
+                "backoff_delay": tracker["backoff_delay"],
+            }
+    
     return {
         "job_slots": {
             "limit": MAX_RUNNING_JOBS,
@@ -6273,6 +6437,11 @@ def snapshot_workers() -> Dict[str, Any]:
             "queue": queue_len,
         },
         "tools": tool_stats,
+        "rate_limiting": {
+            "current_delay": GLOBAL_RATE_LIMIT_DELAY,
+            "max_auto_backoff": MAX_AUTO_BACKOFF_DELAY,
+            "timeout_tracker": timeout_stats,
+        },
     }
 
 
