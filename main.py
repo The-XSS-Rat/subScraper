@@ -5708,7 +5708,6 @@ if (resumeAllBtn) {
       const resp = await fetch('/api/jobs/resume-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
       });
       const data = await resp.json();
       resumeAllBtn.textContent = data.message || 'Done';
@@ -6653,7 +6652,7 @@ function fmtTime(iso) {{
   try {{
     const date = new Date(iso);
     return date.toLocaleString();
-  }} catch {{
+  }} catch (_) {{
     return iso;
   }}
 }}
@@ -7000,7 +6999,7 @@ function fmtTime(iso) {{
   try {{
     const date = new Date(iso);
     return date.toLocaleString();
-  }} catch {{
+  }} catch (_) {{
     return iso;
   }}
 }}
