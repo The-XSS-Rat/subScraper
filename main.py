@@ -5615,12 +5615,21 @@ function renderJobStep(name, info = {}) {
 function renderJobs(jobs) {
   const all = Array.isArray(jobs) ? jobs : [];
   const running = all.filter(job => job.status !== 'queued');
-  statActive.textContent = running.length;
+  const activeJobs = running.filter(job => !job.completed_at);
+  const completedJobs = running.filter(job => job.completed_at);
+  
+  // Update the stat to show active + completed
+  statActive.textContent = `${activeJobs.length}${completedJobs.length > 0 ? ` (+ ${completedJobs.length} completed)` : ''}`;
+  
   if (!running.length) {
     jobsList.innerHTML = '<div class="section-placeholder">No active jobs.</div>';
     return;
   }
-  const cards = running.map(job => {
+  
+  // Render active jobs first, then completed jobs
+  const sortedJobs = [...activeJobs, ...completedJobs];
+  
+  const cards = sortedJobs.map(job => {
     const progress = Math.max(0, Math.min(100, job.progress || 0));
     const steps = job.steps || {};
     const stepsHtml = Object.keys(steps).map(step => renderJobStep(step, steps[step])).join('');
@@ -5631,6 +5640,7 @@ function renderJobs(jobs) {
           <div>
             <div>${escapeHtml(job.domain || '')}</div>
             <div class="muted">Started ${fmtTime(job.started)}</div>
+            ${job.completed_at ? `<div class="muted">Completed ${fmtTime(job.completed_at)}</div>` : ''}
           </div>
           <div class="job-summary-meta">
             <span class="status-pill ${statusClass(job.status)}">${statusLabel(job.status)}</span>
