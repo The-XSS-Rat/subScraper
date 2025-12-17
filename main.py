@@ -5494,7 +5494,7 @@ function renderReportDetail(domain) {
         ${badge}
       </div>
       <div class="report-actions">
-        ${stats.screenshots > 0 ? `<a href="/gallery/${encodeURIComponent(domain)}" class="btn secondary small" target="_blank">View Screenshots Gallery</a>` : ''}
+        ${stats.screenshots > 0 ? `<a href="/gallery/${encodeURIComponent(domain)}" class="btn secondary small">View Screenshots Gallery</a>` : ''}
         ${resumeButton}
         ${resumeNotice}
       </div>
@@ -6509,14 +6509,66 @@ def generate_subdomain_detail_page(domain: str, subdomain: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Subdomain Detail: {subdomain}</title>
 <style>
+:root {{
+  --bg: #030712;
+  --panel: #111827;
+  --panel-alt: #0f172a;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #2563eb;
+}}
+* {{ box-sizing: border-box; }}
 body {{
   margin: 0;
-  padding: 20px;
-  font-family: system-ui, -apple-system, sans-serif;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   line-height: 1.6;
 }}
+.app-shell {{ display: flex; min-height: 100vh; }}
+.sidebar {{
+  width: 250px;
+  background: #050c1c;
+  padding: 24px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  border-right: 1px solid #0f172a;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}}
+.brand {{ display: flex; align-items: center; gap: 12px; }}
+.brand-icon {{
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: #1d4ed8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 18px;
+}}
+.brand-title {{ font-size: 18px; font-weight: 600; line-height: 1.2; }}
+.nav {{ display: flex; flex-direction: column; gap: 8px; }}
+.nav-link {{
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: var(--text);
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+  font-weight: 500;
+  display: block;
+  text-decoration: none;
+}}
+.nav-link:hover {{ background: #0f172a; border-color: #1e293b; }}
+.sidebar-footer {{
+  margin-top: auto;
+  font-size: 12px;
+  color: var(--muted);
+}}
+.main-content {{ flex: 1; padding: 32px; }}
 .container {{
   max-width: 1200px;
   margin: 0 auto;
@@ -6525,15 +6577,6 @@ body {{
   margin-bottom: 24px;
   padding-bottom: 16px;
   border-bottom: 2px solid #1e293b;
-}}
-.back-link {{
-  display: inline-block;
-  margin-bottom: 12px;
-  color: #60a5fa;
-  text-decoration: none;
-}}
-.back-link:hover {{
-  text-decoration: underline;
 }}
 h1 {{
   margin: 0 0 8px 0;
@@ -6627,14 +6670,39 @@ img {{
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <a href="/" class="back-link">← Back to Dashboard</a>
-    <h1 id="subdomain-title">Loading...</h1>
-    <div class="subtitle">Subdomain Details</div>
-  </div>
-  <div id="content">
-    <div class="loading">Loading subdomain details...</div>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">🔍</div>
+      <div class="brand-title">Recon<br>Dashboard</div>
+    </div>
+    <nav class="nav">
+      <a class="nav-link" href="/">Overview</a>
+      <a class="nav-link" href="/#launch">Launch Scan</a>
+      <a class="nav-link" href="/#jobs">Active Jobs</a>
+      <a class="nav-link" href="/#workers">Workers</a>
+      <a class="nav-link" href="/#queue">Queue</a>
+      <a class="nav-link" href="/#reports">Reports</a>
+      <a class="nav-link" href="/#logs">Logs</a>
+      <a class="nav-link" href="/#monitors">Monitors</a>
+      <a class="nav-link" href="/#targets">Targets</a>
+      <a class="nav-link" href="/#settings">Settings</a>
+      <a class="nav-link" href="/#guide">User Guide</a>
+    </nav>
+    <div class="sidebar-footer">
+      <code>subScraper v1.0</code>
+    </div>
+  </aside>
+  <div class="main-content">
+    <div class="container">
+      <div class="header">
+        <h1 id="subdomain-title">Loading...</h1>
+        <div class="subtitle">Subdomain Details</div>
+      </div>
+      <div id="content">
+        <div class="loading">Loading subdomain details...</div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -6815,14 +6883,66 @@ def generate_screenshots_gallery_page(domain: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Screenshots Gallery: {domain}</title>
 <style>
+:root {{
+  --bg: #030712;
+  --panel: #111827;
+  --panel-alt: #0f172a;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #2563eb;
+}}
+* {{ box-sizing: border-box; }}
 body {{
   margin: 0;
-  padding: 20px;
-  font-family: system-ui, -apple-system, sans-serif;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   line-height: 1.6;
 }}
+.app-shell {{ display: flex; min-height: 100vh; }}
+.sidebar {{
+  width: 250px;
+  background: #050c1c;
+  padding: 24px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  border-right: 1px solid #0f172a;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}}
+.brand {{ display: flex; align-items: center; gap: 12px; }}
+.brand-icon {{
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: #1d4ed8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 18px;
+}}
+.brand-title {{ font-size: 18px; font-weight: 600; line-height: 1.2; }}
+.nav {{ display: flex; flex-direction: column; gap: 8px; }}
+.nav-link {{
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: var(--text);
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+  font-weight: 500;
+  display: block;
+  text-decoration: none;
+}}
+.nav-link:hover {{ background: #0f172a; border-color: #1e293b; }}
+.sidebar-footer {{
+  margin-top: auto;
+  font-size: 12px;
+  color: var(--muted);
+}}
+.main-content {{ flex: 1; padding: 32px; }}
 .container {{
   max-width: 1400px;
   margin: 0 auto;
@@ -6831,15 +6951,6 @@ body {{
   margin-bottom: 24px;
   padding-bottom: 16px;
   border-bottom: 2px solid #1e293b;
-}}
-.back-link {{
-  display: inline-block;
-  margin-bottom: 12px;
-  color: #60a5fa;
-  text-decoration: none;
-}}
-.back-link:hover {{
-  text-decoration: underline;
 }}
 h1 {{
   margin: 0 0 8px 0;
@@ -6971,14 +7082,39 @@ h1 {{
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <a href="/" class="back-link">← Back to Dashboard</a>
-    <h1 id="gallery-title">Screenshots Gallery</h1>
-    <div class="subtitle" id="gallery-subtitle">Loading...</div>
-  </div>
-  <div id="gallery" class="gallery">
-    <div class="loading">Loading screenshots...</div>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">🔍</div>
+      <div class="brand-title">Recon<br>Dashboard</div>
+    </div>
+    <nav class="nav">
+      <a class="nav-link" href="/">Overview</a>
+      <a class="nav-link" href="/#launch">Launch Scan</a>
+      <a class="nav-link" href="/#jobs">Active Jobs</a>
+      <a class="nav-link" href="/#workers">Workers</a>
+      <a class="nav-link" href="/#queue">Queue</a>
+      <a class="nav-link" href="/#reports">Reports</a>
+      <a class="nav-link" href="/#logs">Logs</a>
+      <a class="nav-link" href="/#monitors">Monitors</a>
+      <a class="nav-link" href="/#targets">Targets</a>
+      <a class="nav-link" href="/#settings">Settings</a>
+      <a class="nav-link" href="/#guide">User Guide</a>
+    </nav>
+    <div class="sidebar-footer">
+      <code>subScraper v1.0</code>
+    </div>
+  </aside>
+  <div class="main-content">
+    <div class="container">
+      <div class="header">
+        <h1 id="gallery-title">Screenshots Gallery</h1>
+        <div class="subtitle" id="gallery-subtitle">Loading...</div>
+      </div>
+      <div id="gallery" class="gallery">
+        <div class="loading">Loading screenshots...</div>
+      </div>
+    </div>
   </div>
 </div>
 <div id="modal" class="modal">
