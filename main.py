@@ -3583,7 +3583,10 @@ button:hover { background:#1d4ed8; }
     </section>
 
     <section class="module" data-view="jobs">
-      <div class="module-header"><h2>Active Jobs</h2></div>
+      <div class="module-header">
+        <h2>Active Jobs</h2>
+        <button class="btn secondary small" id="resume-all-btn" style="margin-left: auto;">Resume All Paused</button>
+      </div>
       <div class="module-body" id="jobs-list">
         <div class="section-placeholder">No active jobs.</div>
       </div>
@@ -4465,7 +4468,7 @@ function renderTargets(targets) {
       return `
         <tr>
           <td>${idx + 1}</td>
-          <td><button class="link-btn sub-link" data-domain="${escapeHtml(domain)}" data-sub="${escapeHtml(sub)}">${escapeHtml(sub)}</button></td>
+          <td><a href="/subdomain/${encodeURIComponent(domain)}/${encodeURIComponent(sub)}" class="link-btn">${escapeHtml(sub)}</a></td>
           <td>${escapeHtml(sources)}</td>
           <td>${escapeHtml(httpSummary)}</td>
           <td>${screenshotLink || '—'}</td>
@@ -5302,7 +5305,7 @@ function renderReportDetail(domain) {
           : '—';
         return `
           <tr data-status-code="${statusCode || 'none'}" data-host="${escapeHtml(row.host.toLowerCase())}" data-title="${escapeHtml((row.title || '').toLowerCase())}">
-            <td data-sort-value="${escapeHtml(row.host)}"><button class="link-btn sub-link" data-domain="${escapeHtml(domain)}" data-sub="${escapeHtml(row.host)}">${escapeHtml(row.host)}</button></td>
+            <td data-sort-value="${escapeHtml(row.host)}"><a href="/subdomain/${encodeURIComponent(domain)}/${encodeURIComponent(row.host)}" class="link-btn">${escapeHtml(row.host)}</a></td>
             <td data-sort-value="${statusCode || '0'}">${statusCode || '—'}</td>
             <td data-sort-value="${escapeHtml((row.title || '').toLowerCase())}">${escapeHtml(row.title || '—')}</td>
             <td data-sort-value="${escapeHtml((row.server || '').toLowerCase())}">${escapeHtml(row.server || '—')}</td>
@@ -5491,6 +5494,7 @@ function renderReportDetail(domain) {
         ${badge}
       </div>
       <div class="report-actions">
+        ${stats.screenshots > 0 ? `<a href="/gallery/${encodeURIComponent(domain)}" class="btn secondary small" target="_blank">View Screenshots Gallery</a>` : ''}
         ${resumeButton}
         ${resumeNotice}
       </div>
@@ -5692,6 +5696,35 @@ jobsList.addEventListener('click', (event) => {
     handleJobControl('resume', domain, resumeBtn);
   }
 });
+
+// Resume All button handler
+const resumeAllBtn = document.getElementById('resume-all-btn');
+if (resumeAllBtn) {
+  resumeAllBtn.addEventListener('click', async () => {
+    const original = resumeAllBtn.textContent;
+    resumeAllBtn.disabled = true;
+    resumeAllBtn.textContent = 'Resuming...';
+    try {
+      const resp = await fetch('/api/jobs/resume-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await resp.json();
+      resumeAllBtn.textContent = data.message || 'Done';
+      if (data.success) {
+        fetchState();
+      }
+    } catch (err) {
+      resumeAllBtn.textContent = err.message || 'Failed';
+    } finally {
+      setTimeout(() => {
+        resumeAllBtn.textContent = original;
+        resumeAllBtn.disabled = false;
+      }, 2000);
+    }
+  });
+}
 
 document.addEventListener('click', (event) => {
   const header = event.target.closest('.collapsible-header');
@@ -6300,6 +6333,40 @@ def resume_job(domain: str) -> Tuple[bool, str]:
     return True, f"{normalized} resumed."
 
 
+def resume_all_paused_jobs() -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Resume all paused jobs at once."""
+    with JOB_LOCK:
+        paused_domains = []
+        for domain, job in RUNNING_JOBS.items():
+            status = job.get("status", "")
+            if status in ("paused", "pausing"):
+                thread = job.get("thread")
+                if thread and thread.is_alive():
+                    paused_domains.append(domain)
+    
+    if not paused_domains:
+        return False, "No paused jobs found.", []
+    
+    results = []
+    resumed_count = 0
+    for domain in paused_domains:
+        success, message = resume_job(domain)
+        results.append({
+            "domain": domain,
+            "success": success,
+            "message": message,
+        })
+        if success:
+            resumed_count += 1
+    
+    if resumed_count == 0:
+        return False, "Failed to resume any jobs.", results
+    elif resumed_count < len(paused_domains):
+        return True, f"Resumed {resumed_count} of {len(paused_domains)} paused jobs.", results
+    else:
+        return True, f"Resumed all {resumed_count} paused jobs.", results
+
+
 def resume_target_scan(domain: str, wordlist: Optional[str] = None,
                        skip_nikto: Optional[bool] = None) -> Tuple[bool, str]:
     normalized = (domain or "").strip().lower()
@@ -6434,6 +6501,604 @@ def build_state_payload() -> Dict[str, Any]:
     }
 
 
+def generate_subdomain_detail_page(domain: str, subdomain: str) -> str:
+    """Generate a standalone page for subdomain details."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subdomain Detail: {subdomain}</title>
+<style>
+body {{
+  margin: 0;
+  padding: 20px;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  line-height: 1.6;
+}}
+.container {{
+  max-width: 1200px;
+  margin: 0 auto;
+}}
+.header {{
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #1e293b;
+}}
+.back-link {{
+  display: inline-block;
+  margin-bottom: 12px;
+  color: #60a5fa;
+  text-decoration: none;
+}}
+.back-link:hover {{
+  text-decoration: underline;
+}}
+h1 {{
+  margin: 0 0 8px 0;
+  font-size: 2rem;
+  color: #f1f5f9;
+}}
+.subtitle {{
+  color: #94a3b8;
+  font-size: 0.95rem;
+}}
+.section {{
+  background: #1e293b;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}}
+.section h2 {{
+  margin: 0 0 16px 0;
+  font-size: 1.25rem;
+  color: #f1f5f9;
+}}
+.grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}}
+.field {{
+  padding: 12px;
+  background: #0f172a;
+  border-radius: 6px;
+}}
+.field strong {{
+  display: block;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+}}
+.field-value {{
+  color: #e2e8f0;
+  word-break: break-word;
+}}
+.badge {{
+  display: inline-block;
+  padding: 4px 8px;
+  background: #334155;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  margin: 2px;
+}}
+.severity-pill {{
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}}
+.severity-pill.CRITICAL {{ background: #dc2626; color: white; }}
+.severity-pill.HIGH {{ background: #ea580c; color: white; }}
+.severity-pill.MEDIUM {{ background: #f59e0b; color: white; }}
+.severity-pill.LOW {{ background: #eab308; color: #1e293b; }}
+.severity-pill.INFO {{ background: #3b82f6; color: white; }}
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}}
+th, td {{
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid #334155;
+}}
+th {{
+  background: #0f172a;
+  color: #94a3b8;
+  font-weight: 600;
+}}
+img {{
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid #334155;
+}}
+.muted {{
+  color: #64748b;
+  font-style: italic;
+}}
+.loading {{
+  text-align: center;
+  padding: 40px;
+  color: #94a3b8;
+}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <a href="/" class="back-link">← Back to Dashboard</a>
+    <h1 id="subdomain-title">Loading...</h1>
+    <div class="subtitle">Subdomain Details</div>
+  </div>
+  <div id="content">
+    <div class="loading">Loading subdomain details...</div>
+  </div>
+</div>
+<script>
+const domain = {repr(domain)};
+const subdomain = {repr(subdomain)};
+
+function escapeHtml(text) {{
+  const div = document.createElement('div');
+  div.textContent = text || '';
+  return div.innerHTML;
+}}
+
+function fmtTime(iso) {{
+  if (!iso) return '—';
+  try {{
+    const date = new Date(iso);
+    return date.toLocaleString();
+  }} catch {{
+    return iso;
+  }}
+}}
+
+async function loadSubdomainDetail() {{
+  try {{
+    const resp = await fetch(`/api/subdomain/${{encodeURIComponent(domain)}}/${{encodeURIComponent(subdomain)}}`);
+    if (!resp.ok) throw new Error('Failed to load subdomain data');
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.message || 'Failed to load data');
+    
+    document.getElementById('subdomain-title').textContent = subdomain;
+    renderSubdomainDetail(data.data, data.history);
+  }} catch (err) {{
+    document.getElementById('content').innerHTML = `<div class="section"><p class="muted">Error: ${{escapeHtml(err.message)}}</p></div>`;
+  }}
+}}
+
+function renderSubdomainDetail(info, history) {{
+  const sources = info.sources || [];
+  const httpx = info.httpx || {{}};
+  const screenshot = info.screenshot || {{}};
+  const nuclei = info.nuclei || [];
+  const nikto = info.nikto || [];
+  
+  let html = '';
+  
+  // Metadata section
+  html += `
+    <div class="section">
+      <h2>Metadata</h2>
+      <div class="grid">
+        <div class="field">
+          <strong>Parent Domain</strong>
+          <div class="field-value"><span class="badge">${{escapeHtml(domain)}}</span></div>
+        </div>
+        <div class="field">
+          <strong>Discovery Sources</strong>
+          <div class="field-value">${{sources.length ? sources.map(s => `<span class="badge">${{escapeHtml(s)}}</span>`).join(' ') : '<span class="muted">Unknown</span>'}}</div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // HTTP section
+  html += `
+    <div class="section">
+      <h2>HTTP Response</h2>
+      ${{Object.keys(httpx).length ? `
+        <div class="grid">
+          <div class="field"><strong>URL</strong><div class="field-value">${{escapeHtml(httpx.url || '—')}}</div></div>
+          <div class="field"><strong>Status Code</strong><div class="field-value">${{httpx.status_code || '—'}}</div></div>
+          <div class="field"><strong>Title</strong><div class="field-value">${{escapeHtml(httpx.title || '—')}}</div></div>
+          <div class="field"><strong>Server</strong><div class="field-value">${{escapeHtml(httpx.webserver || httpx.server || '—')}}</div></div>
+          <div class="field"><strong>Content-Type</strong><div class="field-value">${{escapeHtml(httpx.content_type || '—')}}</div></div>
+          <div class="field"><strong>Tech Stack</strong><div class="field-value">${{escapeHtml((httpx.tech || httpx.technologies || []).join(', ') || '—')}}</div></div>
+        </div>
+      ` : '<p class="muted">No HTTP data available</p>'}}
+    </div>
+  `;
+  
+  // Screenshot section
+  html += `
+    <div class="section">
+      <h2>Screenshot</h2>
+      ${{screenshot.path ? `
+        <div>
+          <img src="/screenshots/${{escapeHtml(screenshot.path)}}" alt="Screenshot of ${{escapeHtml(subdomain)}}" />
+          ${{screenshot.captured_at ? `<p class="muted" style="margin-top: 12px;">Captured ${{fmtTime(screenshot.captured_at)}}</p>` : ''}}
+        </div>
+      ` : '<p class="muted">No screenshot available</p>'}}
+    </div>
+  `;
+  
+  // Nuclei section
+  html += `<div class="section"><h2>Nuclei Findings (${{nuclei.length}})</h2>`;
+  if (nuclei.length) {{
+    html += `
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Template</th>
+            <th>Name</th>
+            <th>Matched At</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${{nuclei.map(finding => {{
+            const severity = (finding.severity || 'INFO').toUpperCase();
+            const templateId = finding.template_id || finding['template-id'] || 'N/A';
+            const name = finding.name || '';
+            const matchedAt = finding.matched_at || finding['matched-at'] || finding.url || '';
+            return `
+              <tr>
+                <td><span class="severity-pill ${{severity}}">${{escapeHtml(severity)}}</span></td>
+                <td>${{escapeHtml(templateId)}}</td>
+                <td>${{escapeHtml(name)}}</td>
+                <td>${{escapeHtml(matchedAt)}}</td>
+              </tr>
+            `;
+          }}).join('')}}
+        </tbody>
+      </table>
+    `;
+  }} else {{
+    html += '<p class="muted">No Nuclei findings</p>';
+  }}
+  html += '</div>';
+  
+  // Nikto section
+  html += `<div class="section"><h2>Nikto Findings (${{nikto.length}})</h2>`;
+  if (nikto.length) {{
+    html += `
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Message</th>
+            <th>Reference</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${{nikto.map(finding => {{
+            const severity = ((finding.severity || finding.risk) || 'INFO').toUpperCase();
+            const message = finding.msg || finding.description || finding.raw || '';
+            const reference = finding.uri || (finding.osvdb ? `OSVDB-${{finding.osvdb}}` : '') || '—';
+            return `
+              <tr>
+                <td><span class="severity-pill ${{severity}}">${{escapeHtml(severity)}}</span></td>
+                <td>${{escapeHtml(message)}}</td>
+                <td>${{escapeHtml(reference)}}</td>
+              </tr>
+            `;
+          }}).join('')}}
+        </tbody>
+      </table>
+    `;
+  }} else {{
+    html += '<p class="muted">No Nikto findings</p>';
+  }}
+  html += '</div>';
+  
+  document.getElementById('content').innerHTML = html;
+}}
+
+loadSubdomainDetail();
+</script>
+</body>
+</html>
+"""
+
+
+def generate_screenshots_gallery_page(domain: str) -> str:
+    """Generate a standalone page for screenshots gallery."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Screenshots Gallery: {domain}</title>
+<style>
+body {{
+  margin: 0;
+  padding: 20px;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  line-height: 1.6;
+}}
+.container {{
+  max-width: 1400px;
+  margin: 0 auto;
+}}
+.header {{
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #1e293b;
+}}
+.back-link {{
+  display: inline-block;
+  margin-bottom: 12px;
+  color: #60a5fa;
+  text-decoration: none;
+}}
+.back-link:hover {{
+  text-decoration: underline;
+}}
+h1 {{
+  margin: 0 0 8px 0;
+  font-size: 2rem;
+  color: #f1f5f9;
+}}
+.subtitle {{
+  color: #94a3b8;
+  font-size: 0.95rem;
+}}
+.gallery {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}}
+.screenshot-card {{
+  background: #1e293b;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.2s;
+}}
+.screenshot-card:hover {{
+  transform: translateY(-4px);
+}}
+.screenshot-image {{
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  cursor: pointer;
+  background: #0f172a;
+  transition: opacity 0.3s;
+}}
+.screenshot-image[data-src] {{
+  opacity: 0.3;
+}}
+.screenshot-image.loaded {{
+  opacity: 1;
+}}
+.screenshot-info {{
+  padding: 16px;
+}}
+.screenshot-subdomain {{
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 8px;
+  word-break: break-all;
+}}
+.screenshot-url {{
+  color: #60a5fa;
+  text-decoration: none;
+  font-size: 0.85rem;
+  word-break: break-all;
+}}
+.screenshot-url:hover {{
+  text-decoration: underline;
+}}
+.screenshot-meta {{
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}}
+.badge {{
+  display: inline-block;
+  padding: 2px 8px;
+  background: #334155;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  margin-right: 4px;
+}}
+.status-badge {{
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}}
+.status-2xx {{ background: #059669; color: white; }}
+.status-3xx {{ background: #3b82f6; color: white; }}
+.status-4xx {{ background: #f59e0b; color: white; }}
+.status-5xx {{ background: #dc2626; color: white; }}
+.loading {{
+  text-align: center;
+  padding: 40px;
+  color: #94a3b8;
+}}
+.empty {{
+  text-align: center;
+  padding: 60px 20px;
+  color: #64748b;
+  font-style: italic;
+}}
+.modal {{
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}}
+.modal.show {{
+  display: flex;
+}}
+.modal img {{
+  max-width: 100%;
+  max-height: 90vh;
+  border-radius: 8px;
+}}
+.modal-close {{
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  color: white;
+  font-size: 2rem;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.5);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <a href="/" class="back-link">← Back to Dashboard</a>
+    <h1 id="gallery-title">Screenshots Gallery</h1>
+    <div class="subtitle" id="gallery-subtitle">Loading...</div>
+  </div>
+  <div id="gallery" class="gallery">
+    <div class="loading">Loading screenshots...</div>
+  </div>
+</div>
+<div id="modal" class="modal">
+  <div class="modal-close" onclick="closeModal()">×</div>
+  <img id="modal-image" src="" alt="Screenshot" />
+</div>
+<script>
+const domain = {repr(domain)};
+
+function escapeHtml(text) {{
+  const div = document.createElement('div');
+  div.textContent = text || '';
+  return div.innerHTML;
+}}
+
+function fmtTime(iso) {{
+  if (!iso) return '—';
+  try {{
+    const date = new Date(iso);
+    return date.toLocaleString();
+  }} catch {{
+    return iso;
+  }}
+}}
+
+function getStatusClass(code) {{
+  if (!code) return '';
+  if (code >= 200 && code < 300) return 'status-2xx';
+  if (code >= 300 && code < 400) return 'status-3xx';
+  if (code >= 400 && code < 500) return 'status-4xx';
+  if (code >= 500) return 'status-5xx';
+  return '';
+}}
+
+function openModal(src) {{
+  document.getElementById('modal-image').src = src;
+  document.getElementById('modal').classList.add('show');
+}}
+
+function closeModal() {{
+  document.getElementById('modal').classList.remove('show');
+}}
+
+document.getElementById('modal').addEventListener('click', (e) => {{
+  if (e.target.id === 'modal') closeModal();
+}});
+
+async function loadGallery() {{
+  try {{
+    const resp = await fetch(`/api/gallery/${{encodeURIComponent(domain)}}`);
+    if (!resp.ok) throw new Error('Failed to load screenshots');
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.message || 'Failed to load data');
+    
+    document.getElementById('gallery-title').textContent = `Screenshots Gallery: ${{domain}}`;
+    document.getElementById('gallery-subtitle').textContent = `${{data.screenshots.length}} screenshots`;
+    renderGallery(data.screenshots);
+  }} catch (err) {{
+    document.getElementById('gallery').innerHTML = `<div class="empty">Error: ${{escapeHtml(err.message)}}</div>`;
+  }}
+}}
+
+function renderGallery(screenshots) {{
+  if (screenshots.length === 0) {{
+    document.getElementById('gallery').innerHTML = '<div class="empty">No screenshots available for this domain.</div>';
+    return;
+  }}
+  
+  const html = screenshots.map(shot => {{
+    const statusClass = getStatusClass(shot.status_code);
+    const statusBadge = shot.status_code ? `<span class="status-badge ${{statusClass}}">${{shot.status_code}}</span>` : '';
+    
+    return `
+      <div class="screenshot-card">
+        <img class="screenshot-image" data-src="/screenshots/${{escapeHtml(shot.path)}}" alt="${{escapeHtml(shot.subdomain)}}" onclick="openModal('/screenshots/${{escapeHtml(shot.path)}}')"/>
+        <div class="screenshot-info">
+          <div class="screenshot-subdomain">${{escapeHtml(shot.subdomain)}}</div>
+          <a href="${{escapeHtml(shot.url)}}" target="_blank" class="screenshot-url">${{escapeHtml(shot.url)}}</a>
+          <div class="screenshot-meta">
+            ${{statusBadge}}
+            ${{shot.title ? `<span class="badge">${{escapeHtml(shot.title)}}</span>` : ''}}
+            <br>
+            <span>Captured: ${{fmtTime(shot.captured_at)}}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }}).join('');
+  
+  document.getElementById('gallery').innerHTML = html;
+  
+  // Set up lazy loading with Intersection Observer
+  const images = document.querySelectorAll('.screenshot-image[data-src]');
+  const imageObserver = new IntersectionObserver((entries, observer) => {{
+    entries.forEach(entry => {{
+      if (entry.isIntersecting) {{
+        const img = entry.target;
+        img.src = img.getAttribute('data-src');
+        img.removeAttribute('data-src');
+        img.addEventListener('load', () => {{
+          img.classList.add('loaded');
+        }});
+        observer.unobserve(img);
+      }}
+    }});
+  }}, {{
+    rootMargin: '50px'
+  }});
+  
+  images.forEach(img => imageObserver.observe(img));
+}}
+
+loadGallery();
+</script>
+</body>
+</html>
+"""
+
+
 class CommandCenterHandler(BaseHTTPRequestHandler):
     server_version = "ReconCommandCenter/1.0"
 
@@ -6452,6 +7117,87 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send_bytes(INDEX_HTML.encode("utf-8"))
             return
+        
+        # Subdomain detail page route
+        if self.path.startswith("/subdomain/"):
+            parts = self.path[len("/subdomain/"):].split("/", 1)
+            if len(parts) == 2:
+                domain = unquote(parts[0]).strip().lower()
+                subdomain = unquote(parts[1]).strip().lower()
+                self._send_bytes(generate_subdomain_detail_page(domain, subdomain).encode("utf-8"))
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+            return
+        
+        # Screenshots gallery page route
+        if self.path.startswith("/gallery/"):
+            domain = unquote(self.path[len("/gallery/"):]).strip().lower()
+            if domain:
+                self._send_bytes(generate_screenshots_gallery_page(domain).encode("utf-8"))
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+            return
+        
+        # API endpoint for subdomain detail data
+        if self.path.startswith("/api/subdomain/"):
+            parts = self.path[len("/api/subdomain/"):].split("/", 1)
+            if len(parts) == 2:
+                domain = unquote(parts[0]).strip().lower()
+                subdomain = unquote(parts[1]).strip().lower()
+                state = load_state()
+                target = state.get("targets", {}).get(domain)
+                if not target or not target.get("subdomains", {}).get(subdomain):
+                    self._send_json({"success": False, "message": "Subdomain not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                sub_data = target["subdomains"][subdomain]
+                try:
+                    history = load_domain_history(domain)
+                except Exception:
+                    history = []
+                self._send_json({
+                    "success": True,
+                    "domain": domain,
+                    "subdomain": subdomain,
+                    "data": sub_data,
+                    "history": history
+                })
+                return
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request")
+            return
+        
+        # API endpoint for screenshots gallery data
+        if self.path.startswith("/api/gallery/"):
+            domain = unquote(self.path[len("/api/gallery/"):]).strip().lower()
+            if domain:
+                state = load_state()
+                target = state.get("targets", {}).get(domain)
+                if not target:
+                    self._send_json({"success": False, "message": "Domain not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                screenshots = []
+                subdomains = target.get("subdomains", {})
+                for sub, data in subdomains.items():
+                    screenshot = data.get("screenshot")
+                    if screenshot and screenshot.get("path"):
+                        httpx = data.get("httpx", {})
+                        screenshots.append({
+                            "subdomain": sub,
+                            "path": screenshot["path"],
+                            "url": httpx.get("url", f"http://{sub}"),
+                            "title": httpx.get("title", ""),
+                            "status_code": httpx.get("status_code"),
+                            "captured_at": screenshot.get("captured_at"),
+                        })
+                screenshots.sort(key=lambda x: x.get("captured_at") or "", reverse=True)
+                self._send_json({
+                    "success": True,
+                    "domain": domain,
+                    "screenshots": screenshots
+                })
+                return
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request")
+            return
+        
         if self.path == "/api/state":
             self._send_json(build_state_payload())
             return
@@ -6545,6 +7291,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/settings",
             "/api/jobs/pause",
             "/api/jobs/resume",
+            "/api/jobs/resume-all",
             "/api/targets/resume",
             "/api/monitors",
             "/api/monitors/delete",
@@ -6579,6 +7326,12 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             success, message = resume_job(domain)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
+            return
+
+        if self.path == "/api/jobs/resume-all":
+            success, message, results = resume_all_paused_jobs()
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message, "results": results}, status=status)
             return
 
         if self.path == "/api/targets/resume":
