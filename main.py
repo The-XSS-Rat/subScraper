@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import uuid
@@ -57,6 +58,7 @@ CONFIG_FILE = DATA_DIR / "config.json"
 HISTORY_DIR = DATA_DIR / "history"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 MONITORS_FILE = DATA_DIR / "monitors.json"
+BACKUPS_DIR = DATA_DIR / "backups"
 
 DEFAULT_INTERVAL = 30
 HTML_REFRESH_SECONDS = DEFAULT_INTERVAL  # default; can be overridden
@@ -180,6 +182,24 @@ STEP_PROGRESS = {
     "error": 100,
     "failed": 100,
 }
+
+# Dynamic queue management
+DYNAMIC_MODE_ENABLED = False
+DYNAMIC_MODE_LOCK = threading.Lock()
+DYNAMIC_MODE_THREAD: Optional[threading.Thread] = None
+DYNAMIC_MODE_POLL_INTERVAL = 30  # Check every 30 seconds
+DYNAMIC_MODE_BASE_JOBS = 1  # Minimum jobs when dynamic mode is enabled
+DYNAMIC_MODE_MAX_JOBS = 10  # Maximum jobs when dynamic mode is enabled
+DYNAMIC_MODE_CPU_THRESHOLD = 75.0  # CPU % threshold
+DYNAMIC_MODE_MEMORY_THRESHOLD = 80.0  # Memory % threshold
+
+# Auto-backup system
+AUTO_BACKUP_ENABLED = False
+AUTO_BACKUP_LOCK = threading.Lock()
+AUTO_BACKUP_THREAD: Optional[threading.Thread] = None
+AUTO_BACKUP_INTERVAL = 3600  # Default: 1 hour in seconds
+AUTO_BACKUP_MAX_COUNT = 10  # Keep last 10 backups
+LAST_BACKUP_TIME = 0.0
 
 
 class JobControl:
@@ -356,6 +376,7 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _normalize_tool_flag_templates(value: Any) -> Dict[str, str]:
@@ -409,7 +430,46 @@ def apply_template_flags(
 
 
 def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
-    global MAX_RUNNING_JOBS, GLOBAL_RATE_LIMIT_DELAY
+    global MAX_RUNNING_JOBS, GLOBAL_RATE_LIMIT_DELAY, DYNAMIC_MODE_ENABLED
+    global DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS, DYNAMIC_MODE_CPU_THRESHOLD, DYNAMIC_MODE_MEMORY_THRESHOLD
+    global AUTO_BACKUP_ENABLED, AUTO_BACKUP_INTERVAL, AUTO_BACKUP_MAX_COUNT
+    
+    # Apply dynamic mode settings
+    try:
+        DYNAMIC_MODE_ENABLED = bool(cfg.get("dynamic_mode_enabled", False))
+        DYNAMIC_MODE_BASE_JOBS = max(1, int(cfg.get("dynamic_mode_base_jobs", 1)))
+        DYNAMIC_MODE_MAX_JOBS = max(DYNAMIC_MODE_BASE_JOBS, int(cfg.get("dynamic_mode_max_jobs", 10)))
+        DYNAMIC_MODE_CPU_THRESHOLD = max(0.0, min(100.0, float(cfg.get("dynamic_mode_cpu_threshold", 75.0))))
+        DYNAMIC_MODE_MEMORY_THRESHOLD = max(0.0, min(100.0, float(cfg.get("dynamic_mode_memory_threshold", 80.0))))
+    except (TypeError, ValueError):
+        DYNAMIC_MODE_ENABLED = False
+        DYNAMIC_MODE_BASE_JOBS = 1
+        DYNAMIC_MODE_MAX_JOBS = 10
+        DYNAMIC_MODE_CPU_THRESHOLD = 75.0
+        DYNAMIC_MODE_MEMORY_THRESHOLD = 80.0
+    
+    # Apply auto-backup settings
+    try:
+        AUTO_BACKUP_ENABLED = bool(cfg.get("auto_backup_enabled", False))
+        AUTO_BACKUP_INTERVAL = max(300, int(cfg.get("auto_backup_interval", 3600)))  # Min 5 minutes
+        AUTO_BACKUP_MAX_COUNT = max(1, int(cfg.get("auto_backup_max_count", 10)))
+    except (TypeError, ValueError):
+        AUTO_BACKUP_ENABLED = False
+        AUTO_BACKUP_INTERVAL = 3600
+        AUTO_BACKUP_MAX_COUNT = 10
+    
+    # Start or stop dynamic mode worker based on config
+    if DYNAMIC_MODE_ENABLED and PSUTIL_AVAILABLE:
+        start_dynamic_mode_worker()
+    else:
+        stop_dynamic_mode_worker()
+    
+    # Start or stop auto-backup worker based on config
+    if AUTO_BACKUP_ENABLED:
+        start_auto_backup_worker()
+    else:
+        stop_auto_backup_worker()
+    
     try:
         MAX_RUNNING_JOBS = max(1, int(cfg.get("max_running_jobs", 1)))
     except (TypeError, ValueError):
@@ -522,6 +582,14 @@ def default_config() -> Dict[str, Any]:
         "max_running_jobs": 1,
         "global_rate_limit": 0.0,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
+        "dynamic_mode_enabled": False,
+        "dynamic_mode_base_jobs": 1,
+        "dynamic_mode_max_jobs": 10,
+        "dynamic_mode_cpu_threshold": 75.0,
+        "dynamic_mode_memory_threshold": 80.0,
+        "auto_backup_enabled": False,
+        "auto_backup_interval": 3600,
+        "auto_backup_max_count": 10,
     }
 
 
@@ -1104,6 +1172,410 @@ def start_system_resource_worker() -> None:
     log("System resource monitoring worker initialized.")
 
 
+# ================== DYNAMIC MODE MANAGEMENT ==================
+
+
+def calculate_optimal_jobs() -> int:
+    """
+    Calculate the optimal number of concurrent jobs based on system resources.
+    Returns the recommended number of jobs to run.
+    """
+    if not PSUTIL_AVAILABLE:
+        return DYNAMIC_MODE_BASE_JOBS
+    
+    try:
+        metrics = collect_system_resources()
+        if not metrics.get("available"):
+            return DYNAMIC_MODE_BASE_JOBS
+        
+        cpu_percent = metrics.get("cpu", {}).get("percent", 0)
+        memory_percent = metrics.get("memory", {}).get("percent", 0)
+        load_avg_1m = metrics.get("cpu", {}).get("load_avg_1m", 0)
+        cpu_count = metrics.get("cpu", {}).get("count_logical", 1)
+        
+        # Start with max jobs
+        recommended_jobs = DYNAMIC_MODE_MAX_JOBS
+        
+        # Reduce if CPU is high
+        if cpu_percent > DYNAMIC_MODE_CPU_THRESHOLD:
+            # Scale down based on how much we're over threshold
+            # Avoid division by zero when threshold is 100%
+            denominator = max(1.0, 100 - DYNAMIC_MODE_CPU_THRESHOLD)
+            overage = (cpu_percent - DYNAMIC_MODE_CPU_THRESHOLD) / denominator
+            reduction = int((DYNAMIC_MODE_MAX_JOBS - DYNAMIC_MODE_BASE_JOBS) * overage)
+            recommended_jobs = max(DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS - reduction)
+        
+        # Reduce if memory is high
+        if memory_percent > DYNAMIC_MODE_MEMORY_THRESHOLD:
+            # Avoid division by zero when threshold is 100%
+            denominator = max(1.0, 100 - DYNAMIC_MODE_MEMORY_THRESHOLD)
+            overage = (memory_percent - DYNAMIC_MODE_MEMORY_THRESHOLD) / denominator
+            reduction = int((DYNAMIC_MODE_MAX_JOBS - DYNAMIC_MODE_BASE_JOBS) * overage)
+            recommended_jobs = min(recommended_jobs, max(DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS - reduction))
+        
+        # Reduce if load average is high (more than 1.5x CPU count)
+        if load_avg_1m > cpu_count * 1.5:
+            overage = (load_avg_1m - cpu_count * 1.5) / (cpu_count * 1.5)
+            reduction = int((DYNAMIC_MODE_MAX_JOBS - DYNAMIC_MODE_BASE_JOBS) * min(overage, 1.0))
+            recommended_jobs = min(recommended_jobs, max(DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS - reduction))
+        
+        return max(DYNAMIC_MODE_BASE_JOBS, min(DYNAMIC_MODE_MAX_JOBS, recommended_jobs))
+    except Exception as exc:
+        log(f"Error calculating optimal jobs: {exc}")
+        return DYNAMIC_MODE_BASE_JOBS
+
+
+def dynamic_mode_worker_loop() -> None:
+    """Background worker that continuously adjusts MAX_RUNNING_JOBS based on system resources."""
+    global MAX_RUNNING_JOBS
+    
+    log("Dynamic mode worker started.")
+    last_jobs = MAX_RUNNING_JOBS
+    
+    while True:
+        try:
+            if not DYNAMIC_MODE_ENABLED:
+                time.sleep(DYNAMIC_MODE_POLL_INTERVAL)
+                continue
+            
+            # Calculate optimal job count
+            optimal_jobs = calculate_optimal_jobs()
+            
+            # Only update if changed
+            if optimal_jobs != last_jobs:
+                with DYNAMIC_MODE_LOCK:
+                    old_value = MAX_RUNNING_JOBS
+                    MAX_RUNNING_JOBS = optimal_jobs
+                    last_jobs = optimal_jobs
+                
+                log(f"🔄 Dynamic mode adjusted: {old_value} → {optimal_jobs} concurrent jobs")
+                
+                # Trigger job scheduling to take advantage of new capacity
+                schedule_jobs()
+        except Exception as exc:
+            log(f"Error in dynamic mode worker: {exc}")
+        
+        time.sleep(DYNAMIC_MODE_POLL_INTERVAL)
+
+
+def start_dynamic_mode_worker() -> None:
+    """Start the dynamic mode worker thread."""
+    global DYNAMIC_MODE_THREAD
+    
+    if not PSUTIL_AVAILABLE:
+        log("Dynamic mode disabled: psutil not available")
+        return
+    
+    with DYNAMIC_MODE_LOCK:
+        already_running = DYNAMIC_MODE_THREAD and DYNAMIC_MODE_THREAD.is_alive()
+    
+    if already_running:
+        return
+    
+    thread = threading.Thread(target=dynamic_mode_worker_loop, name="dynamic-mode", daemon=True)
+    thread.start()
+    
+    with DYNAMIC_MODE_LOCK:
+        DYNAMIC_MODE_THREAD = thread
+    
+    log("Dynamic mode worker initialized.")
+
+
+def stop_dynamic_mode_worker() -> None:
+    """Stop the dynamic mode worker thread."""
+    global DYNAMIC_MODE_THREAD
+    
+    with DYNAMIC_MODE_LOCK:
+        if DYNAMIC_MODE_THREAD and DYNAMIC_MODE_THREAD.is_alive():
+            # Thread will stop on next iteration when it checks DYNAMIC_MODE_ENABLED
+            DYNAMIC_MODE_THREAD = None
+            log("Dynamic mode worker stopped.")
+
+
+def get_dynamic_mode_status() -> Dict[str, Any]:
+    """Get current dynamic mode status."""
+    with DYNAMIC_MODE_LOCK:
+        return {
+            "enabled": DYNAMIC_MODE_ENABLED,
+            "base_jobs": DYNAMIC_MODE_BASE_JOBS,
+            "max_jobs": DYNAMIC_MODE_MAX_JOBS,
+            "current_jobs": MAX_RUNNING_JOBS,
+            "cpu_threshold": DYNAMIC_MODE_CPU_THRESHOLD,
+            "memory_threshold": DYNAMIC_MODE_MEMORY_THRESHOLD,
+            "worker_active": DYNAMIC_MODE_THREAD and DYNAMIC_MODE_THREAD.is_alive() if DYNAMIC_MODE_THREAD else False,
+        }
+
+
+# ================== BACKUP & RESTORE SYSTEM ==================
+
+
+def create_backup(name: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
+    """
+    Create a full backup of all recon data.
+    Returns (success, message, backup_filename)
+    """
+    try:
+        ensure_dirs()
+        
+        # Generate backup filename with timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        if name:
+            backup_name = f"backup_{name}_{timestamp}.tar.gz"
+        else:
+            backup_name = f"backup_{timestamp}.tar.gz"
+        
+        backup_path = BACKUPS_DIR / backup_name
+        
+        # Create tarball
+        with tarfile.open(backup_path, "w:gz") as tar:
+            # Add state file
+            if STATE_FILE.exists():
+                tar.add(STATE_FILE, arcname="state.json")
+            
+            # Add config file
+            if CONFIG_FILE.exists():
+                tar.add(CONFIG_FILE, arcname="config.json")
+            
+            # Add monitors file
+            if MONITORS_FILE.exists():
+                tar.add(MONITORS_FILE, arcname="monitors.json")
+            
+            # Add system resources file
+            if SYSTEM_RESOURCE_FILE.exists():
+                tar.add(SYSTEM_RESOURCE_FILE, arcname="system_resources.json")
+            
+            # Add history directory
+            if HISTORY_DIR.exists():
+                tar.add(HISTORY_DIR, arcname="history")
+            
+            # Add screenshots directory (if not too large)
+            if SCREENSHOTS_DIR.exists():
+                tar.add(SCREENSHOTS_DIR, arcname="screenshots")
+        
+        backup_size = backup_path.stat().st_size
+        size_mb = backup_size / (1024 * 1024)
+        
+        log(f"✅ Backup created: {backup_name} ({size_mb:.2f} MB)")
+        return True, f"Backup created successfully: {backup_name} ({size_mb:.2f} MB)", backup_name
+    except Exception as exc:
+        log(f"❌ Backup creation failed: {exc}")
+        return False, f"Backup failed: {str(exc)}", None
+
+
+def restore_backup(backup_filename: str) -> Tuple[bool, str]:
+    """
+    Restore data from a backup file.
+    Returns (success, message)
+    """
+    try:
+        backup_path = BACKUPS_DIR / backup_filename
+        if not backup_path.exists():
+            return False, f"Backup file not found: {backup_filename}"
+        
+        # Create temporary restore directory
+        temp_restore = DATA_DIR / ".restore_temp"
+        temp_restore.mkdir(exist_ok=True)
+        
+        # Extract backup
+        with tarfile.open(backup_path, "r:gz") as tar:
+            tar.extractall(temp_restore)
+        
+        # Acquire lock before restoring
+        acquire_lock()
+        try:
+            # Restore files
+            restored_files = []
+            
+            if (temp_restore / "state.json").exists():
+                shutil.copy2(temp_restore / "state.json", STATE_FILE)
+                restored_files.append("state.json")
+            
+            if (temp_restore / "config.json").exists():
+                shutil.copy2(temp_restore / "config.json", CONFIG_FILE)
+                restored_files.append("config.json")
+            
+            if (temp_restore / "monitors.json").exists():
+                shutil.copy2(temp_restore / "monitors.json", MONITORS_FILE)
+                restored_files.append("monitors.json")
+            
+            if (temp_restore / "system_resources.json").exists():
+                shutil.copy2(temp_restore / "system_resources.json", SYSTEM_RESOURCE_FILE)
+                restored_files.append("system_resources.json")
+            
+            if (temp_restore / "history").exists():
+                if HISTORY_DIR.exists():
+                    shutil.rmtree(HISTORY_DIR)
+                shutil.copytree(temp_restore / "history", HISTORY_DIR)
+                restored_files.append("history/")
+            
+            if (temp_restore / "screenshots").exists():
+                if SCREENSHOTS_DIR.exists():
+                    shutil.rmtree(SCREENSHOTS_DIR)
+                shutil.copytree(temp_restore / "screenshots", SCREENSHOTS_DIR)
+                restored_files.append("screenshots/")
+        finally:
+            release_lock()
+        
+        # Clean up temp directory
+        shutil.rmtree(temp_restore, ignore_errors=True)
+        
+        # Reload configuration
+        load_config()
+        load_monitors_state()
+        load_system_resource_state()
+        
+        log(f"✅ Backup restored: {backup_filename} ({len(restored_files)} items)")
+        return True, f"Backup restored successfully: {', '.join(restored_files)}"
+    except Exception as exc:
+        log(f"❌ Backup restoration failed: {exc}")
+        return False, f"Restore failed: {str(exc)}"
+
+
+def list_backups() -> List[Dict[str, Any]]:
+    """List all available backups."""
+    try:
+        ensure_dirs()
+        backups = []
+        
+        for backup_file in sorted(BACKUPS_DIR.glob("backup_*.tar.gz"), reverse=True):
+            try:
+                stat = backup_file.stat()
+                backups.append({
+                    "filename": backup_file.name,
+                    "size_bytes": stat.st_size,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "created": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "created_timestamp": stat.st_mtime,
+                })
+            except Exception:
+                continue
+        
+        return backups
+    except Exception as exc:
+        log(f"Error listing backups: {exc}")
+        return []
+
+
+def delete_backup(backup_filename: str) -> Tuple[bool, str]:
+    """Delete a specific backup file."""
+    try:
+        backup_path = BACKUPS_DIR / backup_filename
+        if not backup_path.exists():
+            return False, f"Backup file not found: {backup_filename}"
+        
+        backup_path.unlink()
+        log(f"🗑️  Backup deleted: {backup_filename}")
+        return True, f"Backup deleted: {backup_filename}"
+    except Exception as exc:
+        log(f"❌ Backup deletion failed: {exc}")
+        return False, f"Delete failed: {str(exc)}"
+
+
+def cleanup_old_backups() -> int:
+    """Delete old backups keeping only the most recent N backups. Returns number deleted."""
+    try:
+        backups = list_backups()
+        if len(backups) <= AUTO_BACKUP_MAX_COUNT:
+            return 0
+        
+        # Delete oldest backups
+        to_delete = backups[AUTO_BACKUP_MAX_COUNT:]
+        deleted_count = 0
+        
+        for backup in to_delete:
+            success, _ = delete_backup(backup["filename"])
+            if success:
+                deleted_count += 1
+        
+        if deleted_count > 0:
+            log(f"🗑️  Cleaned up {deleted_count} old backup(s)")
+        
+        return deleted_count
+    except Exception as exc:
+        log(f"Error cleaning up backups: {exc}")
+        return 0
+
+
+def auto_backup_worker_loop() -> None:
+    """Background worker that creates automatic backups on a schedule."""
+    global LAST_BACKUP_TIME
+    
+    log("Auto-backup worker started.")
+    
+    # Set initial backup time to now to avoid immediate backup on start
+    LAST_BACKUP_TIME = time.time()
+    
+    while True:
+        try:
+            if not AUTO_BACKUP_ENABLED:
+                time.sleep(60)  # Check every minute if disabled
+                continue
+            
+            current_time = time.time()
+            time_since_backup = current_time - LAST_BACKUP_TIME
+            
+            if time_since_backup >= AUTO_BACKUP_INTERVAL:
+                log("⏰ Auto-backup triggered")
+                success, message, filename = create_backup("auto")
+                
+                if success:
+                    LAST_BACKUP_TIME = current_time
+                    # Clean up old backups
+                    cleanup_old_backups()
+                else:
+                    log(f"Auto-backup failed: {message}")
+            
+            # Sleep for a short interval to check again
+            time.sleep(60)
+        except Exception as exc:
+            log(f"Error in auto-backup worker: {exc}")
+            time.sleep(60)
+
+
+def start_auto_backup_worker() -> None:
+    """Start the auto-backup worker thread."""
+    global AUTO_BACKUP_THREAD
+    
+    with AUTO_BACKUP_LOCK:
+        already_running = AUTO_BACKUP_THREAD and AUTO_BACKUP_THREAD.is_alive()
+    
+    if already_running:
+        return
+    
+    thread = threading.Thread(target=auto_backup_worker_loop, name="auto-backup", daemon=True)
+    thread.start()
+    
+    with AUTO_BACKUP_LOCK:
+        AUTO_BACKUP_THREAD = thread
+    
+    log("Auto-backup worker initialized.")
+
+
+def stop_auto_backup_worker() -> None:
+    """Stop the auto-backup worker thread."""
+    global AUTO_BACKUP_THREAD
+    
+    with AUTO_BACKUP_LOCK:
+        if AUTO_BACKUP_THREAD and AUTO_BACKUP_THREAD.is_alive():
+            AUTO_BACKUP_THREAD = None
+            log("Auto-backup worker stopped.")
+
+
+def get_auto_backup_status() -> Dict[str, Any]:
+    """Get current auto-backup status."""
+    with AUTO_BACKUP_LOCK:
+        next_backup_time = LAST_BACKUP_TIME + AUTO_BACKUP_INTERVAL if AUTO_BACKUP_ENABLED else None
+        return {
+            "enabled": AUTO_BACKUP_ENABLED,
+            "interval_seconds": AUTO_BACKUP_INTERVAL,
+            "max_count": AUTO_BACKUP_MAX_COUNT,
+            "last_backup_timestamp": LAST_BACKUP_TIME,
+            "next_backup_timestamp": next_backup_time,
+            "next_backup": datetime.fromtimestamp(next_backup_time, tz=timezone.utc).isoformat() if next_backup_time else None,
+            "worker_active": AUTO_BACKUP_THREAD and AUTO_BACKUP_THREAD.is_alive() if AUTO_BACKUP_THREAD else False,
+        }
+
+
 def save_config(cfg: Dict[str, Any]) -> None:
     ensure_dirs()
     tmp_path = CONFIG_FILE.with_suffix(".tmp")
@@ -1314,6 +1786,71 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         new_templates = _normalize_tool_flag_templates(values.get("tool_flag_templates"))
         if cfg.get("tool_flag_templates", {}) != new_templates:
             cfg["tool_flag_templates"] = new_templates
+            changed = True
+    
+    # Handle dynamic mode settings
+    if "dynamic_mode_enabled" in values:
+        new_dynamic = bool_from_value(values.get("dynamic_mode_enabled"), cfg.get("dynamic_mode_enabled", False))
+        if cfg.get("dynamic_mode_enabled", False) != new_dynamic:
+            cfg["dynamic_mode_enabled"] = new_dynamic
+            changed = True
+    
+    dynamic_mode_fields = {
+        "dynamic_mode_base_jobs": "Dynamic mode base jobs",
+        "dynamic_mode_max_jobs": "Dynamic mode max jobs",
+    }
+    for field, label in dynamic_mode_fields.items():
+        if field in values:
+            try:
+                new_limit = max(1, int(values.get(field)))
+            except (TypeError, ValueError):
+                return False, f"{label} must be an integer >= 1.", cfg
+            if cfg.get(field, 1) != new_limit:
+                cfg[field] = new_limit
+                changed = True
+    
+    # Handle dynamic mode threshold settings
+    if "dynamic_mode_cpu_threshold" in values:
+        try:
+            new_threshold = max(0.0, min(100.0, float(values.get("dynamic_mode_cpu_threshold"))))
+        except (TypeError, ValueError):
+            return False, "CPU threshold must be a number between 0 and 100.", cfg
+        if cfg.get("dynamic_mode_cpu_threshold", 75.0) != new_threshold:
+            cfg["dynamic_mode_cpu_threshold"] = new_threshold
+            changed = True
+    
+    if "dynamic_mode_memory_threshold" in values:
+        try:
+            new_threshold = max(0.0, min(100.0, float(values.get("dynamic_mode_memory_threshold"))))
+        except (TypeError, ValueError):
+            return False, "Memory threshold must be a number between 0 and 100.", cfg
+        if cfg.get("dynamic_mode_memory_threshold", 80.0) != new_threshold:
+            cfg["dynamic_mode_memory_threshold"] = new_threshold
+            changed = True
+    
+    # Handle auto-backup settings
+    if "auto_backup_enabled" in values:
+        new_auto_backup = bool_from_value(values.get("auto_backup_enabled"), cfg.get("auto_backup_enabled", False))
+        if cfg.get("auto_backup_enabled", False) != new_auto_backup:
+            cfg["auto_backup_enabled"] = new_auto_backup
+            changed = True
+    
+    if "auto_backup_interval" in values:
+        try:
+            new_interval = max(300, int(values.get("auto_backup_interval")))  # Min 5 minutes
+        except (TypeError, ValueError):
+            return False, "Auto-backup interval must be an integer >= 300 seconds (5 minutes).", cfg
+        if cfg.get("auto_backup_interval", 3600) != new_interval:
+            cfg["auto_backup_interval"] = new_interval
+            changed = True
+    
+    if "auto_backup_max_count" in values:
+        try:
+            new_count = max(1, int(values.get("auto_backup_max_count")))
+        except (TypeError, ValueError):
+            return False, "Auto-backup max count must be an integer >= 1.", cfg
+        if cfg.get("auto_backup_max_count", 10) != new_count:
+            cfg["auto_backup_max_count"] = new_count
             changed = True
 
     if changed:
@@ -4279,6 +4816,7 @@ button:hover { background:#1d4ed8; }
           <button class="settings-tab active" data-tab="general">General</button>
           <button class="settings-tab" data-tab="toggles">Tool Toggles</button>
           <button class="settings-tab" data-tab="concurrency">Concurrency</button>
+          <button class="settings-tab" data-tab="backup">Backup & Restore</button>
           <button class="settings-tab" data-tab="templates">Tool Templates</button>
           <button class="settings-tab" data-tab="toolchain">Toolchain</button>
         </div>
@@ -4399,6 +4937,61 @@ button:hover { background:#1d4ed8; }
               <label>GAU parallel slots
                 <input id="settings-gau" type="number" name="max_parallel_gau" min="1" />
               </label>
+            </div>
+            
+            <div class="card">
+              <h3>Dynamic Queue Management</h3>
+              <p class="muted">Automatically adjust concurrent jobs based on system resources (CPU, memory, load). Requires psutil to be installed.</p>
+              <label class="checkbox">
+                <input id="settings-dynamic-mode" type="checkbox" name="dynamic_mode_enabled" />
+                Enable Dynamic Mode
+              </label>
+              <label>Minimum concurrent jobs
+                <input id="settings-dynamic-base-jobs" type="number" name="dynamic_mode_base_jobs" min="1" />
+              </label>
+              <label>Maximum concurrent jobs
+                <input id="settings-dynamic-max-jobs" type="number" name="dynamic_mode_max_jobs" min="1" />
+              </label>
+              <label>CPU threshold (%)
+                <input id="settings-dynamic-cpu-threshold" type="number" name="dynamic_mode_cpu_threshold" min="0" max="100" step="0.1" />
+              </label>
+              <label>Memory threshold (%)
+                <input id="settings-dynamic-memory-threshold" type="number" name="dynamic_mode_memory_threshold" min="0" max="100" step="0.1" />
+              </label>
+              <p class="muted">Dynamic mode will reduce concurrent jobs when CPU or memory usage exceeds the thresholds.</p>
+            </div>
+          </div>
+          
+          <div class="settings-subtab-content" data-tab-content="backup">
+            <div class="card">
+              <h3>Backup & Restore</h3>
+              <p class="muted">Create backups of all reconnaissance data including state, configuration, monitors, history, and screenshots.</p>
+              
+              <h4>Manual Backup</h4>
+              <div style="display: flex; gap: 12px; align-items: flex-end; margin-bottom: 20px;">
+                <label style="flex: 1;">Backup name (optional)
+                  <input id="backup-name-input" type="text" placeholder="e.g., before-upgrade" />
+                </label>
+                <button id="create-backup-btn" class="btn">Create Backup</button>
+              </div>
+              
+              <h4>Available Backups</h4>
+              <div id="backup-list" style="margin-bottom: 20px;">
+                <p class="muted">Loading backups...</p>
+              </div>
+              
+              <h4>Auto-Backup Settings</h4>
+              <label class="checkbox">
+                <input id="settings-auto-backup-enabled" type="checkbox" name="auto_backup_enabled" />
+                Enable automatic backups
+              </label>
+              <label>Backup interval (seconds, minimum 300 = 5 minutes)
+                <input id="settings-auto-backup-interval" type="number" name="auto_backup_interval" min="300" step="60" />
+              </label>
+              <label>Maximum backup count (older backups are auto-deleted)
+                <input id="settings-auto-backup-max-count" type="number" name="auto_backup_max_count" min="1" />
+              </label>
+              <p class="muted">Auto-backups are created with the "auto" prefix and old backups are automatically removed.</p>
             </div>
           </div>
 
@@ -4611,6 +5204,17 @@ const settingsGowitness = document.getElementById('settings-gowitness');
 const settingsDnsx = document.getElementById('settings-dnsx');
 const settingsWaybackurls = document.getElementById('settings-waybackurls');
 const settingsGau = document.getElementById('settings-gau');
+const settingsDynamicMode = document.getElementById('settings-dynamic-mode');
+const settingsDynamicBaseJobs = document.getElementById('settings-dynamic-base-jobs');
+const settingsDynamicMaxJobs = document.getElementById('settings-dynamic-max-jobs');
+const settingsDynamicCpuThreshold = document.getElementById('settings-dynamic-cpu-threshold');
+const settingsDynamicMemoryThreshold = document.getElementById('settings-dynamic-memory-threshold');
+const settingsAutoBackupEnabled = document.getElementById('settings-auto-backup-enabled');
+const settingsAutoBackupInterval = document.getElementById('settings-auto-backup-interval');
+const settingsAutoBackupMaxCount = document.getElementById('settings-auto-backup-max-count');
+const backupNameInput = document.getElementById('backup-name-input');
+const createBackupBtn = document.getElementById('create-backup-btn');
+const backupList = document.getElementById('backup-list');
 const settingsStatus = document.getElementById('settings-status');
 const settingsSummary = document.getElementById('settings-summary');
 const templateInputs = {
@@ -5209,15 +5813,53 @@ function renderWorkers(workers) {
     return;
   }
   const job = workers.job_slots || {};
+  const dynamicMode = workers.dynamic_mode || {};
+  const autoBackup = workers.auto_backup || {};
+  
   const jobPct = job.limit ? Math.min(100, Math.round((job.active || 0) / job.limit * 100)) : 0;
+  
+  // Dynamic mode indicator
+  let dynamicIndicator = '';
+  if (dynamicMode.enabled) {
+    dynamicIndicator = `<div class="badge" style="background: #3b82f6; margin-top: 4px;">🔄 Dynamic Mode Active</div>`;
+  }
+  
   const jobCard = `
     <div class="worker-card">
       <h3>Job Slots</h3>
       <div class="metric">${job.active || 0}/${job.limit || 1}</div>
       <div class="muted">${job.queue || 0} queued</div>
+      ${dynamicIndicator}
       <div class="worker-progress">${renderProgress(jobPct, (job.active || 0) >= (job.limit || 1) ? 'running' : 'completed')}</div>
     </div>
   `;
+  
+  // Add dynamic mode card if enabled
+  let dynamicCard = '';
+  if (dynamicMode.enabled) {
+    dynamicCard = `
+      <div class="worker-card">
+        <h3>Dynamic Mode</h3>
+        <div class="metric">${dynamicMode.current_jobs || 1}</div>
+        <div class="muted">Range: ${dynamicMode.base_jobs || 1}–${dynamicMode.max_jobs || 10}</div>
+        <div class="muted">CPU &lt; ${dynamicMode.cpu_threshold || 75}% · Mem &lt; ${dynamicMode.memory_threshold || 80}%</div>
+      </div>
+    `;
+  }
+  
+  // Add auto-backup card if enabled
+  let backupCard = '';
+  if (autoBackup.enabled) {
+    const nextBackup = autoBackup.next_backup ? new Date(autoBackup.next_backup).toLocaleTimeString() : 'N/A';
+    backupCard = `
+      <div class="worker-card">
+        <h3>Auto-Backup</h3>
+        <div class="metric">💾 Active</div>
+        <div class="muted">Next: ${nextBackup}</div>
+        <div class="muted">Keep last ${autoBackup.max_count || 10}</div>
+      </div>
+    `;
+  }
   
   // Add rate limiting card
   const rateLimiting = workers.rate_limiting || {};
@@ -5271,7 +5913,7 @@ function renderWorkers(workers) {
       `;
     }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
-  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${rateLimitCard}${toolCards}</div>`;
+  workersBody.innerHTML = `<div class="worker-grid">${jobCard}${dynamicCard}${backupCard}${rateLimitCard}${toolCards}</div>`;
 }
 
 function renderSystemResources(data) {
@@ -6673,6 +7315,14 @@ function renderSettings(config, tools) {
     settingsDnsx.value = config.max_parallel_dnsx || 1;
     settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
     settingsGau.value = config.max_parallel_gau || 1;
+    settingsDynamicMode.checked = config.dynamic_mode_enabled || false;
+    settingsDynamicBaseJobs.value = config.dynamic_mode_base_jobs || 1;
+    settingsDynamicMaxJobs.value = config.dynamic_mode_max_jobs || 10;
+    settingsDynamicCpuThreshold.value = config.dynamic_mode_cpu_threshold || 75.0;
+    settingsDynamicMemoryThreshold.value = config.dynamic_mode_memory_threshold || 80.0;
+    settingsAutoBackupEnabled.checked = config.auto_backup_enabled || false;
+    settingsAutoBackupInterval.value = config.auto_backup_interval || 3600;
+    settingsAutoBackupMaxCount.value = config.auto_backup_max_count || 10;
     const templateValues = config.tool_flag_templates || {};
     Object.entries(templateInputs).forEach(([key, el]) => {
       if (!el) return;
@@ -6797,6 +7447,14 @@ settingsForm.addEventListener('submit', async (event) => {
     max_parallel_dnsx: settingsDnsx.value,
     max_parallel_waybackurls: settingsWaybackurls.value,
     max_parallel_gau: settingsGau.value,
+    dynamic_mode_enabled: settingsDynamicMode.checked,
+    dynamic_mode_base_jobs: settingsDynamicBaseJobs.value,
+    dynamic_mode_max_jobs: settingsDynamicMaxJobs.value,
+    dynamic_mode_cpu_threshold: settingsDynamicCpuThreshold.value,
+    dynamic_mode_memory_threshold: settingsDynamicMemoryThreshold.value,
+    auto_backup_enabled: settingsAutoBackupEnabled.checked,
+    auto_backup_interval: settingsAutoBackupInterval.value,
+    auto_backup_max_count: settingsAutoBackupMaxCount.value,
   };
   const templatePayload = {};
   Object.entries(templateInputs).forEach(([key, el]) => {
@@ -6823,6 +7481,149 @@ settingsForm.addEventListener('submit', async (event) => {
     settingsStatus.textContent = err.message;
     settingsStatus.className = 'status error';
   }
+});
+
+// Backup functionality
+async function loadBackups() {
+  try {
+    const resp = await fetch('/api/backups');
+    if (!resp.ok) throw new Error('Failed to load backups');
+    const data = await resp.json();
+    renderBackupsList(data.backups || []);
+  } catch (err) {
+    if (backupList) {
+      backupList.innerHTML = `<p class="muted">Error loading backups: ${escapeHtml(err.message)}</p>`;
+    }
+  }
+}
+
+function renderBackupsList(backups) {
+  if (!backupList) return;
+  
+  if (backups.length === 0) {
+    backupList.innerHTML = '<p class="muted">No backups available</p>';
+    return;
+  }
+  
+  const html = backups.map(backup => {
+    const date = new Date(backup.created);
+    const dateStr = date.toLocaleString();
+    return `
+      <div class="backup-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #0f172a; border-radius: 6px; margin-bottom: 8px;">
+        <div>
+          <strong>${escapeHtml(backup.filename)}</strong>
+          <div class="muted" style="font-size: 0.85rem;">${dateStr} · ${backup.size_mb} MB</div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn" onclick="downloadBackup('${escapeHtml(backup.filename)}')">Download</button>
+          <button class="btn" onclick="restoreBackup('${escapeHtml(backup.filename)}')">Restore</button>
+          <button class="btn" onclick="deleteBackup('${escapeHtml(backup.filename)}')" style="background: #dc2626;">Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  backupList.innerHTML = html;
+}
+
+async function createBackup() {
+  if (!createBackupBtn) return;
+  
+  const originalText = createBackupBtn.textContent;
+  createBackupBtn.textContent = 'Creating...';
+  createBackupBtn.disabled = true;
+  
+  try {
+    const payload = {};
+    if (backupNameInput && backupNameInput.value.trim()) {
+      payload.name = backupNameInput.value.trim();
+    }
+    
+    const resp = await fetch('/api/backup/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      alert(`Backup created successfully: ${data.filename}`);
+      if (backupNameInput) backupNameInput.value = '';
+      await loadBackups();
+    } else {
+      alert(`Backup failed: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error creating backup: ${err.message}`);
+  } finally {
+    createBackupBtn.textContent = originalText;
+    createBackupBtn.disabled = false;
+  }
+}
+
+function downloadBackup(filename) {
+  window.location.href = `/api/backup/download/${encodeURIComponent(filename)}`;
+}
+
+async function restoreBackup(filename) {
+  if (!confirm(`Are you sure you want to restore from backup "${filename}"? This will overwrite current data.`)) {
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/backup/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      alert(`Backup restored successfully. Reloading...`);
+      window.location.reload();
+    } else {
+      alert(`Restore failed: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error restoring backup: ${err.message}`);
+  }
+}
+
+async function deleteBackup(filename) {
+  if (!confirm(`Are you sure you want to delete backup "${filename}"? This cannot be undone.`)) {
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/backup/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      alert('Backup deleted successfully');
+      await loadBackups();
+    } else {
+      alert(`Delete failed: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error deleting backup: ${err.message}`);
+  }
+}
+
+if (createBackupBtn) {
+  createBackupBtn.addEventListener('click', createBackup);
+}
+
+// Load backups when settings tab is opened
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (tab.getAttribute('data-tab') === 'backup') {
+      loadBackups();
+    }
+  });
 });
 
 if (monitorForm) {
@@ -7337,6 +8138,7 @@ def snapshot_workers() -> Dict[str, Any]:
             "limit": MAX_RUNNING_JOBS,
             "active": active_jobs,
             "queue": queue_len,
+            "dynamic_mode": DYNAMIC_MODE_ENABLED,
         },
         "tools": tool_stats,
         "rate_limiting": {
@@ -7344,6 +8146,8 @@ def snapshot_workers() -> Dict[str, Any]:
             "max_auto_backoff": MAX_AUTO_BACKOFF_DELAY,
             "timeout_tracker": timeout_stats,
         },
+        "dynamic_mode": get_dynamic_mode_status(),
+        "auto_backup": get_auto_backup_status(),
     }
 
 
@@ -8280,6 +9084,59 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/system-resources":
             self._send_json(get_system_resource_snapshot())
             return
+        if self.path == "/api/dynamic-mode":
+            self._send_json(get_dynamic_mode_status())
+            return
+        if self.path == "/api/auto-backup-status":
+            self._send_json(get_auto_backup_status())
+            return
+        if self.path == "/api/backups":
+            self._send_json({"backups": list_backups()})
+            return
+        if self.path.startswith("/api/backup/download/"):
+            backup_filename = unquote(self.path[len("/api/backup/download/"):])
+            
+            # Reject filenames with path traversal sequences
+            if ".." in backup_filename or "/" in backup_filename or "\\" in backup_filename:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid filename")
+                return
+            
+            backup_path = BACKUPS_DIR / backup_filename
+            
+            # Security check: prevent path traversal and symlink attacks
+            try:
+                resolved_backup = backup_path.resolve()
+                resolved_backups_dir = BACKUPS_DIR.resolve()
+                
+                # Use is_relative_to if available (Python 3.9+), fallback to string check
+                try:
+                    is_within_dir = resolved_backup.is_relative_to(resolved_backups_dir)
+                except AttributeError:
+                    # Fallback for Python < 3.9
+                    is_within_dir = str(resolved_backup).startswith(str(resolved_backups_dir) + os.sep)
+                
+                if not is_within_dir:
+                    raise ValueError("Outside backups dir")
+                
+                # Check if it's a symlink (additional security)
+                if backup_path.is_symlink():
+                    raise ValueError("Symlinks not allowed")
+                
+                # Verify file exists and is a regular file
+                if not resolved_backup.exists() or not resolved_backup.is_file():
+                    raise ValueError("Not a valid file")
+            except Exception:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            
+            data = backup_path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{backup_filename}"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path.startswith("/screenshots/"):
             rel_path = unquote(self.path[len("/screenshots/"):]).lstrip("/")
             if not rel_path:
@@ -8368,6 +9225,9 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/targets/resume",
             "/api/monitors",
             "/api/monitors/delete",
+            "/api/backup/create",
+            "/api/backup/restore",
+            "/api/backup/delete",
         }
         if self.path not in allowed:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -8385,6 +9245,33 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 payload = {k: v[0] for k, v in parse_qs(body).items()}
         except json.JSONDecodeError:
             self._send_json({"success": False, "message": "Invalid JSON payload."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        
+        if self.path == "/api/backup/create":
+            name = payload.get("name", "")
+            success, message, filename = create_backup(name if name else None)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message, "filename": filename}, status=status)
+            return
+        
+        if self.path == "/api/backup/restore":
+            filename = payload.get("filename", "")
+            if not filename:
+                self._send_json({"success": False, "message": "Filename is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            success, message = restore_backup(filename)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/backup/delete":
+            filename = payload.get("filename", "")
+            if not filename:
+                self._send_json({"success": False, "message": "Filename is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            success, message = delete_backup(filename)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
             return
 
         if self.path == "/api/jobs/pause":
