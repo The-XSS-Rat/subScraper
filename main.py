@@ -3276,6 +3276,12 @@ code { background:#1e293b; padding:2px 4px; border-radius:4px; font-size:12px; }
 .nav { display:flex; flex-direction:column; gap:8px; }
 .nav-link { padding:10px 14px; border-radius:10px; color:var(--text); border:1px solid transparent; transition:all .2s ease; font-weight:500; display:block; }
 .nav-link:hover, .nav-link.active { background:#0f172a; border-color:#1e293b; }
+.subtab-nav { display:flex; gap:8px; margin-bottom:20px; border-bottom:1px solid #1e293b; }
+.subtab-link { padding:10px 16px; color:var(--text); border-bottom:2px solid transparent; transition:all .2s ease; cursor:pointer; font-weight:500; }
+.subtab-link:hover { color:#a5b4fc; }
+.subtab-link.active { color:#a5b4fc; border-bottom-color:#6366f1; }
+.subtab-content { display:none; }
+.subtab-content.active { display:block; }
 .sidebar-footer { margin-top:auto; font-size:12px; color:var(--muted); }
 .sidebar-footer code { background:#0f172a; padding:2px 6px; border-radius:6px; }
 .main-content { flex:1; padding:32px; }
@@ -3341,6 +3347,7 @@ button:hover { background:#1d4ed8; }
 .workflow-tool.enumeration { border-color:#8b5cf6; background:rgba(139,92,246,0.1); color:#c4b5fd; }
 .workflow-tool.brute-force { border-color:#f59e0b; background:rgba(245,158,11,0.1); color:#fcd34d; }
 .workflow-tool.probing { border-color:#06b6d4; background:rgba(6,182,212,0.1); color:#a5f3fc; }
+.workflow-tool.url-discovery { border-color:#ec4899; background:rgba(236,72,153,0.1); color:#fbcfe8; }
 .workflow-tool.scanning { border-color:#10b981; background:rgba(16,185,129,0.1); color:#a7f3d0; }
 .workflow-tool.capture { border-color:#6366f1; background:rgba(99,102,241,0.1); color:#c7d2fe; }
 .workflow-arrow { color:#64748b; font-size:18px; }
@@ -3484,6 +3491,7 @@ button:hover { background:#1d4ed8; }
     </div>
     <nav class="nav">
       <a class="nav-link" data-view="overview" href="#overview">Overview</a>
+      <a class="nav-link" data-view="launch" href="#launch">Launch Scan</a>
       <a class="nav-link" data-view="jobs" href="#jobs">Active Jobs</a>
       <a class="nav-link" data-view="workers" href="#workers">Workers</a>
       <a class="nav-link" data-view="queue" href="#queue">Queue</a>
@@ -3527,9 +3535,15 @@ button:hover { background:#1d4ed8; }
           <p class="muted">Visual representation of how data flows through the reconnaissance tools</p>
           <div id="workflow-diagram" style="margin-top: 20px;"></div>
         </div>
+      </div>
+    </section>
+
+    <section class="module" data-view="launch">
+      <div class="module-header"><h2>Launch Scan</h2></div>
+      <div class="module-body">
         <div class="grid-two">
           <div class="card">
-            <h3>Launch Recon</h3>
+            <h3>Start Reconnaissance</h3>
             <form id="launch-form">
               <label>Domain / TLD
                 <input id="launch-domain" type="text" name="domain" placeholder="example.com" required />
@@ -3551,6 +3565,7 @@ button:hover { background:#1d4ed8; }
           <div class="card">
             <h3>Quick Tips</h3>
             <ul class="tips">
+              <li>Enter a domain like <code>example.com</code> or use a wildcard suffix such as <code>example.*</code> to fan out across configured TLDs. Configure the allowed TLD list under <strong>Settings → Wildcard TLDs</strong>.</li>
               <li>Jobs update this view live; queue multiple targets safely.</li>
               <li>Adjust concurrency limits in Settings to control system load.</li>
               <li>Targets reuse the shared <code>state.json</code>, so reruns pick up where they left off.</li>
@@ -3633,10 +3648,19 @@ button:hover { background:#1d4ed8; }
       <div class="module-header"><h2>Settings & Tooling</h2></div>
       <div class="module-body">
         <div class="card" id="settings-summary">Loading settings…</div>
-        <div class="settings-layout">
-          <div class="card">
-            <h3>Defaults & Limits</h3>
-            <form id="settings-form">
+        
+        <div class="subtab-nav">
+          <div class="subtab-link active" data-subtab="general">General</div>
+          <div class="subtab-link" data-subtab="tool-toggles">Tool Toggles</div>
+          <div class="subtab-link" data-subtab="concurrency">Concurrency</div>
+          <div class="subtab-link" data-subtab="templates">Tool Templates</div>
+          <div class="subtab-link" data-subtab="toolchain">Toolchain</div>
+        </div>
+
+        <form id="settings-form">
+          <div class="subtab-content active" data-subtab-content="general">
+            <div class="card">
+              <h3>General Settings</h3>
               <label>Default wordlist
                 <input id="settings-wordlist" type="text" name="default_wordlist" placeholder="./w.txt" />
               </label>
@@ -3654,12 +3678,17 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-screenshots" type="checkbox" name="enable_screenshots" />
                 Enable screenshots
               </label>
+            </div>
+          </div>
+
+          <div class="subtab-content" data-subtab-content="tool-toggles">
+            <div class="card">
+              <h3>Tool Toggles</h3>
+              <p class="muted">Enable or disable specific reconnaissance tools</p>
+              <h4 style="margin-top:20px;">Subdomain Enumeration Tools</h4>
               <label class="checkbox">
                 <input id="settings-enable-amass" type="checkbox" name="enable_amass" />
                 Enable Amass
-              </label>
-              <label>Amass timeout (seconds)
-                <input id="settings-amass-timeout" type="number" name="amass_timeout" min="0" />
               </label>
               <label class="checkbox">
                 <input id="settings-enable-subfinder" type="checkbox" name="enable_subfinder" />
@@ -3689,6 +3718,7 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-dnsx" type="checkbox" name="enable_dnsx" />
                 Enable DNSx
               </label>
+              <h4 style="margin-top:20px;">URL Discovery Tools</h4>
               <label class="checkbox">
                 <input id="settings-enable-waybackurls" type="checkbox" name="enable_waybackurls" />
                 Enable Waybackurls
@@ -3696,6 +3726,24 @@ button:hover { background:#1d4ed8; }
               <label class="checkbox">
                 <input id="settings-enable-gau" type="checkbox" name="enable_gau" />
                 Enable GAU
+              </label>
+            </div>
+          </div>
+
+          <div class="subtab-content" data-subtab-content="concurrency">
+            <div class="card">
+              <h3>Concurrency Settings</h3>
+              <p class="muted">Control resource usage and parallelization</p>
+              <h4 style="margin-top:20px;">Job Control</h4>
+              <label>Max concurrent jobs
+                <input id="settings-max-jobs" type="number" name="max_running_jobs" min="1" />
+              </label>
+              <label>Global rate limit (seconds between tool calls, 0 = disabled)
+                <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
+              </label>
+              <h4 style="margin-top:20px;">Tool-Specific Limits</h4>
+              <label>Amass timeout (seconds)
+                <input id="settings-amass-timeout" type="number" name="amass_timeout" min="0" />
               </label>
               <label>Subfinder threads
                 <input id="settings-subfinder-threads" type="number" name="subfinder_threads" min="1" />
@@ -3706,12 +3754,7 @@ button:hover { background:#1d4ed8; }
               <label>Findomain threads
                 <input id="settings-findomain-threads" type="number" name="findomain_threads" min="1" />
               </label>
-              <label>Global rate limit (seconds between tool calls, 0 = disabled)
-                <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
-              </label>
-              <label>Max concurrent jobs
-                <input id="settings-max-jobs" type="number" name="max_running_jobs" min="1" />
-              </label>
+              <h4 style="margin-top:20px;">Parallel Execution Slots</h4>
               <label>ffuf parallel slots
                 <input id="settings-ffuf" type="number" name="max_parallel_ffuf" min="1" />
               </label>
@@ -3733,7 +3776,12 @@ button:hover { background:#1d4ed8; }
               <label>GAU parallel slots
                 <input id="settings-gau" type="number" name="max_parallel_gau" min="1" />
               </label>
-              <h4>Command templates</h4>
+            </div>
+          </div>
+
+          <div class="subtab-content" data-subtab-content="templates">
+            <div class="card">
+              <h3>Command Templates</h3>
               <p class="muted">Customize flags for each tool with variables such as <code>$DOMAIN$</code>, <code>$WORDLIST$</code>, <code>$OUTPUT$</code>, <code>$OUTPUT_JSON$</code>, <code>$INPUT_FILE$</code>, <code>$TARGET_URL$</code>, <code>$SUBDOMAIN$</code>, <code>$TARGETS_FILE$</code>, <code>$OUTPUT_PREFIX$</code>, <code>$OUTPUT_DIR$</code>, <code>$DB_PATH$</code>, <code>$THREADS$</code>, and <code>$HOST_HEADER$</code>.</p>
               <div class="template-grid">
                 <label>Amass flags
@@ -3786,12 +3834,17 @@ button:hover { background:#1d4ed8; }
                 </label>
               </div>
               <p class="template-note">Tip: leave a field blank to use the built-in defaults. Need examples? Visit the User Guide from the sidebar.</p>
-              <button type="submit">Save Settings</button>
-            </form>
-            <div class="status" id="settings-status"></div>
+            </div>
           </div>
+
+          <button type="submit" style="margin-top:20px;">Save Settings</button>
+        </form>
+        <div class="status" id="settings-status"></div>
+
+        <div class="subtab-content" data-subtab-content="toolchain">
           <div class="card">
             <h3>Toolchain</h3>
+            <p class="muted">Detected tool paths and availability</p>
             <ul id="tools-list" class="tool-list">
               <li class="muted">Detecting tool paths…</li>
             </ul>
@@ -3866,6 +3919,23 @@ navLinks.forEach(link => {
 });
 const initialView = location.hash ? location.hash.substring(1) : 'overview';
 setView(initialView || 'overview');
+
+// Subtab navigation
+const subtabLinks = document.querySelectorAll('.subtab-link');
+const subtabContents = document.querySelectorAll('.subtab-content');
+function setSubtab(target) {
+  subtabContents.forEach(content => {
+    content.classList.toggle('active', content.dataset.subtabContent === target);
+  });
+  subtabLinks.forEach(link => {
+    link.classList.toggle('active', link.dataset.subtab === target);
+  });
+}
+subtabLinks.forEach(link => {
+  link.addEventListener('click', () => {
+    setSubtab(link.dataset.subtab);
+  });
+});
 
 const POLL_INTERVAL = 8000;
 const launchForm = document.getElementById('launch-form');
@@ -4416,6 +4486,9 @@ function renderWorkflowDiagram() {
         <span class="workflow-tool enumeration">Assetfinder</span>
         <span class="workflow-tool enumeration">Findomain</span>
         <span class="workflow-tool enumeration">Sublist3r</span>
+        <span class="workflow-tool enumeration">crt.sh</span>
+        <span class="workflow-tool enumeration">GitHub-Subdomains</span>
+        <span class="workflow-tool enumeration">DNSx</span>
       </div>
       <div class="workflow-description">Passive and active subdomain discovery using multiple data sources</div>
     </div>
@@ -4449,7 +4522,20 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
+      <div class="workflow-stage-title">Phase 4: URL Discovery</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool url-discovery">Waybackurls</span>
+        <span class="workflow-tool url-discovery">GAU</span>
+      </div>
+      <div class="workflow-description">Discover historical URLs and endpoints from web archives</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 5: Visual Capture</div>
       <div class="workflow-tools">
         <span class="workflow-tool capture">Gowitness</span>
       </div>
@@ -4461,7 +4547,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 5: Port Scanning</div>
+      <div class="workflow-stage-title">Phase 6: Port Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nmap</span>
       </div>
@@ -4473,7 +4559,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 7: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
