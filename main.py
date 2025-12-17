@@ -63,8 +63,13 @@ TOOLS = {
     "assetfinder": "assetfinder",
     "findomain": "findomain",
     "sublist3r": "sublist3r",
+    "crtsh": "crtsh",  # Virtual tool for crt.sh API
+    "github-subdomains": "github-subdomains",
+    "dnsx": "dnsx",
     "ffuf": "ffuf",
     "httpx": "httpx",
+    "waybackurls": "waybackurls",
+    "gau": "gau",
     "nuclei": "nuclei",
     "nikto": "nikto",
     "gowitness": "gowitness",
@@ -79,8 +84,13 @@ TEMPLATE_AWARE_TOOLS = [
     "assetfinder",
     "findomain",
     "sublist3r",
+    "crtsh",
+    "github-subdomains",
+    "dnsx",
     "ffuf",
     "httpx",
+    "waybackurls",
+    "gau",
     "nuclei",
     "nikto",
     "gowitness",
@@ -132,12 +142,20 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "nikto": ToolGate(1),
     "gowitness": ToolGate(1),
     "nmap": ToolGate(1),
+    "dnsx": ToolGate(1),
+    "waybackurls": ToolGate(1),
+    "gau": ToolGate(1),
 }
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "ffuf", "httpx", "screenshots", "nmap", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nmap", "nuclei", "nikto"]
+
+# Global rate limiter
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_LAST_CALL = 0.0
+GLOBAL_RATE_LIMIT_DELAY = 0.0  # seconds between tool calls (0 = no rate limit)
 STEP_PROGRESS = {
     "pending": 0,
     "queued": 0,
@@ -178,6 +196,22 @@ class JobControl:
         with self._cond:
             while self._pause_requested:
                 self._cond.wait()
+
+
+def apply_rate_limit() -> None:
+    """
+    Apply global rate limiting by enforcing minimum delay between tool calls.
+    """
+    global RATE_LIMIT_LAST_CALL
+    if GLOBAL_RATE_LIMIT_DELAY <= 0:
+        return
+    with RATE_LIMIT_LOCK:
+        now = time.time()
+        elapsed = now - RATE_LIMIT_LAST_CALL
+        if elapsed < GLOBAL_RATE_LIMIT_DELAY:
+            sleep_time = GLOBAL_RATE_LIMIT_DELAY - elapsed
+            time.sleep(sleep_time)
+        RATE_LIMIT_LAST_CALL = time.time()
 
 
 JOB_CONTROLS: Dict[str, JobControl] = {}
@@ -255,17 +289,27 @@ def apply_template_flags(
 
 
 def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
-    global MAX_RUNNING_JOBS
+    global MAX_RUNNING_JOBS, GLOBAL_RATE_LIMIT_DELAY
     try:
         MAX_RUNNING_JOBS = max(1, int(cfg.get("max_running_jobs", 1)))
     except (TypeError, ValueError):
         MAX_RUNNING_JOBS = 1
+    
+    # Apply global rate limit
+    try:
+        GLOBAL_RATE_LIMIT_DELAY = max(0.0, float(cfg.get("global_rate_limit", 0.0)))
+    except (TypeError, ValueError):
+        GLOBAL_RATE_LIMIT_DELAY = 0.0
+    
     parallel_fields = {
         "ffuf": "max_parallel_ffuf",
         "nuclei": "max_parallel_nuclei",
         "nikto": "max_parallel_nikto",
         "gowitness": "max_parallel_gowitness",
         "nmap": "max_parallel_nmap",
+        "dnsx": "max_parallel_dnsx",
+        "waybackurls": "max_parallel_waybackurls",
+        "gau": "max_parallel_gau",
     }
     for tool, field in parallel_fields.items():
         gate = TOOL_GATES.setdefault(tool, ToolGate(1))
@@ -335,6 +379,11 @@ def default_config() -> Dict[str, Any]:
         "enable_assetfinder": True,
         "enable_findomain": True,
         "enable_sublist3r": True,
+        "enable_crtsh": True,
+        "enable_github_subdomains": True,
+        "enable_dnsx": True,
+        "enable_waybackurls": True,
+        "enable_gau": True,
         "wildcard_tlds": ["com", "net", "org", "io", "co", "app", "dev", "us", "uk", "in", "de"],
         "subfinder_threads": 32,
         "assetfinder_threads": 10,
@@ -344,10 +393,14 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_nikto": 1,
         "max_parallel_gowitness": 1,
         "max_parallel_nmap": 1,
+        "max_parallel_dnsx": 1,
+        "max_parallel_waybackurls": 1,
+        "max_parallel_gau": 1,
         "enable_nmap": True,
         "nmap_timeout": 300,
         "max_nmap_output_size": 5000,
         "max_running_jobs": 1,
+        "global_rate_limit": 0.0,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
     }
 
@@ -760,12 +813,22 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             cfg["enable_amass"] = new_amass
             changed = True
 
-    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots"]:
+    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots", "enable_crtsh", "enable_github_subdomains", "enable_dnsx", "enable_waybackurls", "enable_gau"]:
         if key in values:
             new_value = bool_from_value(values.get(key), cfg.get(key, True))
             if cfg.get(key, True) != new_value:
                 cfg[key] = new_value
                 changed = True
+
+    # Handle global rate limit (can be 0 or positive float)
+    if "global_rate_limit" in values:
+        try:
+            new_rate_limit = max(0.0, float(values.get("global_rate_limit")))
+        except (TypeError, ValueError):
+            return False, "Global rate limit must be a number >= 0.", cfg
+        if cfg.get("global_rate_limit", 0.0) != new_rate_limit:
+            cfg["global_rate_limit"] = new_rate_limit
+            changed = True
 
     concurrency_fields = {
         "max_running_jobs": "Max concurrent jobs",
@@ -777,6 +840,9 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         "findomain_threads": "Findomain threads",
         "amass_timeout": "Amass timeout (seconds)",
         "max_parallel_gowitness": "Screenshot parallel slots",
+        "max_parallel_dnsx": "DNSx parallel slots",
+        "max_parallel_waybackurls": "Waybackurls parallel slots",
+        "max_parallel_gau": "GAU parallel slots",
     }
     for field, label in concurrency_fields.items():
         if field in values:
@@ -997,13 +1063,17 @@ def ensure_tool_installed(tool: str) -> bool:
 
     # Try go install for some known tools
     try:
-        if shutil.which("go") and tool in {"amass", "httpx", "nuclei", "subfinder", "assetfinder"}:
+        if shutil.which("go") and tool in {"amass", "httpx", "nuclei", "subfinder", "assetfinder", "dnsx", "waybackurls", "gau", "github-subdomains"}:
             go_pkgs = {
                 "amass": "github.com/owasp-amass/amass/v3/...@latest",
                 "httpx": "github.com/projectdiscovery/httpx/cmd/httpx@latest",
                 "nuclei": "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
                 "subfinder": "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
                 "assetfinder": "github.com/tomnomnom/assetfinder@latest",
+                "dnsx": "github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+                "waybackurls": "github.com/tomnomnom/waybackurls@latest",
+                "gau": "github.com/lc/gau/v2/cmd/gau@latest",
+                "github-subdomains": "github.com/gwen001/github-subdomains@latest",
             }
             pkg = go_pkgs[tool]
             log(f"Trying: go install {pkg}")
@@ -1015,6 +1085,11 @@ def ensure_tool_installed(tool: str) -> bool:
                 return True
     except Exception as e:
         log(f"go install attempt failed for {tool}: {e}")
+    
+    # Special case: crtsh is API-based, not a binary tool
+    if tool == "crtsh":
+        TOOLS[tool] = "crtsh"  # Virtual tool
+        return True
 
     log(
         f"Could not auto-install {tool}. Please install it manually and re-run. "
@@ -1110,6 +1185,9 @@ def run_subprocess(
     env: Optional[Dict[str, str]] = None,
     timeout: Optional[int] = None,
 ) -> bool:
+    # Apply global rate limiting before running any tool
+    apply_rate_limit()
+    
     display_cmd = " ".join(cmd)
     log(f"Running: {display_cmd}")
     if job_domain:
@@ -1354,6 +1432,135 @@ def sublist3r_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
     return read_lines_file(out_path) if success else []
 
 
+def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
+    """
+    Query crt.sh for certificate transparency logs to find subdomains.
+    """
+    out_path = DATA_DIR / f"crtsh_{domain}.txt"
+    subs = set()
+    try:
+        import urllib.request
+        import json as json_lib
+        url = f"https://crt.sh/?q=%.{domain}&output=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "ReconTool/1.0"})
+        if job_domain:
+            job_log_append(job_domain, f"Querying crt.sh for {domain}", source="crtsh")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = response.read()
+        entries = json_lib.loads(data)
+        for entry in entries:
+            name = entry.get("name_value", "")
+            if name:
+                for line in name.split("\n"):
+                    cleaned = line.strip().lower().lstrip("*.")
+                    if cleaned and domain in cleaned:
+                        subs.add(cleaned)
+        with open(out_path, "w", encoding="utf-8") as f:
+            for sub in sorted(subs):
+                f.write(sub + "\n")
+        if job_domain:
+            job_log_append(job_domain, f"crt.sh found {len(subs)} subdomains", source="crtsh")
+    except Exception as exc:
+        log(f"crt.sh enumeration failed for {domain}: {exc}")
+        if job_domain:
+            job_log_append(job_domain, f"crt.sh error: {exc}", source="crtsh")
+    return sorted(subs)
+
+
+def github_subdomains_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
+    """
+    Use github-subdomains tool to find subdomains via GitHub.
+    """
+    if not ensure_tool_installed("github-subdomains"):
+        return []
+    out_path = DATA_DIR / f"github_subdomains_{domain}.txt"
+    cmd = [
+        TOOLS["github-subdomains"],
+        "-d", domain,
+        "-o", str(out_path),
+    ]
+    context = {
+        "DOMAIN": domain,
+        "OUTPUT": str(out_path),
+    }
+    cmd = apply_template_flags("github-subdomains", cmd, context)
+    success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="github-subdomains")
+    return read_lines_file(out_path) if success else []
+
+
+def dnsx_verify(subdomains: List[str], domain: str, job_domain: Optional[str] = None) -> List[str]:
+    """
+    Use dnsx to verify which subdomains actually resolve.
+    """
+    if not ensure_tool_installed("dnsx"):
+        return subdomains
+    if not subdomains:
+        return []
+    
+    input_path = DATA_DIR / f"dnsx_input_{domain}.txt"
+    out_path = DATA_DIR / f"dnsx_{domain}.txt"
+    
+    with open(input_path, "w", encoding="utf-8") as f:
+        for sub in subdomains:
+            f.write(sub + "\n")
+    
+    cmd = [
+        TOOLS["dnsx"],
+        "-silent",
+        "-l", str(input_path),
+        "-o", str(out_path),
+    ]
+    context = {
+        "DOMAIN": domain,
+        "INPUT": str(input_path),
+        "OUTPUT": str(out_path),
+    }
+    cmd = apply_template_flags("dnsx", cmd, context)
+    success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="dnsx")
+    return read_lines_file(out_path) if success else subdomains
+
+
+def waybackurls_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
+    """
+    Use waybackurls to discover URLs from archive.org.
+    """
+    if not ensure_tool_installed("waybackurls"):
+        return []
+    out_path = DATA_DIR / f"waybackurls_{domain}.txt"
+    cmd = [
+        TOOLS["waybackurls"],
+        domain,
+    ]
+    context = {
+        "DOMAIN": domain,
+        "OUTPUT": str(out_path),
+    }
+    cmd = apply_template_flags("waybackurls", cmd, context)
+    success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="waybackurls")
+    return read_lines_file(out_path) if success else []
+
+
+def gau_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
+    """
+    Use gau (Get All URLs) to discover URLs from various sources.
+    """
+    if not ensure_tool_installed("gau"):
+        return []
+    out_path = DATA_DIR / f"gau_{domain}.txt"
+    cmd = [
+        TOOLS["gau"],
+        "--subs",
+        domain,
+    ]
+    context = {
+        "DOMAIN": domain,
+        "OUTPUT": str(out_path),
+    }
+    cmd = apply_template_flags("gau", cmd, context)
+    success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="gau")
+    return read_lines_file(out_path) if success else []
+
+
 def harvest_enumerator_outputs(
     domain: str,
     config: Dict[str, Any],
@@ -1421,6 +1628,18 @@ def harvest_enumerator_outputs(
         DATA_DIR / f"sublist3r_{domain}.txt",
         read_lines_file,
     )
+    process(
+        "crtsh",
+        config.get("enable_crtsh", True),
+        DATA_DIR / f"crtsh_{domain}.txt",
+        read_lines_file,
+    )
+    process(
+        "github-subdomains",
+        config.get("enable_github_subdomains", True),
+        DATA_DIR / f"github_subdomains_{domain}.txt",
+        read_lines_file,
+    )
 
     if added and state is not None:
         save_state(state)
@@ -1455,6 +1674,35 @@ def run_downstream_pipeline(
 
     state = load_state()
     flags = ensure_target_state(state, domain)["flags"]
+    
+    # ---------- dnsx (DNS verification) ----------
+    if not flags.get("dnsx_done") and config.get("enable_dnsx", True):
+        # Get all discovered subdomains from state
+        tgt_state = ensure_target_state(state, domain)
+        all_discovered_subs = sorted(tgt_state["subdomains"].keys())
+        if all_discovered_subs:
+            log(f"=== dnsx DNS verification for {domain} ({len(all_discovered_subs)} hosts) ===")
+            update_step("dnsx", status="running", message=f"Verifying {len(all_discovered_subs)} subdomains with dnsx", progress=50)
+            if job_domain:
+                job_log_append(job_domain, "Waiting for dnsx slot...", "scheduler")
+            with TOOL_GATES["dnsx"]:
+                if job_domain:
+                    job_log_append(job_domain, "dnsx slot acquired.", "scheduler")
+                verified_subs = dnsx_verify(all_discovered_subs, domain, job_domain=job_domain)
+            log(f"dnsx verified {len(verified_subs)} resolving subdomains.")
+            flags["dnsx_done"] = True
+            save_state(state)
+            update_step("dnsx", status="completed", message=f"dnsx verified {len(verified_subs)}/{len(all_discovered_subs)} subdomains resolve.", progress=100)
+        else:
+            flags["dnsx_done"] = True
+            save_state(state)
+            update_step("dnsx", status="skipped", message="No subdomains to verify.", progress=0)
+    elif not config.get("enable_dnsx", True):
+        update_step("dnsx", status="skipped", message="dnsx disabled in settings.", progress=0)
+        flags["dnsx_done"] = True
+        save_state(state)
+    else:
+        update_step("dnsx", status="skipped", message="dnsx already completed for this target.", progress=0)
 
     # ---------- ffuf ----------
     if not flags.get("ffuf_done"):
@@ -1517,6 +1765,48 @@ def run_downstream_pipeline(
         httpx_processed.update(new_hosts)
         save_state(state)
         job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
+    
+    # ---------- waybackurls (URL discovery) ----------
+    if not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
+        log(f"=== waybackurls URL discovery for {domain} ===")
+        update_step("waybackurls", status="running", message="Discovering URLs from archive.org", progress=50)
+        if job_domain:
+            job_log_append(job_domain, "Waiting for waybackurls slot...", "scheduler")
+        with TOOL_GATES["waybackurls"]:
+            if job_domain:
+                job_log_append(job_domain, "waybackurls slot acquired.", "scheduler")
+            urls = waybackurls_enum(domain, job_domain=job_domain)
+        log(f"waybackurls found {len(urls)} URLs.")
+        flags["waybackurls_done"] = True
+        save_state(state)
+        update_step("waybackurls", status="completed", message=f"waybackurls found {len(urls)} URLs.", progress=100)
+    elif not config.get("enable_waybackurls", True):
+        update_step("waybackurls", status="skipped", message="waybackurls disabled in settings.", progress=0)
+        flags["waybackurls_done"] = True
+        save_state(state)
+    else:
+        update_step("waybackurls", status="skipped", message="waybackurls already completed for this target.", progress=0)
+    
+    # ---------- gau (Get All URLs) ----------
+    if not flags.get("gau_done") and config.get("enable_gau", True):
+        log(f"=== gau URL discovery for {domain} ===")
+        update_step("gau", status="running", message="Discovering URLs from multiple sources", progress=50)
+        if job_domain:
+            job_log_append(job_domain, "Waiting for gau slot...", "scheduler")
+        with TOOL_GATES["gau"]:
+            if job_domain:
+                job_log_append(job_domain, "gau slot acquired.", "scheduler")
+            urls = gau_enum(domain, job_domain=job_domain)
+        log(f"gau found {len(urls)} URLs.")
+        flags["gau_done"] = True
+        save_state(state)
+        update_step("gau", status="completed", message=f"gau found {len(urls)} URLs.", progress=100)
+    elif not config.get("enable_gau", True):
+        update_step("gau", status="skipped", message="gau disabled in settings.", progress=0)
+        flags["gau_done"] = True
+        save_state(state)
+    else:
+        update_step("gau", status="skipped", message="gau already completed for this target.", progress=0)
 
     # ---------- screenshots ----------
     if not config.get("enable_screenshots", True):
@@ -2561,6 +2851,8 @@ def run_pipeline(
         "assetfinder": set(),
         "findomain": set(),
         "sublist3r": set(),
+        "crtsh": set(),
+        "github-subdomains": set(),
     }
 
     def start_downstream_if_ready() -> None:
@@ -2605,12 +2897,16 @@ def run_pipeline(
         update_step("amass", status="skipped", message="Input is a subdomain; Amass skipped.", progress=0)
         update_step("subfinder", status="skipped", message="Input is a subdomain; Subfinder skipped.", progress=0)
         update_step("assetfinder", status="skipped", message="Input is a subdomain; Assetfinder skipped.", progress=0)
+        update_step("crtsh", status="skipped", message="Input is a subdomain; crt.sh skipped.", progress=0)
+        update_step("github-subdomains", status="skipped", message="Input is a subdomain; GitHub subdomains skipped.", progress=0)
     else:
         enumerator_specs = []
         enable_subfinder = config.get("enable_subfinder", True)
         enable_assetfinder = config.get("enable_assetfinder", True)
         enable_findomain = config.get("enable_findomain", True)
         enable_sublist3r = config.get("enable_sublist3r", True)
+        enable_crtsh = config.get("enable_crtsh", True)
+        enable_github_subdomains = config.get("enable_github_subdomains", True)
 
         def maybe_add_enum(step_name: str, flag_key: str, desc: str, func, enabled: bool = True):
             if not enabled:
@@ -2658,6 +2954,20 @@ def run_pipeline(
             "Sublist3r",
             lambda: sublist3r_enum(domain, job_domain=job_domain),
             enable_sublist3r,
+        )
+        maybe_add_enum(
+            "crtsh",
+            "crtsh_done",
+            "crt.sh",
+            lambda: crtsh_enum(domain, job_domain=job_domain),
+            enable_crtsh,
+        )
+        maybe_add_enum(
+            "github-subdomains",
+            "github_subdomains_done",
+            "GitHub Subdomains",
+            lambda: github_subdomains_enum(domain, job_domain=job_domain),
+            enable_github_subdomains,
         )
 
         if enumerator_specs:
