@@ -3276,12 +3276,6 @@ code { background:#1e293b; padding:2px 4px; border-radius:4px; font-size:12px; }
 .nav { display:flex; flex-direction:column; gap:8px; }
 .nav-link { padding:10px 14px; border-radius:10px; color:var(--text); border:1px solid transparent; transition:all .2s ease; font-weight:500; display:block; }
 .nav-link:hover, .nav-link.active { background:#0f172a; border-color:#1e293b; }
-.subtab-nav { display:flex; gap:8px; margin-bottom:20px; border-bottom:1px solid #1e293b; }
-.subtab-link { padding:10px 16px; color:var(--text); border-bottom:2px solid transparent; transition:all .2s ease; cursor:pointer; font-weight:500; }
-.subtab-link:hover { color:#a5b4fc; }
-.subtab-link.active { color:#a5b4fc; border-bottom-color:#6366f1; }
-.subtab-content { display:none; }
-.subtab-content.active { display:block; }
 .sidebar-footer { margin-top:auto; font-size:12px; color:var(--muted); }
 .sidebar-footer code { background:#0f172a; padding:2px 6px; border-radius:6px; }
 .main-content { flex:1; padding:32px; }
@@ -3347,7 +3341,6 @@ button:hover { background:#1d4ed8; }
 .workflow-tool.enumeration { border-color:#8b5cf6; background:rgba(139,92,246,0.1); color:#c4b5fd; }
 .workflow-tool.brute-force { border-color:#f59e0b; background:rgba(245,158,11,0.1); color:#fcd34d; }
 .workflow-tool.probing { border-color:#06b6d4; background:rgba(6,182,212,0.1); color:#a5f3fc; }
-.workflow-tool.url-discovery { border-color:#ec4899; background:rgba(236,72,153,0.1); color:#fbcfe8; }
 .workflow-tool.scanning { border-color:#10b981; background:rgba(16,185,129,0.1); color:#a7f3d0; }
 .workflow-tool.capture { border-color:#6366f1; background:rgba(99,102,241,0.1); color:#c7d2fe; }
 .workflow-arrow { color:#64748b; font-size:18px; }
@@ -3454,24 +3447,10 @@ button:hover { background:#1d4ed8; }
 .link-btn { background:none; border:none; color:#93c5fd; cursor:pointer; text-decoration:underline; padding:0; font:inherit; }
 .modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(2,6,23,0.85); display:none; align-items:center; justify-content:center; z-index:1000; }
 .modal-overlay.show { display:flex; }
-.modal { width:90%; max-width:1100px; max-height:90vh; overflow-y:auto; background:#0f172a; border:1px solid #1e293b; border-radius:16px; padding:24px; box-shadow:0 25px 60px rgba(0,0,0,0.5); }
+.modal { width:90%; max-width:900px; max-height:90vh; overflow-y:auto; background:#0f172a; border:1px solid #1e293b; border-radius:16px; padding:24px; box-shadow:0 25px 60px rgba(0,0,0,0.5); }
 .modal h3 { margin-top:0; color:#fbbf24; }
-.modal h4 { color:#a5b4fc; margin-top:20px; margin-bottom:12px; }
-.modal h5 { color:#94a3b8; margin-top:12px; margin-bottom:8px; font-size:14px; }
 .modal-close { position:absolute; top:16px; right:24px; background:none; border:none; color:#f87171; font-size:24px; cursor:pointer; }
-.detail-section { margin-bottom:24px; padding:16px; background:#0b152c; border:1px solid #1e293b; border-radius:12px; }
 .detail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-bottom:16px; }
-.detail-grid div { padding:8px 0; }
-.detail-grid strong { color:#a5b4fc; display:block; margin-bottom:4px; font-size:12px; text-transform:uppercase; }
-.detail-table { width:100%; border-collapse:collapse; margin-top:12px; }
-.detail-table th { background:#050b18; padding:10px; text-align:left; color:#94a3b8; font-size:12px; text-transform:uppercase; border-bottom:2px solid #1e293b; }
-.detail-table td { padding:10px; border-bottom:1px solid #1e293b; }
-.detail-table tbody tr:hover { background:#0b152c; }
-.url-list { max-height:300px; overflow-y:auto; border:1px solid #1e293b; border-radius:8px; padding:12px; background:#050b18; }
-.url-item { padding:4px 0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.url-item a { color:#60a5fa; }
-.url-item a:hover { color:#93c5fd; }
-.code-block { background:#050b18; border:1px solid #1e293b; border-radius:8px; padding:12px; overflow-x:auto; font-size:12px; color:#94a3b8; max-height:300px; }
 .timeline { max-height:250px; overflow:auto; border:1px solid #1e293b; border-radius:12px; padding:12px; background:#050b18; }
 .timeline-entry { margin-bottom:10px; }
 .timeline-entry .meta { color:var(--muted); font-size:11px; margin-bottom:3px; }
@@ -3505,7 +3484,6 @@ button:hover { background:#1d4ed8; }
     </div>
     <nav class="nav">
       <a class="nav-link" data-view="overview" href="#overview">Overview</a>
-      <a class="nav-link" data-view="launch" href="#launch">Launch Scan</a>
       <a class="nav-link" data-view="jobs" href="#jobs">Active Jobs</a>
       <a class="nav-link" data-view="workers" href="#workers">Workers</a>
       <a class="nav-link" data-view="queue" href="#queue">Queue</a>
@@ -3549,15 +3527,9 @@ button:hover { background:#1d4ed8; }
           <p class="muted">Visual representation of how data flows through the reconnaissance tools</p>
           <div id="workflow-diagram" style="margin-top: 20px;"></div>
         </div>
-      </div>
-    </section>
-
-    <section class="module" data-view="launch">
-      <div class="module-header"><h2>Launch Scan</h2></div>
-      <div class="module-body">
         <div class="grid-two">
           <div class="card">
-            <h3>Start Reconnaissance</h3>
+            <h3>Launch Recon</h3>
             <form id="launch-form">
               <label>Domain / TLD
                 <input id="launch-domain" type="text" name="domain" placeholder="example.com" required />
@@ -3579,7 +3551,6 @@ button:hover { background:#1d4ed8; }
           <div class="card">
             <h3>Quick Tips</h3>
             <ul class="tips">
-              <li>Enter a domain like <code>example.com</code> or use a wildcard suffix such as <code>example.*</code> to fan out across configured TLDs. Configure the allowed TLD list under <strong>Settings → Wildcard TLDs</strong>.</li>
               <li>Jobs update this view live; queue multiple targets safely.</li>
               <li>Adjust concurrency limits in Settings to control system load.</li>
               <li>Targets reuse the shared <code>state.json</code>, so reruns pick up where they left off.</li>
@@ -3662,19 +3633,10 @@ button:hover { background:#1d4ed8; }
       <div class="module-header"><h2>Settings & Tooling</h2></div>
       <div class="module-body">
         <div class="card" id="settings-summary">Loading settings…</div>
-        
-        <div class="subtab-nav">
-          <div class="subtab-link active" data-subtab="general">General</div>
-          <div class="subtab-link" data-subtab="tool-toggles">Tool Toggles</div>
-          <div class="subtab-link" data-subtab="concurrency">Concurrency</div>
-          <div class="subtab-link" data-subtab="templates">Tool Templates</div>
-          <div class="subtab-link" data-subtab="toolchain">Toolchain</div>
-        </div>
-
-        <form id="settings-form">
-          <div class="subtab-content active" data-subtab-content="general">
-            <div class="card">
-              <h3>General Settings</h3>
+        <div class="settings-layout">
+          <div class="card">
+            <h3>Defaults & Limits</h3>
+            <form id="settings-form">
               <label>Default wordlist
                 <input id="settings-wordlist" type="text" name="default_wordlist" placeholder="./w.txt" />
               </label>
@@ -3692,17 +3654,12 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-screenshots" type="checkbox" name="enable_screenshots" />
                 Enable screenshots
               </label>
-            </div>
-          </div>
-
-          <div class="subtab-content" data-subtab-content="tool-toggles">
-            <div class="card">
-              <h3>Tool Toggles</h3>
-              <p class="muted">Enable or disable specific reconnaissance tools</p>
-              <h4 style="margin-top:20px;">Subdomain Enumeration Tools</h4>
               <label class="checkbox">
                 <input id="settings-enable-amass" type="checkbox" name="enable_amass" />
                 Enable Amass
+              </label>
+              <label>Amass timeout (seconds)
+                <input id="settings-amass-timeout" type="number" name="amass_timeout" min="0" />
               </label>
               <label class="checkbox">
                 <input id="settings-enable-subfinder" type="checkbox" name="enable_subfinder" />
@@ -3732,7 +3689,6 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-dnsx" type="checkbox" name="enable_dnsx" />
                 Enable DNSx
               </label>
-              <h4 style="margin-top:20px;">URL Discovery Tools</h4>
               <label class="checkbox">
                 <input id="settings-enable-waybackurls" type="checkbox" name="enable_waybackurls" />
                 Enable Waybackurls
@@ -3740,24 +3696,6 @@ button:hover { background:#1d4ed8; }
               <label class="checkbox">
                 <input id="settings-enable-gau" type="checkbox" name="enable_gau" />
                 Enable GAU
-              </label>
-            </div>
-          </div>
-
-          <div class="subtab-content" data-subtab-content="concurrency">
-            <div class="card">
-              <h3>Concurrency Settings</h3>
-              <p class="muted">Control resource usage and parallelization</p>
-              <h4 style="margin-top:20px;">Job Control</h4>
-              <label>Max concurrent jobs
-                <input id="settings-max-jobs" type="number" name="max_running_jobs" min="1" />
-              </label>
-              <label>Global rate limit (seconds between tool calls, 0 = disabled)
-                <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
-              </label>
-              <h4 style="margin-top:20px;">Tool-Specific Limits</h4>
-              <label>Amass timeout (seconds)
-                <input id="settings-amass-timeout" type="number" name="amass_timeout" min="0" />
               </label>
               <label>Subfinder threads
                 <input id="settings-subfinder-threads" type="number" name="subfinder_threads" min="1" />
@@ -3768,7 +3706,12 @@ button:hover { background:#1d4ed8; }
               <label>Findomain threads
                 <input id="settings-findomain-threads" type="number" name="findomain_threads" min="1" />
               </label>
-              <h4 style="margin-top:20px;">Parallel Execution Slots</h4>
+              <label>Global rate limit (seconds between tool calls, 0 = disabled)
+                <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
+              </label>
+              <label>Max concurrent jobs
+                <input id="settings-max-jobs" type="number" name="max_running_jobs" min="1" />
+              </label>
               <label>ffuf parallel slots
                 <input id="settings-ffuf" type="number" name="max_parallel_ffuf" min="1" />
               </label>
@@ -3790,12 +3733,7 @@ button:hover { background:#1d4ed8; }
               <label>GAU parallel slots
                 <input id="settings-gau" type="number" name="max_parallel_gau" min="1" />
               </label>
-            </div>
-          </div>
-
-          <div class="subtab-content" data-subtab-content="templates">
-            <div class="card">
-              <h3>Command Templates</h3>
+              <h4>Command templates</h4>
               <p class="muted">Customize flags for each tool with variables such as <code>$DOMAIN$</code>, <code>$WORDLIST$</code>, <code>$OUTPUT$</code>, <code>$OUTPUT_JSON$</code>, <code>$INPUT_FILE$</code>, <code>$TARGET_URL$</code>, <code>$SUBDOMAIN$</code>, <code>$TARGETS_FILE$</code>, <code>$OUTPUT_PREFIX$</code>, <code>$OUTPUT_DIR$</code>, <code>$DB_PATH$</code>, <code>$THREADS$</code>, and <code>$HOST_HEADER$</code>.</p>
               <div class="template-grid">
                 <label>Amass flags
@@ -3848,17 +3786,12 @@ button:hover { background:#1d4ed8; }
                 </label>
               </div>
               <p class="template-note">Tip: leave a field blank to use the built-in defaults. Need examples? Visit the User Guide from the sidebar.</p>
-            </div>
+              <button type="submit">Save Settings</button>
+            </form>
+            <div class="status" id="settings-status"></div>
           </div>
-
-          <button type="submit" style="margin-top:20px;">Save Settings</button>
-        </form>
-        <div class="status" id="settings-status"></div>
-
-        <div class="subtab-content" data-subtab-content="toolchain">
           <div class="card">
             <h3>Toolchain</h3>
-            <p class="muted">Detected tool paths and availability</p>
             <ul id="tools-list" class="tool-list">
               <li class="muted">Detecting tool paths…</li>
             </ul>
@@ -3933,23 +3866,6 @@ navLinks.forEach(link => {
 });
 const initialView = location.hash ? location.hash.substring(1) : 'overview';
 setView(initialView || 'overview');
-
-// Subtab navigation
-const subtabLinks = document.querySelectorAll('.subtab-link');
-const subtabContents = document.querySelectorAll('.subtab-content');
-function setSubtab(target) {
-  subtabContents.forEach(content => {
-    content.classList.toggle('active', content.dataset.subtabContent === target);
-  });
-  subtabLinks.forEach(link => {
-    link.classList.toggle('active', link.dataset.subtab === target);
-  });
-}
-subtabLinks.forEach(link => {
-  link.addEventListener('click', () => {
-    setSubtab(link.dataset.subtab);
-  });
-});
 
 const POLL_INTERVAL = 8000;
 const launchForm = document.getElementById('launch-form');
@@ -4500,9 +4416,6 @@ function renderWorkflowDiagram() {
         <span class="workflow-tool enumeration">Assetfinder</span>
         <span class="workflow-tool enumeration">Findomain</span>
         <span class="workflow-tool enumeration">Sublist3r</span>
-        <span class="workflow-tool enumeration">crt.sh</span>
-        <span class="workflow-tool enumeration">GitHub-Subdomains</span>
-        <span class="workflow-tool enumeration">DNSx</span>
       </div>
       <div class="workflow-description">Passive and active subdomain discovery using multiple data sources</div>
     </div>
@@ -4536,20 +4449,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 4: URL Discovery</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool url-discovery">Waybackurls</span>
-        <span class="workflow-tool url-discovery">GAU</span>
-      </div>
-      <div class="workflow-description">Discover historical URLs and endpoints from web archives</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 5: Visual Capture</div>
+      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
       <div class="workflow-tools">
         <span class="workflow-tool capture">Gowitness</span>
       </div>
@@ -4561,7 +4461,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Port Scanning</div>
+      <div class="workflow-stage-title">Phase 5: Port Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nmap</span>
       </div>
@@ -4573,7 +4473,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 7: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
@@ -4664,206 +4564,47 @@ function buildDetailHtml(domain, sub, info, history) {
   const screenshot = info.screenshot || {};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
-  const nmap = info.nmap || {};
-  const waybackurls = info.waybackurls || [];
-  const gau = info.gau || [];
-  
   const filteredHistory = history.filter(event => {
     const text = (event.text || '').toLowerCase();
     const src = (event.source || '').toLowerCase();
     const needle = (sub || '').toLowerCase();
     return needle && (text.includes(needle) || src.includes(needle));
   });
-  
-  // HTTP Info section
-  const httpSection = httpx.url ? `
-    <div class="detail-section">
-      <h4>HTTP Information</h4>
-      <div class="detail-grid">
-        <div>
-          <strong>URL:</strong> <a href="${escapeHtml(httpx.url)}" target="_blank">${escapeHtml(httpx.url)}</a>
-        </div>
-        <div>
-          <strong>Status Code:</strong> ${httpx.status_code || '—'}
-        </div>
-        <div>
-          <strong>Title:</strong> ${escapeHtml(httpx.title || '—')}
-        </div>
-        <div>
-          <strong>Web Server:</strong> ${escapeHtml(httpx.webserver || '—')}
-        </div>
-        ${httpx.content_type ? `<div><strong>Content Type:</strong> ${escapeHtml(httpx.content_type)}</div>` : ''}
-        ${httpx.content_length ? `<div><strong>Content Length:</strong> ${escapeHtml(httpx.content_length)}</div>` : ''}
-        ${httpx.tech ? `<div><strong>Technologies:</strong> ${escapeHtml(Array.isArray(httpx.tech) ? httpx.tech.join(', ') : httpx.tech)}</div>` : ''}
-      </div>
-    </div>
-  ` : '<div class="detail-section"><h4>HTTP Information</h4><p class="muted">No HTTP data available</p></div>';
-  
-  // Screenshot section
-  const screenshotSection = screenshot.path ? `
-    <div class="detail-section">
-      <h4>Screenshot</h4>
-      <div style="text-align: center;">
-        <a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">
-          <img src="/screenshots/${escapeHtml(screenshot.path)}" 
-               alt="Screenshot of ${escapeHtml(sub)}" 
-               style="max-width: 100%; height: auto; border: 1px solid #1e293b; border-radius: 8px; cursor: pointer;" />
-        </a>
-        ${screenshot.captured_at ? `<p class="muted" style="margin-top: 8px;">Captured: ${fmtTime(screenshot.captured_at)}</p>` : ''}
-      </div>
-    </div>
-  ` : '<div class="detail-section"><h4>Screenshot</h4><p class="muted">No screenshot available</p></div>';
-  
-  // Nmap section
-  const nmapSection = (nmap.ports && nmap.ports.length) || nmap.raw ? `
-    <div class="detail-section">
-      <h4>Port Scan Results (Nmap)</h4>
-      ${nmap.ports && nmap.ports.length ? `
-        <table class="detail-table">
-          <thead>
-            <tr>
-              <th>Port</th>
-              <th>State</th>
-              <th>Service</th>
-              <th>Version</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${nmap.ports.map(port => `
-              <tr>
-                <td>${escapeHtml(String(port.port || ''))}</td>
-                <td><span class="status-pill ${port.state === 'open' ? 'status-completed' : ''}">${escapeHtml(port.state || 'unknown')}</span></td>
-                <td>${escapeHtml(port.service || '—')}</td>
-                <td>${escapeHtml(port.version || '—')}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      ` : ''}
-      ${nmap.raw ? `<pre class="code-block">${escapeHtml(nmap.raw)}</pre>` : ''}
-      ${nmap.scanned_at ? `<p class="muted">Scanned: ${fmtTime(nmap.scanned_at)}</p>` : ''}
-    </div>
-  ` : '';
-  
-  // URL Discovery section
-  const urlsSection = (waybackurls.length > 0 || gau.length > 0) ? `
-    <div class="detail-section">
-      <h4>Discovered URLs</h4>
-      ${waybackurls.length > 0 ? `
-        <h5>Wayback URLs (${waybackurls.length})</h5>
-        <div class="url-list">
-          ${waybackurls.slice(0, 50).map(url => `<div class="url-item"><a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a></div>`).join('')}
-          ${waybackurls.length > 50 ? `<p class="muted">... and ${waybackurls.length - 50} more</p>` : ''}
-        </div>
-      ` : ''}
-      ${gau.length > 0 ? `
-        <h5 style="margin-top: 16px;">GAU URLs (${gau.length})</h5>
-        <div class="url-list">
-          ${gau.slice(0, 50).map(url => `<div class="url-item"><a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a></div>`).join('')}
-          ${gau.length > 50 ? `<p class="muted">... and ${gau.length - 50} more</p>` : ''}
-        </div>
-      ` : ''}
-    </div>
-  ` : '';
-  
-  // Nuclei section
-  const nucleiSection = nuclei.length ? `
-    <div class="detail-section">
-      <h4>Nuclei Findings (${nuclei.length})</h4>
-      <table class="detail-table">
-        <thead>
-          <tr>
-            <th>Severity</th>
-            <th>Template</th>
-            <th>Name</th>
-            <th>Location</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${nuclei.map(finding => {
-            const severity = normalizeSeverity(finding && finding.severity, 'INFO');
-            return `
-              <tr>
-                <td><span class="severity-pill ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
-                <td>${escapeHtml(finding.template_id || finding['template-id'] || '—')}</td>
-                <td>${escapeHtml(finding.name || '—')}</td>
-                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(finding.matched_at || finding['matched-at'] || finding.url || '')}">${escapeHtml(finding.matched_at || finding['matched-at'] || finding.url || '—')}</td>
-              </tr>
-            `;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>
-  ` : '<div class="detail-section"><h4>Nuclei Findings</h4><p class="muted">No nuclei findings</p></div>';
-  
-  // Nikto section
-  const niktoSection = nikto.length ? `
-    <div class="detail-section">
-      <h4>Nikto Findings (${nikto.length})</h4>
-      <table class="detail-table">
-        <thead>
-          <tr>
-            <th>Severity</th>
-            <th>Message</th>
-            <th>Reference</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${nikto.map(finding => {
-            const severity = normalizeSeverity((finding && (finding.severity || finding.risk)) || 'INFO', 'INFO');
-            return `
-              <tr>
-                <td><span class="severity-pill ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
-                <td>${escapeHtml(finding.msg || finding.description || finding.raw || '—')}</td>
-                <td>${escapeHtml(finding.uri || (finding.osvdb ? \`OSVDB-\${finding.osvdb}\` : '—'))}</td>
-              </tr>
-            `;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>
-  ` : '<div class="detail-section"><h4>Nikto Findings</h4><p class="muted">No nikto findings</p></div>';
-  
-  // Sources and metadata section
-  const metadataSection = `
-    <div class="detail-section">
-      <h4>Metadata</h4>
-      <div class="detail-grid">
-        <div>
-          <strong>Parent Domain:</strong> ${escapeHtml(domain)}
-        </div>
-        <div>
-          <strong>Discovery Sources:</strong> ${sources.length ? escapeHtml(sources.join(', ')) : 'Unknown'}
-        </div>
-      </div>
-    </div>
-  `;
-  
-  // Timeline section
-  const timelineSection = `
-    <div class="detail-section">
-      <h4>Timeline & History</h4>
-      <div class="timeline">
-        ${filteredHistory.length ? filteredHistory.map(evt => `
-          <div class="timeline-entry">
-            <div class="meta">${escapeHtml(evt.ts || '')} — ${escapeHtml(evt.source || '')}</div>
-            <div>${escapeHtml(evt.text || '')}</div>
-          </div>
-        `).join('') : '<p class="muted">No history for this subdomain yet.</p>'}
-      </div>
-    </div>
-  `;
-  
   return `
     <h3>${escapeHtml(sub)} <span class="badge">${escapeHtml(domain)}</span></h3>
-    ${metadataSection}
-    ${httpSection}
-    ${screenshotSection}
-    ${nmapSection}
-    ${urlsSection}
-    ${nucleiSection}
-    ${niktoSection}
-    ${timelineSection}
+    <div class="detail-grid">
+      <div>
+        <h4>Sources</h4>
+        <p>${sources.join(', ') || 'Unknown'}</p>
+      </div>
+      <div>
+        <h4>HTTP</h4>
+        <p>${httpx.status_code || '—'} ${escapeHtml(httpx.title || '')}</p>
+        <p>${escapeHtml(httpx.webserver || '')}</p>
+      </div>
+      <div>
+        <h4>Screenshot</h4>
+        ${screenshot.path ? `<p><a href="/screenshots/${escapeHtml(screenshot.path)}" target="_blank">Open image</a></p>` : '<p>None</p>'}
+        ${screenshot.captured_at ? `<p class="muted">Captured ${fmtTime(screenshot.captured_at)}</p>` : ''}
+      </div>
+      <div>
+        <h4>Nuclei Findings</h4>
+        ${nuclei.length ? nuclei.map(n => `<div><strong>${escapeHtml(n.template_id || '')}</strong> (${escapeHtml((n.severity || '').toUpperCase())})<br>${escapeHtml(n.matched_at || '')}</div>`).join('') : '<p>None</p>'}
+      </div>
+      <div>
+        <h4>Nikto Findings</h4>
+        ${nikto.length ? nikto.map(n => `<div>${escapeHtml(n.msg || n.raw || '')}</div>`).join('') : '<p>None</p>'}
+      </div>
+    </div>
+    <h4>Timeline</h4>
+    <div class="timeline">
+      ${filteredHistory.length ? filteredHistory.map(evt => `
+        <div class="timeline-entry">
+          <div class="meta">${escapeHtml(evt.ts || '')} — ${escapeHtml(evt.source || '')}</div>
+          <div>${escapeHtml(evt.text || '')}</div>
+        </div>
+      `).join('') : '<p class="muted">No history for this subdomain yet.</p>'}
+    </div>
   `;
 }
 
