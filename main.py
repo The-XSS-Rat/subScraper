@@ -2522,7 +2522,7 @@ def setup_amass_config(config_dir: Path, config_file: Path) -> None:
             lines.append("# apikey = YOUR_KEY_HERE")
             lines.append("")
     
-    config_file.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(config_file, "\n".join(lines))
     print(f"\n   ✓ Amass config created at: {config_file}")
     if api_keys:
         print(f"   ✓ Configured {len(api_keys)} API key(s)")
@@ -2566,7 +2566,7 @@ def setup_subfinder_config(config_dir: Path, config_file: Path) -> None:
         lines.append("# Example:")
         lines.append("# shodan: [your_api_key_here]")
     
-    config_file.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(config_file, "\n".join(lines))
     print(f"\n   ✓ Subfinder config created at: {config_file}")
     if api_keys:
         print(f"   ✓ Configured {len(api_keys)} API key(s)")
@@ -2653,7 +2653,7 @@ def ensure_amass_config_interactive() -> None:
             lines.append("    #apikey = YOUR_KEY_HERE")
             lines.append("")
 
-    config_file.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(config_file, "\n".join(lines))
     log(f"Amass config created at {config_file}. You can tweak it later if needed.")
 
 
