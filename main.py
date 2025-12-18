@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -51,6 +52,7 @@ except ImportError:
 # ====================== CONFIG ======================
 
 DATA_DIR = Path("recon_data")
+DB_FILE = DATA_DIR / "recon.db"
 STATE_FILE = DATA_DIR / "state.json"
 HTML_DASHBOARD_FILE = DATA_DIR / "dashboard.html"
 LOCK_FILE = DATA_DIR / ".lock"
@@ -60,6 +62,10 @@ SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 MONITORS_FILE = DATA_DIR / "monitors.json"
 BACKUPS_DIR = DATA_DIR / "backups"
 COMPLETED_JOBS_FILE = DATA_DIR / "completed_jobs.json"
+
+# SQLite connection pool
+DB_LOCK = threading.Lock()
+DB_CONN: Optional[sqlite3.Connection] = None
 
 DEFAULT_INTERVAL = 30
 HTML_REFRESH_SECONDS = DEFAULT_INTERVAL  # default; can be overridden
@@ -384,6 +390,337 @@ def ensure_dirs() -> None:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ================== SQLite DATABASE ====================
+
+def get_db() -> sqlite3.Connection:
+    """Get a thread-safe database connection."""
+    global DB_CONN
+    with DB_LOCK:
+        if DB_CONN is None:
+            ensure_dirs()
+            DB_CONN = sqlite3.connect(str(DB_FILE), check_same_thread=False)
+            DB_CONN.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            DB_CONN.execute("PRAGMA journal_mode=WAL")
+            DB_CONN.execute("PRAGMA foreign_keys=ON")
+        return DB_CONN
+
+
+def init_database() -> None:
+    """Initialize the SQLite database schema."""
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Config table - stores key-value configuration
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Targets table - stores domain targets
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS targets (
+            domain TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            flags TEXT,
+            options TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Subdomains table - stores subdomain data for each target
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subdomains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT NOT NULL,
+            subdomain TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(domain, subdomain),
+            FOREIGN KEY (domain) REFERENCES targets(domain) ON DELETE CASCADE
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_subdomains_domain 
+        ON subdomains(domain)
+    """)
+    
+    # Completed jobs table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS completed_jobs (
+            job_key TEXT PRIMARY KEY,
+            domain TEXT NOT NULL,
+            data TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_completed_jobs_domain 
+        ON completed_jobs(domain)
+    """)
+    
+    # Monitors table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monitors (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # System resources table - stores resource snapshots
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_system_resources_timestamp 
+        ON system_resources(timestamp DESC)
+    """)
+    
+    # History table - stores per-domain event history
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_history_domain 
+        ON history(domain, timestamp DESC)
+    """)
+    
+    # Migration tracking table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            migration_name TEXT UNIQUE NOT NULL,
+            completed_at TEXT NOT NULL
+        )
+    """)
+    
+    db.commit()
+    log("Database schema initialized successfully.")
+
+
+def check_migration_done(migration_name: str) -> bool:
+    """Check if a migration has already been completed."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT 1 FROM migrations WHERE migration_name = ?",
+        (migration_name,)
+    )
+    return cursor.fetchone() is not None
+
+
+def mark_migration_done(migration_name: str) -> None:
+    """Mark a migration as completed."""
+    db = get_db()
+    cursor = db.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT OR IGNORE INTO migrations (migration_name, completed_at) VALUES (?, ?)",
+        (migration_name, now)
+    )
+    db.commit()
+
+
+def migrate_json_to_sqlite() -> None:
+    """Migrate all JSON data to SQLite database."""
+    log("Starting migration from JSON files to SQLite...")
+    
+    # Migrate config
+    if CONFIG_FILE.exists() and not check_migration_done("config_json"):
+        log("Migrating config.json...")
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            
+            db = get_db()
+            cursor = db.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            
+            for key, value in config_data.items():
+                cursor.execute(
+                    "INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, json.dumps(value), now)
+                )
+            
+            db.commit()
+            mark_migration_done("config_json")
+            log("✓ Config migration completed.")
+        except Exception as e:
+            log(f"Error migrating config.json: {e}")
+    
+    # Migrate state (targets and subdomains)
+    if STATE_FILE.exists() and not check_migration_done("state_json"):
+        log("Migrating state.json...")
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            
+            targets = state_data.get("targets", {})
+            db = get_db()
+            cursor = db.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            
+            for domain, target_data in targets.items():
+                subdomains = target_data.get("subdomains", {})
+                flags = target_data.get("flags", {})
+                options = target_data.get("options", {})
+                
+                # Insert target
+                cursor.execute(
+                    """INSERT OR REPLACE INTO targets 
+                       (domain, data, flags, options, created_at, updated_at) 
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (domain, "{}", json.dumps(flags), json.dumps(options), now, now)
+                )
+                
+                # Insert subdomains
+                for subdomain, sub_data in subdomains.items():
+                    cursor.execute(
+                        """INSERT OR REPLACE INTO subdomains 
+                           (domain, subdomain, data, created_at, updated_at) 
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (domain, subdomain, json.dumps(sub_data), now, now)
+                    )
+            
+            db.commit()
+            mark_migration_done("state_json")
+            log(f"✓ State migration completed ({len(targets)} targets).")
+        except Exception as e:
+            log(f"Error migrating state.json: {e}")
+    
+    # Migrate completed jobs
+    if COMPLETED_JOBS_FILE.exists() and not check_migration_done("completed_jobs_json"):
+        log("Migrating completed_jobs.json...")
+        try:
+            with open(COMPLETED_JOBS_FILE, "r", encoding="utf-8") as f:
+                jobs_data = json.load(f)
+            
+            jobs = jobs_data.get("jobs", {})
+            db = get_db()
+            cursor = db.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            
+            for job_key, job_data in jobs.items():
+                domain = job_key.rsplit("_", 1)[0] if "_" in job_key else job_key
+                completed_at = job_data.get("completed_at", now)
+                
+                cursor.execute(
+                    """INSERT OR REPLACE INTO completed_jobs 
+                       (job_key, domain, data, completed_at, created_at) 
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (job_key, domain, json.dumps(job_data), completed_at, now)
+                )
+            
+            db.commit()
+            mark_migration_done("completed_jobs_json")
+            log(f"✓ Completed jobs migration completed ({len(jobs)} jobs).")
+        except Exception as e:
+            log(f"Error migrating completed_jobs.json: {e}")
+    
+    # Migrate monitors
+    if MONITORS_FILE.exists() and not check_migration_done("monitors_json"):
+        log("Migrating monitors.json...")
+        try:
+            with open(MONITORS_FILE, "r", encoding="utf-8") as f:
+                monitors_data = json.load(f)
+            
+            monitors = monitors_data.get("monitors", {})
+            db = get_db()
+            cursor = db.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            
+            for monitor_id, monitor_data in monitors.items():
+                name = monitor_data.get("name", "")
+                url = monitor_data.get("url", "")
+                created_at = monitor_data.get("created_at", now)
+                
+                cursor.execute(
+                    """INSERT OR REPLACE INTO monitors 
+                       (id, name, url, data, created_at, updated_at) 
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (monitor_id, name, url, json.dumps(monitor_data), created_at, now)
+                )
+            
+            db.commit()
+            mark_migration_done("monitors_json")
+            log(f"✓ Monitors migration completed ({len(monitors)} monitors).")
+        except Exception as e:
+            log(f"Error migrating monitors.json: {e}")
+    
+    # Migrate history files
+    if HISTORY_DIR.exists() and not check_migration_done("history_jsonl"):
+        log("Migrating history/*.jsonl files...")
+        try:
+            db = get_db()
+            cursor = db.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            total_entries = 0
+            
+            for history_file in HISTORY_DIR.glob("*.jsonl"):
+                domain = history_file.stem
+                
+                with history_file.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            timestamp = entry.get("ts", now)
+                            source = entry.get("source", "system")
+                            text = entry.get("text", "")
+                            
+                            cursor.execute(
+                                """INSERT INTO history 
+                                   (domain, timestamp, source, text, created_at) 
+                                   VALUES (?, ?, ?, ?, ?)""",
+                                (domain, timestamp, source, text, now)
+                            )
+                            total_entries += 1
+                        except json.JSONDecodeError:
+                            continue
+            
+            db.commit()
+            mark_migration_done("history_jsonl")
+            log(f"✓ History migration completed ({total_entries} entries).")
+        except Exception as e:
+            log(f"Error migrating history files: {e}")
+    
+    log("Migration from JSON to SQLite completed successfully!")
+
+
+def ensure_database() -> None:
+    """Ensure database is initialized and migrated."""
+    init_database()
+    migrate_json_to_sqlite()
 
 
 def atomic_write_json(filepath: Path, data: Dict[str, Any], indent: int = 2) -> None:
@@ -719,30 +1056,51 @@ def default_config() -> Dict[str, Any]:
 
 
 def load_monitors_state() -> Dict[str, Any]:
+    """Load monitors from SQLite database."""
     ensure_dirs()
-    data = {"monitors": {}}
-    if MONITORS_FILE.exists():
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT id, data FROM monitors")
+    rows = cursor.fetchall()
+    
+    monitors = {}
+    for row in rows:
+        monitor_id = row[0]
         try:
-            with open(MONITORS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict) and isinstance(raw.get("monitors"), dict):
-                data = raw
-        except Exception as exc:
-            log(f"Error loading monitors.json: {exc}")
-    else:
-        save_monitors_state()
+            monitor_data = json.loads(row[1])
+            monitors[monitor_id] = monitor_data
+        except json.JSONDecodeError:
+            pass
+    
     with MONITOR_LOCK:
         MONITOR_STATE.clear()
-        MONITOR_STATE.update(data.get("monitors", {}))
+        MONITOR_STATE.update(monitors)
     return get_monitors_snapshot()
 
 
 def _save_monitors_locked() -> None:
-    payload = {"monitors": MONITOR_STATE}
-    atomic_write_json(MONITORS_FILE, payload)
+    """Save monitors to SQLite database (must be called with MONITOR_LOCK held)."""
+    db = get_db()
+    cursor = db.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    
+    for monitor_id, monitor_data in MONITOR_STATE.items():
+        name = monitor_data.get("name", "")
+        url = monitor_data.get("url", "")
+        created_at = monitor_data.get("created_at", now)
+        
+        cursor.execute(
+            """INSERT OR REPLACE INTO monitors 
+               (id, name, url, data, created_at, updated_at) 
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (monitor_id, name, url, json.dumps(monitor_data), created_at, now)
+        )
+    
+    db.commit()
 
 
 def save_monitors_state() -> None:
+    """Save monitors to SQLite database."""
     ensure_dirs()
     with MONITOR_LOCK:
         _save_monitors_locked()
@@ -1170,31 +1528,75 @@ def check_resource_thresholds(metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def save_system_resource_state() -> None:
-    """Save current system resource state and history to disk."""
+    """Save current system resource state and history to SQLite database."""
     ensure_dirs()
     with SYSTEM_RESOURCE_LOCK:
-        payload = {
-            "current": SYSTEM_RESOURCE_STATE,
-            "history": SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:],
-        }
-        atomic_write_json(SYSTEM_RESOURCE_FILE, payload)
+        # Save only recent history entries to database
+        history_to_save = SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:]
+        
+        db = get_db()
+        cursor = db.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        # Insert new history entries
+        for entry in history_to_save:
+            timestamp = entry.get("timestamp", now)
+            cursor.execute(
+                """INSERT INTO system_resources (timestamp, data, created_at) 
+                   VALUES (?, ?, ?)""",
+                (timestamp, json.dumps(entry), now)
+            )
+        
+        # Clean up old entries (keep only the most recent SYSTEM_RESOURCE_HISTORY_SIZE * 2 entries)
+        cursor.execute(
+            """DELETE FROM system_resources 
+               WHERE id NOT IN (
+                   SELECT id FROM system_resources 
+                   ORDER BY timestamp DESC 
+                   LIMIT ?
+               )""",
+            (SYSTEM_RESOURCE_HISTORY_SIZE * 2,)
+        )
+        
+        db.commit()
 
 
 def load_system_resource_state() -> Dict[str, Any]:
-    """Load system resource state from disk."""
+    """Load system resource state from SQLite database."""
     global SYSTEM_RESOURCE_HISTORY
     ensure_dirs()
-    if SYSTEM_RESOURCE_FILE.exists():
+    
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Load recent history
+    cursor.execute(
+        """SELECT data FROM system_resources 
+           ORDER BY timestamp DESC 
+           LIMIT ?""",
+        (SYSTEM_RESOURCE_HISTORY_SIZE,)
+    )
+    rows = cursor.fetchall()
+    
+    history = []
+    for row in rows:
         try:
-            with open(SYSTEM_RESOURCE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            with SYSTEM_RESOURCE_LOCK:
-                SYSTEM_RESOURCE_STATE.clear()
-                SYSTEM_RESOURCE_STATE.update(data.get("current", {}))
-                SYSTEM_RESOURCE_HISTORY.clear()
-                SYSTEM_RESOURCE_HISTORY.extend(data.get("history", []))
-        except Exception as exc:
-            log(f"Error loading system resource state: {exc}")
+            entry = json.loads(row[0])
+            history.append(entry)
+        except json.JSONDecodeError:
+            pass
+    
+    # Reverse to get chronological order
+    history.reverse()
+    
+    with SYSTEM_RESOURCE_LOCK:
+        SYSTEM_RESOURCE_STATE.clear()
+        # Current state is the most recent entry if available
+        if history:
+            SYSTEM_RESOURCE_STATE.update(history[-1])
+        SYSTEM_RESOURCE_HISTORY.clear()
+        SYSTEM_RESOURCE_HISTORY.extend(history)
+    
     return get_system_resource_snapshot()
 
 
@@ -1708,8 +2110,20 @@ def get_auto_backup_status() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
+    """Save configuration to SQLite database."""
     ensure_dirs()
-    atomic_write_json(CONFIG_FILE, cfg)
+    db = get_db()
+    cursor = db.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    
+    for key, value in cfg.items():
+        cursor.execute(
+            "INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, json.dumps(value), now)
+        )
+    
+    db.commit()
+    
     with CONFIG_LOCK:
         CONFIG.clear()
         CONFIG.update(cfg)
@@ -1717,19 +2131,26 @@ def save_config(cfg: Dict[str, Any]) -> None:
 
 
 def load_config() -> Dict[str, Any]:
+    """Load configuration from SQLite database."""
     ensure_dirs()
     cfg = default_config()
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                for key in cfg.keys():
-                    if key in data:
-                        cfg[key] = data[key]
-        except Exception as e:
-            log(f"Error loading config.json: {e}")
+    
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT key, value FROM config")
+    rows = cursor.fetchall()
+    
+    if rows:
+        for row in rows:
+            key = row[0]
+            try:
+                value = json.loads(row[1])
+                if key in cfg:
+                    cfg[key] = value
+            except json.JSONDecodeError:
+                pass
     else:
+        # No config in database, save defaults
         save_config(cfg)
     cfg["tool_flag_templates"] = _normalize_tool_flag_templates(cfg.get("tool_flag_templates"))
     with CONFIG_LOCK:
@@ -2013,31 +2434,109 @@ def release_lock() -> None:
 
 
 def load_state() -> Dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {
-            "version": 1,
-            "targets": {},
-            "last_updated": None
+    """Load state (targets and subdomains) from SQLite database."""
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Load targets
+    cursor.execute("SELECT domain, data, flags, options FROM targets")
+    target_rows = cursor.fetchall()
+    
+    targets = {}
+    for row in target_rows:
+        domain = row[0]
+        flags = json.loads(row[2]) if row[2] else {}
+        options = json.loads(row[3]) if row[3] else {}
+        
+        # Load subdomains for this target
+        cursor.execute(
+            "SELECT subdomain, data FROM subdomains WHERE domain = ?",
+            (domain,)
+        )
+        subdomain_rows = cursor.fetchall()
+        
+        subdomains = {}
+        for sub_row in subdomain_rows:
+            subdomain = sub_row[0]
+            sub_data = json.loads(sub_row[1])
+            subdomains[subdomain] = sub_data
+        
+        targets[domain] = {
+            "subdomains": subdomains,
+            "flags": flags,
+            "options": options,
         }
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        log(f"Error loading state.json: {e}")
-        return {
-            "version": 1,
-            "targets": {},
-            "last_updated": None
-        }
+    
+    # Get last updated time from the most recent target update
+    cursor.execute("SELECT MAX(updated_at) FROM targets")
+    last_updated_row = cursor.fetchone()
+    last_updated = last_updated_row[0] if last_updated_row and last_updated_row[0] else None
+    
+    return {
+        "version": 1,
+        "targets": targets,
+        "last_updated": last_updated
+    }
 
 
 def save_state(state: Dict[str, Any]) -> None:
-    state["last_updated"] = datetime.now(timezone.utc).isoformat()
+    """Save state (targets and subdomains) to SQLite database."""
+    now = datetime.now(timezone.utc).isoformat()
+    state["last_updated"] = now
+    
     acquire_lock()
     try:
-        atomic_write_json(STATE_FILE, state)
+        db = get_db()
+        cursor = db.cursor()
+        
+        targets = state.get("targets", {})
+        
+        for domain, target_data in targets.items():
+            subdomains = target_data.get("subdomains", {})
+            flags = target_data.get("flags", {})
+            options = target_data.get("options", {})
+            
+            # Insert or update target
+            cursor.execute(
+                """INSERT INTO targets (domain, data, flags, options, created_at, updated_at) 
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(domain) DO UPDATE SET 
+                   data = excluded.data,
+                   flags = excluded.flags,
+                   options = excluded.options,
+                   updated_at = excluded.updated_at""",
+                (domain, "{}", json.dumps(flags), json.dumps(options), now, now)
+            )
+            
+            # Delete old subdomains not in current state
+            current_subdomains = set(subdomains.keys())
+            cursor.execute(
+                "SELECT subdomain FROM subdomains WHERE domain = ?",
+                (domain,)
+            )
+            existing_subdomains = {row[0] for row in cursor.fetchall()}
+            
+            for old_subdomain in existing_subdomains - current_subdomains:
+                cursor.execute(
+                    "DELETE FROM subdomains WHERE domain = ? AND subdomain = ?",
+                    (domain, old_subdomain)
+                )
+            
+            # Insert or update subdomains
+            for subdomain, sub_data in subdomains.items():
+                cursor.execute(
+                    """INSERT INTO subdomains (domain, subdomain, data, created_at, updated_at) 
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(domain, subdomain) DO UPDATE SET 
+                       data = excluded.data,
+                       updated_at = excluded.updated_at""",
+                    (domain, subdomain, json.dumps(sub_data), now, now)
+                )
+        
+        db.commit()
     finally:
         release_lock()
+    
     try:
         generate_html_dashboard(state)
     except Exception as e:
@@ -2045,36 +2544,48 @@ def save_state(state: Dict[str, Any]) -> None:
 
 
 def load_completed_jobs() -> Dict[str, Dict[str, Any]]:
-    """Load completed jobs from disk."""
-    ensure_dirs()
-    if not COMPLETED_JOBS_FILE.exists():
-        return {}
-    try:
-        with open(COMPLETED_JOBS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and "jobs" in data:
-            return data["jobs"]
-        return {}
-    except Exception as e:
-        log(f"Error loading completed_jobs.json: {e}")
-        return {}
+    """Load completed jobs from SQLite database."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT job_key, data FROM completed_jobs")
+    rows = cursor.fetchall()
+    
+    jobs = {}
+    for row in rows:
+        job_key = row[0]
+        try:
+            job_data = json.loads(row[1])
+            jobs[job_key] = job_data
+        except json.JSONDecodeError:
+            pass
+    
+    return jobs
 
 
 def save_completed_jobs() -> None:
-    """Save completed jobs to disk."""
-    ensure_dirs()
+    """Save completed jobs to SQLite database."""
     with JOB_LOCK:
         jobs_to_save = copy.deepcopy(COMPLETED_JOBS)
     
     try:
-        payload = {
-            "version": 1,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-            "jobs": jobs_to_save,
-        }
-        atomic_write_json(COMPLETED_JOBS_FILE, payload)
+        db = get_db()
+        cursor = db.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        for job_key, job_data in jobs_to_save.items():
+            domain = job_key.rsplit("_", 1)[0] if "_" in job_key else job_key
+            completed_at = job_data.get("completed_at", now)
+            
+            cursor.execute(
+                """INSERT OR REPLACE INTO completed_jobs 
+                   (job_key, domain, data, completed_at, created_at) 
+                   VALUES (?, ?, ?, ?, ?)""",
+                (job_key, domain, json.dumps(job_data), completed_at, now)
+            )
+        
+        db.commit()
     except Exception as e:
-        log(f"Error saving completed_jobs.json: {e}")
+        log(f"Error saving completed jobs: {e}")
 
 
 def add_completed_job(domain: str, job_data: Dict[str, Any]) -> None:
@@ -4874,34 +5385,49 @@ def job_record_has_errors(job: Dict[str, Any]) -> bool:
 
 
 def append_domain_history(domain: str, entry: Dict[str, Any]) -> None:
+    """Append an entry to domain history in SQLite database."""
     if not domain or not entry:
         return
     try:
-        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-        history_file = HISTORY_DIR / f"{domain}.jsonl"
-        with history_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        db = get_db()
+        cursor = db.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        timestamp = entry.get("ts", now)
+        source = entry.get("source", "system")
+        text = entry.get("text", "")
+        
+        cursor.execute(
+            """INSERT INTO history (domain, timestamp, source, text, created_at) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (domain, timestamp, source, text, now)
+        )
+        db.commit()
     except Exception as exc:
         log(f"Failed to write history for {domain}: {exc}")
 
 
 def load_domain_history(domain: str) -> List[Dict[str, Any]]:
-    history_file = HISTORY_DIR / f"{domain}.jsonl"
-    events: List[Dict[str, Any]] = []
-    if not history_file.exists():
-        return events
-    try:
-        with history_file.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except Exception as exc:
-        raise RuntimeError(f"Failed to read history for {domain}: {exc}") from exc
+    """Load domain history from SQLite database."""
+    db = get_db()
+    cursor = db.cursor()
+    
+    cursor.execute(
+        """SELECT timestamp, source, text FROM history 
+           WHERE domain = ? 
+           ORDER BY timestamp ASC""",
+        (domain,)
+    )
+    rows = cursor.fetchall()
+    
+    events = []
+    for row in rows:
+        events.append({
+            "ts": row[0],
+            "source": row[1],
+            "text": row[2]
+        })
+    
     return events
 
 
@@ -10606,6 +11132,9 @@ def main():
     args = parser.parse_args()
 
     ensure_dirs()
+    
+    # Initialize database and migrate old data if needed
+    ensure_database()
     
     # Check if this is the first run and run setup wizard
     cfg = get_config()
