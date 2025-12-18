@@ -4887,6 +4887,8 @@ button:hover { background:#1d4ed8; }
 .log-entry { margin-bottom:8px; }
 .log-meta { color:var(--muted); font-size:11px; margin-bottom:2px; }
 .log-text { margin:0; white-space:pre-wrap; word-break:break-word; }
+.log-file-link { color:#60a5fa; text-decoration:underline; cursor:pointer; }
+.log-file-link:hover { color:#93c5fd; }
 .job-actions { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
 .queue-card { display:flex; flex-direction:column; gap:8px; }
 .queue-row { display:flex; justify-content:space-between; align-items:center; }
@@ -6020,16 +6022,31 @@ function renderProgress(value, status) {
   return `<div class="progress-bar"><div class="progress-inner ${statusClass(status)}" style="width:${width}%"></div></div>`;
 }
 
+function linkifyLogText(text) {
+  // Escape the text first
+  const escaped = escapeHtml(text || '');
+  
+  // Pattern to match result file names (nikto_*.json, nuclei_*.json, nmap_*.json, etc.)
+  const filePattern = /(nikto_[a-zA-Z0-9._-]+\.json|nuclei_[a-zA-Z0-9._-]+\.json|nmap_[a-zA-Z0-9._-]+\.json|httpx_[a-zA-Z0-9._-]+\.json)/g;
+  
+  // Replace file references with download links
+  return escaped.replace(filePattern, (match) => {
+    // Create a download link for the JSON file
+    return `<a href="/api/export/state" download="${match}" class="log-file-link" title="Download ${match}">${match}</a>`;
+  });
+}
+
 function renderLogEntries(logs) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   if (!safeLogs.length) {
     return '<p class="muted">No output yet.</p>';
   }
   return safeLogs.slice(-200).map(entry => {
+    const linkedText = linkifyLogText(entry.text || '');
     return `
       <div class="log-entry">
         <div class="log-meta">${fmtTime(entry.ts)} — ${escapeHtml(entry.source || 'app')}</div>
-        <pre class="log-text">${escapeHtml(entry.text || '')}</pre>
+        <pre class="log-text">${linkedText}</pre>
       </div>
     `;
   }).join('');
@@ -7598,6 +7615,20 @@ function attachSeverityFilter(wrapper, table) {
   if (!wrapper || !table) return;
   const checkboxes = wrapper.querySelectorAll('input[type="checkbox"]');
   if (!checkboxes.length) return;
+  
+  // Generate a unique ID for this filter set based on table ID and wrapper attributes
+  const tableId = table.id || '';
+  const filterId = `severity_filter_${tableId}`;
+  
+  // Restore saved checkbox states
+  checkboxes.forEach((cb, index) => {
+    const cbId = `${filterId}_${cb.value}_${index}`;
+    const saved = loadCheckboxState(cbId);
+    if (saved !== null) {
+      cb.checked = saved;
+    }
+  });
+  
   const apply = () => {
     const allowed = new Set(Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value));
     const rows = table.tBodies[0] ? Array.from(table.tBodies[0].rows) : [];
@@ -7607,7 +7638,15 @@ function attachSeverityFilter(wrapper, table) {
     });
     refreshPagination(table);
   };
-  checkboxes.forEach(cb => cb.addEventListener('change', apply));
+  
+  checkboxes.forEach((cb, index) => {
+    const cbId = `${filterId}_${cb.value}_${index}`;
+    cb.addEventListener('change', () => {
+      saveCheckboxState(cbId, cb.checked);
+      apply();
+    });
+  });
+  
   apply();
 }
 
@@ -7800,7 +7839,41 @@ document.addEventListener('click', (event) => {
   if (!container.classList.contains('open')) {
     body.scrollTop = 0;
   }
+  
+  // Save collapsible state to localStorage
+  const collapsibleId = container.getAttribute('data-collapsible');
+  if (collapsibleId) {
+    saveCollapsibleState(collapsibleId, container.classList.contains('open'));
+  }
 });
+
+// Functions to manage collapsible state
+function saveCollapsibleState(id, isOpen) {
+  try {
+    localStorage.setItem(`collapsible_${id}`, isOpen ? '1' : '0');
+  } catch (e) {
+    // Ignore localStorage errors
+  }
+}
+
+function loadCollapsibleState(id) {
+  try {
+    const saved = localStorage.getItem(`collapsible_${id}`);
+    return saved === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+function restoreAllCollapsibleStates() {
+  const collapsibles = document.querySelectorAll('.collapsible[data-collapsible]');
+  collapsibles.forEach(container => {
+    const id = container.getAttribute('data-collapsible');
+    if (id && loadCollapsibleState(id)) {
+      container.classList.add('open');
+    }
+  });
+}
 function renderSettings(config, tools) {
   settingsSummary.innerHTML = `
     <div class="paths-grid">
@@ -7905,6 +7978,9 @@ async function fetchState() {
     
     // Fetch and render system resources
     await fetchSystemResources();
+    
+    // Restore collapsible states after rendering
+    restoreAllCollapsibleStates();
     
     // Update logs view if visible
     const logsSection = document.querySelector('[data-view="logs"]');
@@ -8530,7 +8606,8 @@ function saveCheckboxState(id, checked) {
 function loadCheckboxState(id, defaultValue = false) {
   try {
     const saved = localStorage.getItem(`checkbox_${id}`);
-    return saved === '1' ? true : saved === '0' ? false : defaultValue;
+    if (saved === null) return defaultValue;
+    return saved === '1' ? true : false;
   } catch (e) {
     return defaultValue;
   }
