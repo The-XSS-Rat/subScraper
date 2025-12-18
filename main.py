@@ -5354,6 +5354,7 @@ button:hover { background:#1d4ed8; }
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="general">General</button>
           <button class="settings-tab" data-tab="toggles">Tool Toggles</button>
+          <button class="settings-tab" data-tab="api-keys">API Keys</button>
           <button class="settings-tab" data-tab="concurrency">Concurrency</button>
           <button class="settings-tab" data-tab="backup">Backup & Restore</button>
           <button class="settings-tab" data-tab="templates">Tool Templates</button>
@@ -5432,6 +5433,207 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-gau" type="checkbox" name="enable_gau" />
                 Enable GAU
               </label>
+            </div>
+          </div>
+
+          <div class="settings-subtab-content" data-tab-content="api-keys">
+            <div class="card">
+              <h3>🔑 API Keys Configuration</h3>
+              <p class="muted">Configure API keys for enhanced subdomain enumeration. Most tools work without API keys, but adding them significantly improves results and rate limits.</p>
+              
+              <div style="background: #0b152c; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; margin: 20px 0;">
+                <h4 style="margin-top: 0; color: #60a5fa;">ℹ️ Important Information</h4>
+                <ul class="tips" style="margin-bottom: 0;">
+                  <li><strong>API keys are stored in tool-specific config files</strong>, not in the application's database</li>
+                  <li>Amass keys: <code>~/.config/amass/config.ini</code></li>
+                  <li>Subfinder keys: <code>~/.config/subfinder/provider-config.yaml</code></li>
+                  <li>You can manually edit these files to add, update, or remove API keys</li>
+                  <li>After updating keys, restart any active scans to apply changes</li>
+                </ul>
+              </div>
+
+              <h4 style="margin-top: 24px;">Amass API Keys</h4>
+              <p class="muted">Amass supports multiple data sources for passive subdomain enumeration. Adding these keys significantly increases the number of subdomains discovered.</p>
+              
+              <div style="display: grid; gap: 20px; margin-top: 16px;">
+                <!-- Shodan -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">Shodan</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Search engine for Internet-connected devices. Free tier: 1 result per query, 100 queries/month.
+                  </p>
+                  <a href="https://account.shodan.io/" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from account.shodan.io</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free tier available, paid plans start at $49/month for unlimited queries</p>
+                </div>
+
+                <!-- VirusTotal -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">VirusTotal</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Analyzes files and URLs for malware, includes passive DNS data. Free tier: 4 requests/minute.
+                  </p>
+                  <a href="https://www.virustotal.com/gui/my-apikey" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from virustotal.com/gui/my-apikey</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free tier with rate limits, Premium starts at $180/month</p>
+                </div>
+
+                <!-- SecurityTrails -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">SecurityTrails</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    DNS and domain intelligence platform. Free tier: 50 API calls/month.
+                  </p>
+                  <a href="https://securitytrails.com/app/account/credentials" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from securitytrails.com/app/account/credentials</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free tier available, paid plans start at $99/month</p>
+                </div>
+
+                <!-- Censys -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">Censys</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Internet-wide scanning and certificate data. Free tier: 250 queries/month.
+                  </p>
+                  <a href="https://search.censys.io/account/api" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from search.censys.io/account/api</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free tier available, paid plans start at $199/month</p>
+                </div>
+
+                <!-- PassiveTotal/RiskIQ -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">PassiveTotal (RiskIQ)</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Threat intelligence platform with passive DNS. Free community edition available.
+                  </p>
+                  <a href="https://community.riskiq.com/settings" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from community.riskiq.com/settings</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free community edition with limited features, enterprise pricing on request</p>
+                </div>
+
+                <!-- BinaryEdge -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">BinaryEdge</strong>
+                      <span class="badge" style="background: #f59e0b; color: white; margin-left: 8px; font-size: 11px;">PAID ONLY</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Cybersecurity data platform with Internet scanning data.
+                  </p>
+                  <a href="https://app.binaryedge.io/account/api" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from app.binaryedge.io/account/api</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Starting at $10/month for 10,000 queries</p>
+                </div>
+
+                <!-- BeVigil -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">BeVigil</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE TIER</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Mobile app security platform with OSINT API for subdomain enumeration.
+                  </p>
+                  <a href="https://bevigil.com/osint-api" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Get API key from bevigil.com/osint-api</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free tier available with rate limits</p>
+                </div>
+              </div>
+
+              <h4 style="margin-top: 32px;">Subfinder API Keys</h4>
+              <p class="muted">Subfinder aggregates data from multiple passive sources. These API keys help discover more subdomains from different perspectives.</p>
+              
+              <div style="display: grid; gap: 20px; margin-top: 16px;">
+                <!-- GitHub Token -->
+                <div style="background: #050b18; border: 1px solid #1f2937; border-radius: 10px; padding: 16px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong style="font-size: 15px; color: #e2e8f0;">GitHub Personal Access Token</strong>
+                      <span class="badge" style="background: #16a34a; color: white; margin-left: 8px; font-size: 11px;">FREE</span>
+                    </div>
+                  </div>
+                  <p style="font-size: 13px; color: var(--muted); margin: 8px 0;">
+                    Search GitHub code and repositories for subdomain mentions. Rate limits: 5,000 requests/hour.
+                  </p>
+                  <a href="https://github.com/settings/tokens" target="_blank" style="display: inline-block; margin: 8px 0; color: #60a5fa; font-size: 13px;">→ Create token at github.com/settings/tokens</a>
+                  <p style="font-size: 12px; color: #94a3b8; margin-top: 8px;"><strong>Cost:</strong> Free with GitHub account</p>
+                  <p style="font-size: 12px; color: #fbbf24; margin-top: 4px;"><strong>Permissions needed:</strong> public_repo (or repo for private repos)</p>
+                </div>
+
+                <!-- Note about shared keys -->
+                <div style="background: #050b18; border: 1px solid #3b82f6; border-radius: 10px; padding: 16px;">
+                  <h5 style="margin: 0 0 8px 0; color: #60a5fa;">📝 Note about Shodan, VirusTotal, Censys, BinaryEdge, SecurityTrails, and PassiveTotal</h5>
+                  <p style="font-size: 13px; color: var(--muted); margin: 0;">
+                    These services are also supported by Subfinder and use the same API keys as configured for Amass above. 
+                    No need to configure them separately - they will be automatically used by both tools once configured.
+                  </p>
+                </div>
+              </div>
+
+              <h4 style="margin-top: 32px;">How to Configure API Keys</h4>
+              <div style="background: #0b152c; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; margin-top: 16px;">
+                <ol style="margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px;">
+                  <li style="margin-bottom: 12px;">
+                    <strong style="color: #e2e8f0;">Get your API keys</strong> from the provider websites using the links above
+                  </li>
+                  <li style="margin-bottom: 12px;">
+                    <strong style="color: #e2e8f0;">Edit Amass config:</strong>
+                    <code style="display: block; margin: 8px 0; padding: 8px; background: #050b18; border-radius: 6px;">~/.config/amass/config.ini</code>
+                    Add your keys in the <code>[datasources]</code> section:
+                    <pre style="background: #050b18; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; font-size: 12px;">[datasources.shodan]
+[datasources.shodan.Credentials]
+apikey = YOUR_SHODAN_KEY_HERE
+
+[datasources.virustotal]
+[datasources.virustotal.Credentials]
+apikey = YOUR_VIRUSTOTAL_KEY_HERE</pre>
+                  </li>
+                  <li style="margin-bottom: 12px;">
+                    <strong style="color: #e2e8f0;">Edit Subfinder config:</strong>
+                    <code style="display: block; margin: 8px 0; padding: 8px; background: #050b18; border-radius: 6px;">~/.config/subfinder/provider-config.yaml</code>
+                    Add keys in YAML format:
+                    <pre style="background: #050b18; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; font-size: 12px;">github: [YOUR_GITHUB_TOKEN_HERE]
+shodan: [YOUR_SHODAN_KEY_HERE]
+virustotal: [YOUR_VIRUSTOTAL_KEY_HERE]</pre>
+                  </li>
+                  <li>
+                    <strong style="color: #e2e8f0;">Restart any active scans</strong> to use the new API keys
+                  </li>
+                </ol>
+              </div>
+
+              <div style="background: #16a34a; background: rgba(22, 163, 74, 0.1); border: 1px solid #16a34a; border-radius: 12px; padding: 16px; margin-top: 24px;">
+                <h5 style="margin: 0 0 8px 0; color: #86efac;">💡 Pro Tips</h5>
+                <ul style="margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px;">
+                  <li style="margin-bottom: 8px;">Start with free tiers - you can discover many subdomains without paying</li>
+                  <li style="margin-bottom: 8px;">Shodan, VirusTotal, and SecurityTrails offer the best value for free tiers</li>
+                  <li style="margin-bottom: 8px;">GitHub token is completely free and very useful for finding subdomains in code</li>
+                  <li style="margin-bottom: 8px;">Combine multiple free sources for comprehensive coverage</li>
+                  <li>Consider paid plans only if you're doing high-volume scanning regularly</li>
+                </ul>
+              </div>
             </div>
           </div>
 
