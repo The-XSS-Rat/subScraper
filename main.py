@@ -7372,6 +7372,15 @@ function renderReports(targets) {
     const severity = stats.maxSeverity || 'NONE';
     const severityText = formatSeverityLabel(severity);
     const severityFlag = `<span class="severity-flag ${escapeHtml(severity)}">Max: ${escapeHtml(severityText)}</span>`;
+    
+    // Add completion timestamp if available
+    let completedAtText = '';
+    if (info && info.completed_at && !info.pending) {
+      const completedDate = new Date(info.completed_at);
+      const timeStr = completedDate.toLocaleString();
+      completedAtText = `<span style="font-size: 11px; color: #94a3b8; display: block; margin-top: 4px;">Completed: ${escapeHtml(timeStr)}</span>`;
+    }
+    
     return `
       <div class="report-nav-card" data-report-domain="${escapeHtml(domain)}">
         <div class="domain-row">
@@ -7384,6 +7393,7 @@ function renderReports(targets) {
           <span>Findings <span class="stat">${stats.nuclei + stats.nikto}</span></span>
         </div>
         ${badge}
+        ${completedAtText}
       </div>
     `;
   }).join('');
@@ -9455,10 +9465,37 @@ def build_state_payload() -> Dict[str, Any]:
             info["pending"] = target_has_pending_work(info, config)
         except Exception:
             info["pending"] = True
+    
+    # Load completed jobs and convert them to targets format for display
+    completed_jobs = load_completed_jobs()
+    completed_targets = {}
+    for job_key, job_data in completed_jobs.items():
+        # Extract domain from job key (format: domain_timestamp)
+        domain = job_key.rsplit("_", 1)[0] if "_" in job_key else job_key
+        
+        # Use the state data if it exists, otherwise use job data
+        if domain in targets:
+            # Mark as completed (not pending)
+            targets[domain]["pending"] = False
+            targets[domain]["completed_at"] = job_data.get("completed_at")
+        else:
+            # Create a target entry from completed job data
+            completed_targets[domain] = {
+                "subdomains": job_data.get("state", {}).get("subdomains", {}),
+                "flags": job_data.get("state", {}).get("flags", {}),
+                "options": job_data.get("options", {}),
+                "pending": False,
+                "completed_at": job_data.get("completed_at"),
+                "from_completed_jobs": True,
+            }
+    
+    # Merge completed targets with active targets
+    all_targets = {**completed_targets, **targets}
+    
     tool_info = {name: shutil.which(cmd) or "" for name, cmd in TOOLS.items()}
     return {
         "last_updated": state.get("last_updated"),
-        "targets": targets,
+        "targets": all_targets,
         "running_jobs": snapshot_running_jobs(),
         "queued_jobs": job_queue_snapshot(),
         "config": config,
