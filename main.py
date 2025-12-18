@@ -382,6 +382,120 @@ def ensure_dirs() -> None:
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def atomic_write_json(filepath: Path, data: Dict[str, Any], indent: int = 2) -> None:
+    """
+    Atomically write JSON data to a file using a temporary file.
+    This prevents corruption if the process crashes during write.
+    Includes proper error handling for race conditions and filesystem issues.
+    """
+    # Ensure parent directory exists
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create temp file in same directory to ensure same filesystem
+    # This is important for atomic rename to work properly
+    tmp_path = filepath.with_suffix(f".tmp.{os.getpid()}")
+    
+    try:
+        # Write data to temporary file
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, sort_keys=True)
+            # Sync to disk (flush OS buffers) while file is still open
+            # This ensures data is written before rename
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                # fsync may not be supported on all platforms/filesystems
+                pass
+        
+        # Atomic rename - this is the critical operation
+        # On most systems, this is atomic if both files are on same filesystem
+        try:
+            tmp_path.replace(filepath)
+        except OSError as e:
+            # If replace fails, try alternative methods
+            log(f"Warning: atomic replace failed for {filepath}: {e}. Trying fallback...")
+            
+            # Try direct rename (less safe but may work)
+            if filepath.exists():
+                backup_path = filepath.with_suffix(".backup")
+                try:
+                    shutil.copy2(filepath, backup_path)
+                except Exception:
+                    pass
+            
+            shutil.move(str(tmp_path), str(filepath))
+    
+    except Exception as e:
+        # Clean up temp file on any error
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise RuntimeError(f"Failed to write {filepath}: {e}") from e
+    
+    finally:
+        # Ensure temp file is cleaned up even if something went wrong
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                # Don't fail if cleanup fails
+                pass
+
+
+def atomic_write_text(filepath: Path, content: str) -> None:
+    """
+    Atomically write text content to a file using a temporary file.
+    Similar to atomic_write_json but for text files.
+    """
+    # Ensure parent directory exists
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create temp file in same directory to ensure same filesystem
+    tmp_path = filepath.with_suffix(f".tmp.{os.getpid()}")
+    
+    try:
+        # Write content to temporary file
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            # Sync to disk while file is still open
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                pass
+        
+        # Atomic rename
+        try:
+            tmp_path.replace(filepath)
+        except OSError as e:
+            log(f"Warning: atomic replace failed for {filepath}: {e}. Trying fallback...")
+            if filepath.exists():
+                backup_path = filepath.with_suffix(".backup")
+                try:
+                    shutil.copy2(filepath, backup_path)
+                except Exception:
+                    pass
+            shutil.move(str(tmp_path), str(filepath))
+    
+    except Exception as e:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise RuntimeError(f"Failed to write {filepath}: {e}") from e
+    
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
 def _normalize_tool_flag_templates(value: Any) -> Dict[str, str]:
     mapping = {name: "" for name in TEMPLATE_AWARE_TOOLS}
     if not isinstance(value, dict):
@@ -621,10 +735,7 @@ def load_monitors_state() -> Dict[str, Any]:
 
 def _save_monitors_locked() -> None:
     payload = {"monitors": MONITOR_STATE}
-    tmp_path = MONITORS_FILE.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-    tmp_path.replace(MONITORS_FILE)
+    atomic_write_json(MONITORS_FILE, payload)
 
 
 def save_monitors_state() -> None:
@@ -1062,10 +1173,7 @@ def save_system_resource_state() -> None:
             "current": SYSTEM_RESOURCE_STATE,
             "history": SYSTEM_RESOURCE_HISTORY[-SYSTEM_RESOURCE_HISTORY_SIZE:],
         }
-        tmp_path = SYSTEM_RESOURCE_FILE.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        tmp_path.replace(SYSTEM_RESOURCE_FILE)
+        atomic_write_json(SYSTEM_RESOURCE_FILE, payload)
 
 
 def load_system_resource_state() -> Dict[str, Any]:
@@ -1597,10 +1705,7 @@ def get_auto_backup_status() -> Dict[str, Any]:
 
 def save_config(cfg: Dict[str, Any]) -> None:
     ensure_dirs()
-    tmp_path = CONFIG_FILE.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, sort_keys=True)
-    tmp_path.replace(CONFIG_FILE)
+    atomic_write_json(CONFIG_FILE, cfg)
     with CONFIG_LOCK:
         CONFIG.clear()
         CONFIG.update(cfg)
@@ -1926,10 +2031,7 @@ def save_state(state: Dict[str, Any]) -> None:
     state["last_updated"] = datetime.now(timezone.utc).isoformat()
     acquire_lock()
     try:
-        tmp_path = STATE_FILE.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
-        tmp_path.replace(STATE_FILE)
+        atomic_write_json(STATE_FILE, state)
     finally:
         release_lock()
     try:
@@ -1966,10 +2068,7 @@ def save_completed_jobs() -> None:
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "jobs": jobs_to_save,
         }
-        tmp_path = COMPLETED_JOBS_FILE.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        tmp_path.replace(COMPLETED_JOBS_FILE)
+        atomic_write_json(COMPLETED_JOBS_FILE, payload)
     except Exception as e:
         log(f"Error saving completed_jobs.json: {e}")
 
@@ -2580,6 +2679,39 @@ def run_subprocess(
         job_log_append(job_domain, f"$ {display_cmd}", source=step or "command")
     try:
         merged_env = os.environ.copy()
+        
+        # Set environment variables to prevent interactive prompts from various tools
+        # These ensure tools run in non-interactive mode and don't freeze waiting for input
+        non_interactive_env = {
+            # General non-interactive settings
+            "DEBIAN_FRONTEND": "noninteractive",
+            "TERM": "dumb",
+            "CI": "true",  # Many tools detect CI environments and disable interactive features
+            
+            # Subfinder - prevent interactive config creation
+            "SUBFINDER_CONFIG_PATH": str(Path.home() / ".config" / "subfinder" / "provider-config.yaml"),
+            
+            # Nuclei - prevent interactive prompts and template updates
+            "NUCLEI_NONINTERACTIVE": "1",
+            "NUCLEI_NO_COLOR": "1",
+            
+            # Amass - already handled via config file but ensure non-interactive
+            "AMASS_CONFIG": str(Path.home() / ".config" / "amass" / "config.ini"),
+            
+            # GitHub CLI / github-subdomains - prevent auth prompts
+            "GH_NO_UPDATE_NOTIFIER": "1",
+            "GH_PAGER": "",
+            
+            # General tool settings to prevent prompts
+            "PAGER": "",
+            "MANPAGER": "",
+            "NO_COLOR": "1",
+        }
+        
+        # Apply non-interactive environment
+        merged_env.update(non_interactive_env)
+        
+        # Apply any custom environment variables passed in
         if env:
             merged_env.update({k: str(v) for k, v in env.items()})
 
@@ -2591,6 +2723,7 @@ def run_subprocess(
             check=False,
             env=merged_env,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # Prevent reading from stdin - critical for non-interactive mode
         )
 
         stdout = result.stdout or ""
@@ -4222,10 +4355,7 @@ def generate_html_dashboard(state: Optional[Dict[str, Any]] = None) -> None:
 
     acquire_lock()
     try:
-        tmp = HTML_DASHBOARD_FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(html_parts))
-        tmp.replace(HTML_DASHBOARD_FILE)
+        atomic_write_text(HTML_DASHBOARD_FILE, "\n".join(html_parts))
     finally:
         release_lock()
 

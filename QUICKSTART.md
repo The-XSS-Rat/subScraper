@@ -1,5 +1,36 @@
 # Quick Start Guide
 
+## First-Time Setup
+
+When you run subScraper for the first time, an **interactive setup wizard** will automatically launch to configure essential settings:
+
+### What the Setup Wizard Configures
+1. **Wordlist Path** - Path to subdomain wordlist for brute-force (optional)
+2. **Concurrent Jobs** - Number of simultaneous scans (default: 1)
+3. **Nikto Preferences** - Whether to skip Nikto scans by default
+4. **Amass API Keys** - Configure data sources like Shodan, VirusTotal, SecurityTrails, etc.
+5. **Subfinder API Keys** - Configure additional API sources
+
+### Running the Setup Wizard
+```bash
+# First run - setup wizard launches automatically
+python3 main.py
+
+# Skip setup wizard (not recommended for first run)
+python3 main.py --skip-setup
+```
+
+### After Setup
+The wizard will display clear instructions on:
+- ✅ What was configured
+- 🚀 Commands to run next
+- 📚 Where to find more information
+- 🛠️ How to configure additional settings
+
+All settings can be changed later through the web UI Settings tab.
+
+---
+
 ## Dynamic Queue Management
 
 ### Enable Dynamic Mode

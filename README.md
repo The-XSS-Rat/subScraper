@@ -33,13 +33,34 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 
 ## Usage
 
-### Native Installation
+### First Run Setup
+
+When you run subScraper for the first time, an interactive setup wizard will guide you through configuring the essential settings:
 
 ```bash
 # Install dependencies
 pip3 install -r requirements.txt
 
-# Launch the web UI (default: http://127.0.0.1:8342)
+# First run - setup wizard will launch automatically
+python3 main.py
+```
+
+The setup wizard will:
+- Configure basic settings (wordlist path, concurrent jobs, nikto preferences)
+- Set up API keys for tools like Amass and Subfinder (optional but recommended)
+- Create configuration files for all tools
+- Display clear next steps to get started
+
+**Skip Setup (Not Recommended):**
+```bash
+# Skip the setup wizard (you can configure later via web UI)
+python3 main.py --skip-setup
+```
+
+### Native Installation
+
+```bash
+# After setup, launch the web UI (default: http://127.0.0.1:8342)
 python3 main.py
 
 # Run a one-off target directly from the CLI
