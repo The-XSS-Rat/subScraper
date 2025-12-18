@@ -2198,7 +2198,7 @@ def _sanitize_domain_input(value: str) -> str:
 def _parse_multiple_domains(value: str) -> List[str]:
     """
     Parse multiple domain inputs separated by commas or newlines.
-    Returns a deduplicated list of domain strings.
+    Returns a deduplicated list of lowercase domain strings.
     
     Examples:
       "example.com, test.com"
@@ -2217,14 +2217,14 @@ def _parse_multiple_domains(value: str) -> List[str]:
             if stripped:
                 raw_domains.append(stripped)
     
-    # Deduplicate while preserving order
+    # Deduplicate while preserving order (normalize to lowercase)
     seen = set()
     result = []
     for domain in raw_domains:
         domain_lower = domain.lower()
         if domain_lower and domain_lower not in seen:
             seen.add(domain_lower)
-            result.append(domain)
+            result.append(domain_lower)  # Append normalized version
     
     return result
 
@@ -5905,16 +5905,16 @@ button:hover { background:#1d4ed8; }
           <div class="card">
             <h3>Start New Recon</h3>
             <form id="launch-form">
-              <label>Domain(s) / TLD(s)
-                <textarea id="launch-domain" name="domain" rows="4" placeholder="example.com&#10;*.test.com, *.corp.com&#10;*.subdomain.example.*" required></textarea>
-                <small style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
+              <label for="launch-domain">Domain(s) / TLD(s)
+                <textarea id="launch-domain" name="domain" rows="4" placeholder="example.com&#10;*.test.com, *.corp.com&#10;*.subdomain.example.*" required aria-required="true" aria-describedby="domain-help"></textarea>
+                <small id="domain-help" style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
                   Enter one or more domains/wildcards. Separate with commas or newlines.
                 </small>
               </label>
-              <label>Wordlist path (optional)
+              <label for="launch-wordlist">Wordlist path (optional)
                 <input id="launch-wordlist" type="text" name="wordlist" placeholder="./w.txt" />
               </label>
-              <label>Dashboard interval seconds
+              <label for="launch-interval">Dashboard interval seconds
                 <input id="launch-interval" type="number" name="interval" min="5" />
               </label>
               <label class="checkbox">
