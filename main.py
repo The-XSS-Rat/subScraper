@@ -2195,6 +2195,40 @@ def _sanitize_domain_input(value: str) -> str:
     return cleaned
 
 
+def _parse_multiple_domains(value: str) -> List[str]:
+    """
+    Parse multiple domain inputs separated by commas or newlines.
+    Returns a deduplicated list of domain strings.
+    
+    Examples:
+      "example.com, test.com"
+      "*.example.com\n*.test.com"
+      "*-*-*-*.tangos.nl, *.adsl.xs4all.be"
+    """
+    if not value:
+        return []
+    
+    # Split by both newlines and commas
+    raw_domains = []
+    for line in value.split('\n'):
+        # For each line, split by commas
+        for domain in line.split(','):
+            stripped = domain.strip()
+            if stripped:
+                raw_domains.append(stripped)
+    
+    # Deduplicate while preserving order
+    seen = set()
+    result = []
+    for domain in raw_domains:
+        domain_lower = domain.lower()
+        if domain_lower and domain_lower not in seen:
+            seen.add(domain_lower)
+            result.append(domain)
+    
+    return result
+
+
 def _normalize_tld_list(value: Any) -> List[str]:
     if value is None:
         return []
@@ -2218,30 +2252,54 @@ def _normalize_tld_list(value: Any) -> List[str]:
 
 
 def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
-    normalized = _sanitize_domain_input(raw)
-    if not normalized:
+    """
+    Expand wildcard targets from input string. Supports multiple domains
+    separated by commas or newlines.
+    
+    Examples:
+      Single domain: "example.com"
+      Wildcard: "*.example.com"
+      TLD wildcard: "example.*"
+      Multiple domains: "example.com, test.com" or "example.com\ntest.com"
+      Multiple wildcards: "*.example.com\n*.test.com"
+    """
+    # Parse multiple domains from input
+    domain_inputs = _parse_multiple_domains(raw)
+    if not domain_inputs:
         return []
-    while normalized.startswith("*."):
-        normalized = normalized[2:]
-    trailing_any_tld = normalized.endswith(".*")
-    if trailing_any_tld:
-        normalized = normalized[:-2]
-    normalized = normalized.strip(".")
-    if not normalized:
-        return []
-    candidates: List[str] = []
-    if trailing_any_tld:
-        cfg = config or get_config()
-        tlds = _normalize_tld_list(cfg.get("wildcard_tlds"))
-        for suffix in tlds:
-            if not suffix:
-                continue
-            candidates.append(f"{normalized}.{suffix}")
-    else:
-        candidates.append(normalized)
+    
+    all_candidates: List[str] = []
+    
+    # Process each domain input
+    for domain_input in domain_inputs:
+        normalized = _sanitize_domain_input(domain_input)
+        if not normalized:
+            continue
+        
+        while normalized.startswith("*."):
+            normalized = normalized[2:]
+        trailing_any_tld = normalized.endswith(".*")
+        if trailing_any_tld:
+            normalized = normalized[:-2]
+        normalized = normalized.strip(".")
+        if not normalized:
+            continue
+        
+        # Expand TLD wildcards if present
+        if trailing_any_tld:
+            cfg = config or get_config()
+            tlds = _normalize_tld_list(cfg.get("wildcard_tlds"))
+            for suffix in tlds:
+                if not suffix:
+                    continue
+                all_candidates.append(f"{normalized}.{suffix}")
+        else:
+            all_candidates.append(normalized)
+    
+    # Deduplicate results
     deduped: List[str] = []
     seen: set = set()
-    for candidate in candidates:
+    for candidate in all_candidates:
         cleaned = candidate.strip(".")
         if not cleaned or cleaned in seen:
             continue
@@ -5535,7 +5593,8 @@ code { background:#1e293b; padding:2px 4px; border-radius:4px; font-size:12px; }
 .grid-two { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; }
 .card { background:var(--panel-alt); border-radius:12px; border:1px solid #1f2937; padding:18px; }
 label { display:block; font-weight:600; margin-top:12px; }
-input[type="text"], input[type="number"] { width:100%; padding:10px; border-radius:8px; border:1px solid #1f2937; background:#0b152c; color:var(--text); }
+input[type="text"], input[type="number"], textarea { width:100%; padding:10px; border-radius:8px; border:1px solid #1f2937; background:#0b152c; color:var(--text); font-family: inherit; }
+textarea { resize: vertical; min-height: 80px; }
 input[type="number"]::-webkit-inner-spin-button { opacity:0.4; }
 .checkbox { display:flex; align-items:center; gap:8px; margin-top:12px; font-weight:600; }
 button { margin-top:16px; background:var(--accent); border:none; color:white; border-radius:10px; padding:10px 18px; font-size:15px; font-weight:600; cursor:pointer; transition:background .2s ease; }
@@ -5846,8 +5905,11 @@ button:hover { background:#1d4ed8; }
           <div class="card">
             <h3>Start New Recon</h3>
             <form id="launch-form">
-              <label>Domain / TLD
-                <input id="launch-domain" type="text" name="domain" placeholder="example.com" required />
+              <label>Domain(s) / TLD(s)
+                <textarea id="launch-domain" name="domain" rows="4" placeholder="example.com&#10;*.test.com, *.corp.com&#10;*.subdomain.example.*" required></textarea>
+                <small style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
+                  Enter one or more domains/wildcards. Separate with commas or newlines.
+                </small>
               </label>
               <label>Wordlist path (optional)
                 <input id="launch-wordlist" type="text" name="wordlist" placeholder="./w.txt" />
