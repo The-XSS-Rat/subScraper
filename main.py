@@ -3874,6 +3874,10 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
     try:
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
+        # Log the results summary
+        log(f"Nikto scan complete: {len(results)} findings written to {out_json.name}")
+        if job_domain:
+            job_log_append(job_domain, f"Nikto found {len(results)} total findings across {len(subs)} host(s), saved to {out_json.name}", source="nikto")
     except Exception as e:
         log(f"Error writing Nikto JSON: {e}")
         return None
