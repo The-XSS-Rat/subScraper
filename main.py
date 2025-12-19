@@ -2130,9 +2130,13 @@ def save_config(cfg: Dict[str, Any]) -> None:
                 )
             
             db.commit()
+        except (sqlite3.Error, sqlite3.DatabaseError) as e:
+            db.rollback()
+            log(f"Database error saving config: {e}")
+            raise
         except Exception as e:
             db.rollback()
-            log(f"Error saving config to database: {e}")
+            log(f"Unexpected error saving config to database: {e}")
             raise
         
         # Update in-memory config after successful save
@@ -2140,6 +2144,9 @@ def save_config(cfg: Dict[str, Any]) -> None:
             CONFIG.clear()
             CONFIG.update(cfg)
         apply_concurrency_limits(cfg)
+    except (sqlite3.Error, sqlite3.DatabaseError) as e:
+        log(f"Failed to save configuration to database: {e}")
+        raise
     except Exception as e:
         log(f"Failed to save configuration: {e}")
         raise
@@ -3734,7 +3741,10 @@ def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
             job_log_append(job_domain, f"Querying crt.sh for {domain}", source="crtsh")
         
         # Create SSL context that doesn't verify certificates
-        # This is needed because crt.sh may be behind proxies with self-signed certs
+        # SECURITY NOTE: This is needed because crt.sh may be behind proxies with self-signed certs.
+        # The data from crt.sh is public certificate transparency logs, so the risk is limited to
+        # potential MITM attacks affecting subdomain enumeration accuracy, not credential exposure.
+        # For production use, consider implementing certificate pinning for crt.sh's actual cert.
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -3789,19 +3799,39 @@ def github_subdomains_enum(domain: str, job_domain: Optional[str] = None) -> Lis
         return []
     
     out_path = DATA_DIR / f"github_subdomains_{domain}.txt"
-    cmd = [
-        TOOLS["github-subdomains"],
-        "-d", domain,
-        "-t", github_token,  # Add GitHub token
-        "-o", str(out_path),
-    ]
-    context = {
-        "DOMAIN": domain,
-        "OUTPUT": str(out_path),
-    }
-    cmd = apply_template_flags("github-subdomains", cmd, context)
-    success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="github-subdomains")
-    return read_lines_file(out_path) if success else []
+    
+    # Use environment variable to pass token securely (avoid exposing in process list)
+    env = os.environ.copy()
+    
+    # Create temporary token file to avoid exposing token in command line
+    import tempfile
+    token_file = None
+    try:
+        # Create temporary file for token
+        fd, token_file = tempfile.mkstemp(prefix="github_token_", suffix=".txt", dir=DATA_DIR)
+        with os.fdopen(fd, 'w') as f:
+            f.write(github_token)
+        
+        cmd = [
+            TOOLS["github-subdomains"],
+            "-d", domain,
+            "-t", token_file,  # Use token file instead of raw token
+            "-o", str(out_path),
+        ]
+        context = {
+            "DOMAIN": domain,
+            "OUTPUT": str(out_path),
+        }
+        cmd = apply_template_flags("github-subdomains", cmd, context)
+        success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="github-subdomains")
+        return read_lines_file(out_path) if success else []
+    finally:
+        # Clean up token file
+        if token_file and os.path.exists(token_file):
+            try:
+                os.unlink(token_file)
+            except Exception:
+                pass
 
 
 def dnsx_verify(subdomains: List[str], domain: str, job_domain: Optional[str] = None) -> List[str]:
