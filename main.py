@@ -7936,6 +7936,7 @@ function renderWorkers(workers) {
     const info = tools[name] || {};
     const limit = info.limit;
     const active = info.active || 0;
+    const queued = info.queued || 0;
     
     // Handle tools with and without concurrency gates
     if (limit == null) {
@@ -7948,13 +7949,15 @@ function renderWorkers(workers) {
         </div>
       `;
     } else {
-      // Tool with gate - show active/limit
+      // Tool with gate - show active/limit and queued items
       const pct = limit ? Math.min(100, Math.round(active / limit * 100)) : 0;
+      const queueInfo = queued > 0 ? `<div class="muted" style="margin-top: 4px;">📋 ${queued} queued</div>` : '';
       return `
         <div class="worker-card">
           <h3>${escapeHtml(name)}</h3>
           <div class="metric">${active}/${limit}</div>
           <div class="muted">slots in use</div>
+          ${queueInfo}
           <div class="worker-progress">${renderProgress(pct, active >= limit ? 'running' : 'completed')}</div>
         </div>
       `;
