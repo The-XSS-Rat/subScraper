@@ -169,10 +169,10 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "httpx": ToolGate(1),
     "waybackurls": ToolGate(1),
     "gau": ToolGate(1),
-    "nuclei": ToolGate(1),
-    "nikto": ToolGate(1),
     "gowitness": ToolGate(1),
     "nmap": ToolGate(1),
+    "nuclei": ToolGate(1),
+    "nikto": ToolGate(1),
 }
 JOB_QUEUE: deque = deque()
 MAX_RUNNING_JOBS = 1
@@ -962,10 +962,10 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         "httpx": "max_parallel_httpx",
         "waybackurls": "max_parallel_waybackurls",
         "gau": "max_parallel_gau",
-        "nuclei": "max_parallel_nuclei",
-        "nikto": "max_parallel_nikto",
         "gowitness": "max_parallel_gowitness",
         "nmap": "max_parallel_nmap",
+        "nuclei": "max_parallel_nuclei",
+        "nikto": "max_parallel_nikto",
     }
     for tool, field in parallel_fields.items():
         gate = TOOL_GATES.setdefault(tool, ToolGate(1))
@@ -1056,10 +1056,10 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_httpx": 1,
         "max_parallel_waybackurls": 1,
         "max_parallel_gau": 1,
-        "max_parallel_nuclei": 1,
-        "max_parallel_nikto": 1,
         "max_parallel_gowitness": 1,
         "max_parallel_nmap": 1,
+        "max_parallel_nuclei": 1,
+        "max_parallel_nikto": 1,
         "enable_nmap": True,
         "nmap_timeout": 300,
         "max_nmap_output_size": 5000,
