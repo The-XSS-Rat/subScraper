@@ -400,7 +400,9 @@ def get_db() -> sqlite3.Connection:
     with DB_LOCK:
         if DB_CONN is None:
             ensure_dirs()
-            DB_CONN = sqlite3.connect(str(DB_FILE), check_same_thread=False)
+            # Set isolation_level to None for autocommit mode to prevent
+            # "cannot start a transaction within a transaction" errors
+            DB_CONN = sqlite3.connect(str(DB_FILE), check_same_thread=False, isolation_level=None)
             DB_CONN.row_factory = sqlite3.Row
             # Enable WAL mode for better concurrency
             DB_CONN.execute("PRAGMA journal_mode=WAL")
