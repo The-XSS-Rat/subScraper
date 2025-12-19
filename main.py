@@ -6835,7 +6835,8 @@ const createBackupBtn = document.getElementById('create-backup-btn');
 const backupList = document.getElementById('backup-list');
 const settingsStatus = document.getElementById('settings-status');
 const settingsSummary = document.getElementById('settings-summary');
-console.log('[DEBUG] All DOM elements retrieved, settingsForm:', settingsForm ? 'found' : 'NULL');
+const settingsSaveBtn = document.querySelector('#settings-form button[type="submit"]');
+console.log('[DEBUG] All DOM elements retrieved, settingsForm:', settingsForm ? 'found' : 'NULL', 'saveBtn:', settingsSaveBtn ? 'found' : 'NULL');
 const templateInputs = {
   amass: document.getElementById('template-amass'),
   subfinder: document.getElementById('template-subfinder'),
@@ -9225,6 +9226,28 @@ if (settingsForm) {
       }
     }
   });
+  
+  // Also add a direct button click handler as fallback
+  if (settingsSaveBtn) {
+    settingsSaveBtn.addEventListener('click', (event) => {
+      console.log('[DEBUG] Save button clicked directly');
+      // Let the form handle it naturally, but log that we saw the click
+    });
+  }
+  
+  // Add Enter key support for all settings inputs
+  const settingsInputs = settingsForm.querySelectorAll('input, textarea, select');
+  settingsInputs.forEach(input => {
+    input.addEventListener('keypress', (event) => {
+      if (event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
+        event.preventDefault();
+        console.log('[DEBUG] Enter pressed in settings form input, triggering submit');
+        settingsForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      }
+    });
+  });
+  
+  console.log('[DEBUG] Settings form handlers attached. Form ID:', settingsForm.id);
 } else {
   console.error('Cannot attach submit handler: settingsForm is null');
 }
