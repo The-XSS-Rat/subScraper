@@ -618,6 +618,24 @@ def init_database() -> None:
         )
     """)
     
+    # Workflows table - stores custom user-defined workflows
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS workflows (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            phases TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            is_default INTEGER DEFAULT 0
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_workflows_name 
+        ON workflows(name)
+    """)
+    
     db.commit()
     log("Database schema initialized successfully.")
 
@@ -1425,6 +1443,248 @@ def start_monitor_worker() -> None:
     thread.start()
     with MONITOR_LOCK:
         MONITOR_THREAD = thread
+
+
+# ================== WORKFLOW MANAGEMENT ==================
+
+
+WORKFLOW_LOCK = threading.Lock()
+
+
+def create_workflow(name: str, description: str, phases: List[Dict[str, Any]]) -> Tuple[bool, str, Optional[str]]:
+    """
+    Create a new workflow with custom phases.
+    
+    Args:
+        name: Workflow name
+        description: Workflow description
+        phases: List of phase definitions with tool/command, flags, input/output templates
+        
+    Returns:
+        (success, message, workflow_id)
+    """
+    if not name or not name.strip():
+        return False, "Workflow name is required.", None
+    
+    if not phases or not isinstance(phases, list):
+        return False, "At least one phase is required.", None
+    
+    workflow_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            cursor.execute(
+                """INSERT INTO workflows 
+                   (id, name, description, phases, created_at, updated_at, is_default) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (workflow_id, name.strip(), description or "", json.dumps(phases), now, now, 0)
+            )
+            db.commit()
+        
+        log(f"Created workflow '{name}' (id: {workflow_id})")
+        return True, f"Workflow '{name}' created successfully.", workflow_id
+    except Exception as e:
+        log(f"Error creating workflow: {e}")
+        return False, f"Failed to create workflow: {str(e)}", None
+
+
+def list_workflows() -> List[Dict[str, Any]]:
+    """List all available workflows."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows ORDER BY name"
+        )
+        rows = cursor.fetchall()
+        
+        workflows = []
+        for row in rows:
+            try:
+                phases = json.loads(row[3])
+            except json.JSONDecodeError:
+                phases = []
+            
+            workflows.append({
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "phases": phases,
+                "phase_count": len(phases),
+                "created_at": row[4],
+                "updated_at": row[5],
+                "is_default": bool(row[6]),
+            })
+        
+        return workflows
+    except Exception as e:
+        log(f"Error listing workflows: {e}")
+        return []
+
+
+def get_workflow(workflow_id: str) -> Optional[Dict[str, Any]]:
+    """Get a specific workflow by ID."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows WHERE id = ?",
+            (workflow_id,)
+        )
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        try:
+            phases = json.loads(row[3])
+        except json.JSONDecodeError:
+            phases = []
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "phases": phases,
+            "created_at": row[4],
+            "updated_at": row[5],
+            "is_default": bool(row[6]),
+        }
+    except Exception as e:
+        log(f"Error getting workflow: {e}")
+        return None
+
+
+def update_workflow(workflow_id: str, name: str, description: str, phases: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Update an existing workflow."""
+    if not workflow_id:
+        return False, "Workflow ID is required."
+    
+    if not name or not name.strip():
+        return False, "Workflow name is required."
+    
+    if not phases or not isinstance(phases, list):
+        return False, "At least one phase is required."
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        with WORKFLOW_LOCK:
+            cursor.execute(
+                """UPDATE workflows 
+                   SET name = ?, description = ?, phases = ?, updated_at = ? 
+                   WHERE id = ?""",
+                (name.strip(), description or "", json.dumps(phases), now, workflow_id)
+            )
+            
+            if cursor.rowcount == 0:
+                return False, "Workflow not found."
+            
+            db.commit()
+        
+        log(f"Updated workflow '{name}' (id: {workflow_id})")
+        return True, f"Workflow '{name}' updated successfully."
+    except Exception as e:
+        log(f"Error updating workflow: {e}")
+        return False, f"Failed to update workflow: {str(e)}"
+
+
+def delete_workflow(workflow_id: str) -> Tuple[bool, str]:
+    """Delete a workflow."""
+    if not workflow_id:
+        return False, "Workflow ID is required."
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            # Get workflow name for logging
+            cursor.execute("SELECT name FROM workflows WHERE id = ?", (workflow_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False, "Workflow not found."
+            
+            workflow_name = row[0]
+            
+            cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+            db.commit()
+        
+        log(f"Deleted workflow '{workflow_name}' (id: {workflow_id})")
+        return True, f"Workflow '{workflow_name}' deleted successfully."
+    except Exception as e:
+        log(f"Error deleting workflow: {e}")
+        return False, f"Failed to delete workflow: {str(e)}"
+
+
+def set_default_workflow(workflow_id: Optional[str]) -> Tuple[bool, str]:
+    """Set or unset the default workflow."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            # Clear all defaults first
+            cursor.execute("UPDATE workflows SET is_default = 0")
+            
+            if workflow_id:
+                # Set new default
+                cursor.execute("UPDATE workflows SET is_default = 1 WHERE id = ?", (workflow_id,))
+                if cursor.rowcount == 0:
+                    return False, "Workflow not found."
+            
+            db.commit()
+        
+        if workflow_id:
+            log(f"Set workflow {workflow_id} as default")
+            return True, "Default workflow updated."
+        else:
+            log("Cleared default workflow")
+            return True, "Default workflow cleared."
+    except Exception as e:
+        log(f"Error setting default workflow: {e}")
+        return False, f"Failed to set default workflow: {str(e)}"
+
+
+def get_default_workflow() -> Optional[Dict[str, Any]]:
+    """Get the default workflow if one is set."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows WHERE is_default = 1 LIMIT 1"
+        )
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        try:
+            phases = json.loads(row[3])
+        except json.JSONDecodeError:
+            phases = []
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "phases": phases,
+            "created_at": row[4],
+            "updated_at": row[5],
+            "is_default": bool(row[6]),
+        }
+    except Exception as e:
+        log(f"Error getting default workflow: {e}")
+        return None
 
 
 # ================== SYSTEM RESOURCE MONITORING ==================
@@ -6145,6 +6405,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="reports" href="#reports">Reports</a>
       <a class="nav-link" data-view="gallery" href="#gallery">Gallery</a>
       <a class="nav-link" data-view="logs" href="#logs">Logs</a>
+      <a class="nav-link" data-view="workflows" href="#workflows">Workflows</a>
       <a class="nav-link" data-view="monitors" href="#monitors">Monitors</a>
       <a class="nav-link" data-view="targets" href="#targets">Targets</a>
       <a class="nav-link" data-view="settings" href="#settings">Settings</a>
@@ -6368,6 +6629,69 @@ button:hover { background:#1d4ed8; }
         <div class="table-pagination" id="logs-pagination"></div>
         <div style="margin-top: 16px; text-align: right;">
           <span class="muted" id="logs-count">0 logs</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="module" data-view="workflows">
+      <div class="module-header"><h2>Custom Workflows</h2></div>
+      <div class="module-body">
+        <div class="card" style="margin-bottom: 1rem;">
+          <h3>Workflow Editor</h3>
+          <form id="workflow-form">
+            <input type="hidden" id="workflow-id" value="" />
+            <label>Name *
+              <input id="workflow-name" type="text" name="name" placeholder="My Custom Workflow" required />
+            </label>
+            <label>Description
+              <textarea id="workflow-description" name="description" rows="2" placeholder="Optional description of what this workflow does"></textarea>
+            </label>
+            
+            <h4 style="margin-top: 1rem;">Phases</h4>
+            <p class="muted" style="margin-bottom: 0.5rem;">Define the steps of your workflow. Each phase can use built-in tools or custom commands.</p>
+            
+            <div id="workflow-phases-container">
+              <!-- Phases will be added here dynamically -->
+            </div>
+            
+            <button type="button" id="workflow-add-phase" class="btn secondary small">+ Add Phase</button>
+            
+            <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+              <button type="submit" class="btn">Save Workflow</button>
+              <button type="button" id="workflow-cancel" class="btn secondary">Cancel</button>
+            </div>
+            <div class="status" id="workflow-status"></div>
+          </form>
+        </div>
+        
+        <div class="card">
+          <h3>Saved Workflows</h3>
+          <div id="workflows-list" class="section-placeholder">No workflows created yet.</div>
+        </div>
+        
+        <div class="card">
+          <h3>How Workflows Work</h3>
+          <ul class="tips">
+            <li><strong>Phases:</strong> Each phase represents a step in your recon workflow (subdomain enum, HTTP probing, vuln scanning, etc.)</li>
+            <li><strong>Built-in Tools:</strong> Select from existing tools like amass, subfinder, httpx, nuclei, etc.</li>
+            <li><strong>Custom Commands:</strong> Add your own tools using custom shell commands</li>
+            <li><strong>Template Variables:</strong> Use <code>$DOMAIN$</code>, <code>$INPUT$</code>, <code>$OUTPUT$</code> in commands and flags</li>
+            <li><strong>Input/Output:</strong> Each phase can read from previous phase output and write to a file for the next phase</li>
+            <li><strong>Default Workflow:</strong> Set one workflow as default to use when launching scans</li>
+          </ul>
+          
+          <h4>Example Custom Command:</h4>
+          <pre style="background: #1e293b; padding: 1rem; border-radius: 4px; overflow-x: auto;">
+echo "$DOMAIN$" | my-custom-tool --output $OUTPUT$ --threads 10
+          </pre>
+          
+          <h4>Available Template Variables:</h4>
+          <ul style="margin-top: 0.5rem;">
+            <li><code>$DOMAIN$</code> - The target domain</li>
+            <li><code>$INPUT$</code> - Input file from previous phase</li>
+            <li><code>$OUTPUT$</code> - Output file for this phase</li>
+            <li><code>$WORDLIST$</code> - Configured wordlist path</li>
+          </ul>
         </div>
       </div>
     </section>
@@ -11863,6 +12187,22 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/backups":
             self._send_json({"backups": list_backups()})
             return
+        if self.path == "/api/workflows":
+            workflows = list_workflows()
+            default_workflow = get_default_workflow()
+            self._send_json({
+                "workflows": workflows,
+                "default_workflow_id": default_workflow["id"] if default_workflow else None
+            })
+            return
+        if self.path.startswith("/api/workflow/"):
+            workflow_id = unquote(self.path[len("/api/workflow/"):])
+            workflow = get_workflow(workflow_id)
+            if workflow:
+                self._send_json({"success": True, "workflow": workflow})
+            else:
+                self._send_json({"success": False, "message": "Workflow not found"}, status=HTTPStatus.NOT_FOUND)
+            return
         if self.path.startswith("/api/backup/download/"):
             backup_filename = unquote(self.path[len("/api/backup/download/"):])
             
@@ -12043,6 +12383,10 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/backup/create",
             "/api/backup/restore",
             "/api/backup/delete",
+            "/api/workflows/create",
+            "/api/workflows/update",
+            "/api/workflows/delete",
+            "/api/workflows/set-default",
         }
         if self.path not in allowed:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -12159,6 +12503,39 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             amass_keys = payload.get("amass", {})
             subfinder_keys = payload.get("subfinder", {})
             success, message = save_all_api_keys(amass_keys, subfinder_keys)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/create":
+            name = payload.get("name", "")
+            description = payload.get("description", "")
+            phases = payload.get("phases", [])
+            success, message, workflow_id = create_workflow(name, description, phases)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message, "workflow_id": workflow_id}, status=status)
+            return
+        
+        if self.path == "/api/workflows/update":
+            workflow_id = payload.get("id", "")
+            name = payload.get("name", "")
+            description = payload.get("description", "")
+            phases = payload.get("phases", [])
+            success, message = update_workflow(workflow_id, name, description, phases)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/delete":
+            workflow_id = payload.get("id", "")
+            success, message = delete_workflow(workflow_id)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/set-default":
+            workflow_id = payload.get("id")  # None to clear default
+            success, message = set_default_workflow(workflow_id)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
             return
