@@ -5561,18 +5561,43 @@ def append_domain_history(domain: str, entry: Dict[str, Any]) -> None:
         log(f"Failed to write history for {domain}: {exc}")
 
 
-def load_domain_history(domain: str) -> List[Dict[str, Any]]:
-    """Load domain history from SQLite database."""
+def load_domain_history(domain: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    Load domain history from SQLite database.
+    
+    Args:
+        domain: The domain to load history for
+        limit: Maximum number of recent entries to return (None = all entries)
+               When limit is specified, returns the most recent entries.
+    
+    Returns:
+        List of history events in chronological order (oldest first)
+    """
     db = get_db()
     cursor = db.cursor()
     
-    cursor.execute(
-        """SELECT timestamp, source, text FROM history 
-           WHERE domain = ? 
-           ORDER BY timestamp ASC""",
-        (domain,)
-    )
-    rows = cursor.fetchall()
+    if limit is not None and limit > 0:
+        # Efficiently get the last N entries by ordering DESC, limiting, then reversing
+        # This avoids loading all entries into memory
+        cursor.execute(
+            """SELECT timestamp, source, text FROM history 
+               WHERE domain = ? 
+               ORDER BY timestamp DESC, id DESC
+               LIMIT ?""",
+            (domain, limit)
+        )
+        rows = cursor.fetchall()
+        # Reverse to get chronological order (oldest first)
+        rows = list(reversed(rows))
+    else:
+        # Load all entries (for backward compatibility, though not recommended for large datasets)
+        cursor.execute(
+            """SELECT timestamp, source, text FROM history 
+               WHERE domain = ? 
+               ORDER BY timestamp ASC""",
+            (domain,)
+        )
+        rows = cursor.fetchall()
     
     events = []
     for row in rows:
@@ -10845,7 +10870,8 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                     return
                 sub_data = target["subdomains"][subdomain]
                 try:
-                    history = load_domain_history(domain)
+                    # Load only recent history for subdomain detail page (limit for performance)
+                    history = load_domain_history(domain, limit=1000)
                 except Exception:
                     history = []
                 self._send_json({
@@ -11035,7 +11061,9 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     limit = 200
             try:
-                events = load_domain_history(domain)
+                # Load history with limit to avoid performance issues with large datasets
+                # The limit is used for filtering, so we load more than needed
+                events = load_domain_history(domain, limit=5000)
             except RuntimeError as exc:
                 self._send_json({"success": False, "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
@@ -11052,11 +11080,12 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "message": "domain parameter required"}, status=HTTPStatus.BAD_REQUEST)
                 return
             try:
-                events = load_domain_history(domain)
+                # Load only the last 1000 events directly from database for better performance
+                events = load_domain_history(domain, limit=1000)
             except RuntimeError as exc:
                 self._send_json({"success": False, "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
-            self._send_json({"domain": domain, "events": events[-1000:]})
+            self._send_json({"domain": domain, "events": events})
             return
         if self.path == "/api/export/state":
             data = json.dumps(load_state(), indent=2).encode("utf-8")
