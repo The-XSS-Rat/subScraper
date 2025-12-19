@@ -6231,10 +6231,44 @@ button:hover { background:#1d4ed8; }
     <section class="module" data-view="jobs">
       <div class="module-header">
         <h2>Active Jobs</h2>
-        <button class="btn secondary small" id="resume-all-btn" style="margin-left: auto;">Resume All Paused</button>
+        <div style="margin-left: auto; display: flex; gap: 0.5rem; align-items: center;">
+          <button class="btn secondary small" id="jobs-expand-all-btn">Expand All</button>
+          <button class="btn secondary small" id="jobs-collapse-all-btn">Collapse All</button>
+          <button class="btn secondary small" id="resume-all-btn">Resume All Paused</button>
+        </div>
       </div>
-      <div class="module-body" id="jobs-list">
-        <div class="section-placeholder">No active jobs.</div>
+      <div class="module-body">
+        <div class="jobs-filters" style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+          <input type="text" id="jobs-filter-domain" placeholder="Filter by domain..." style="flex: 1; min-width: 200px;" />
+          <select id="jobs-filter-status" style="padding: 0.5rem;">
+            <option value="">All Statuses</option>
+            <option value="running">Running</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+            <option value="queued">Queued</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button class="btn secondary small" id="jobs-clear-filters">Clear Filters</button>
+        </div>
+        <div id="jobs-list">
+          <div class="section-placeholder">No active jobs.</div>
+        </div>
+        <div class="jobs-pagination" style="display: none; margin-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <span>Items per page: </span>
+            <select id="jobs-per-page" style="padding: 0.25rem;">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn secondary small" id="jobs-prev-page" disabled>Previous</button>
+            <span id="jobs-page-info">Page 1 of 1</span>
+            <button class="btn secondary small" id="jobs-next-page" disabled>Next</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -7351,6 +7385,13 @@ function renderJobStep(name, info = {}) {
   `;
 }
 
+// Jobs pagination and filtering state
+let jobsCurrentPage = 1;
+let jobsPerPage = parseInt(localStorage.getItem('jobsPerPage') || '10', 10);
+let jobsFilterDomain = localStorage.getItem('jobsFilterDomain') || '';
+let jobsFilterStatus = localStorage.getItem('jobsFilterStatus') || '';
+let jobsCollapsedState = JSON.parse(localStorage.getItem('jobsCollapsedState') || '{}');
+
 function renderJobs(jobs) {
   const all = Array.isArray(jobs) ? jobs : [];
   const running = all.filter(job => job.status !== 'queued');
@@ -7362,22 +7403,50 @@ function renderJobs(jobs) {
   
   if (!running.length) {
     jobsList.innerHTML = '<div class="section-placeholder">No active jobs.</div>';
+    document.querySelector('.jobs-pagination').style.display = 'none';
     return;
   }
   
   // Render active jobs first, then completed jobs
-  const sortedJobs = [...activeJobs, ...completedJobs];
+  let sortedJobs = [...activeJobs, ...completedJobs];
   
-  const cards = sortedJobs.map(job => {
+  // Apply filters
+  if (jobsFilterDomain) {
+    sortedJobs = sortedJobs.filter(job => 
+      (job.domain || '').toLowerCase().includes(jobsFilterDomain.toLowerCase())
+    );
+  }
+  if (jobsFilterStatus) {
+    sortedJobs = sortedJobs.filter(job => 
+      (job.status || '').toLowerCase() === jobsFilterStatus.toLowerCase()
+    );
+  }
+  
+  // Calculate pagination
+  const totalJobs = sortedJobs.length;
+  const totalPages = Math.max(1, Math.ceil(totalJobs / jobsPerPage));
+  jobsCurrentPage = Math.min(jobsCurrentPage, totalPages);
+  const startIdx = (jobsCurrentPage - 1) * jobsPerPage;
+  const endIdx = startIdx + jobsPerPage;
+  const paginatedJobs = sortedJobs.slice(startIdx, endIdx);
+  
+  // Render job cards
+  const cards = paginatedJobs.map(job => {
     const progress = Math.max(0, Math.min(100, job.progress || 0));
     const steps = job.steps || {};
     const stepsHtml = Object.keys(steps).map(step => renderJobStep(step, steps[step])).join('');
     const logsHtml = renderLogEntries(job.logs || []);
+    const jobId = job.domain || '';
+    const isCollapsed = jobsCollapsedState[jobId] !== false; // Default to collapsed
+    
     return `
-      <div class="job-card">
-        <div class="job-summary">
+      <div class="job-card" data-job-id="${escapeHtml(jobId)}">
+        <div class="job-summary" style="cursor: pointer;" onclick="toggleJobDetails('${escapeHtml(jobId)}')">
           <div>
-            <div>${escapeHtml(job.domain || '')}</div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span class="job-toggle-icon">${isCollapsed ? '▶' : '▼'}</span>
+              <strong>${escapeHtml(job.domain || '')}</strong>
+            </div>
             <div class="muted">Started ${fmtTime(job.started)}</div>
             ${job.completed_at ? `<div class="muted">Completed ${fmtTime(job.completed_at)}</div>` : ''}
           </div>
@@ -7387,23 +7456,54 @@ function renderJobs(jobs) {
           </div>
         </div>
         ${renderProgress(progress, job.status)}
-        <div class="job-meta">
-          <span><strong>Wordlist:</strong> ${escapeHtml(job.wordlist || 'default')}</span>
-          <span><strong>Interval:</strong> ${escapeHtml(job.interval || 0)}s</span>
-          <span><strong>Nikto:</strong> ${job.skip_nikto ? 'Skipped' : 'Enabled'}</span>
-        </div>
-        <div class="job-message">${escapeHtml(job.message || '')}</div>
-        ${renderJobControls(job)}
-        <div class="job-steps">
-          ${stepsHtml || '<p class="muted">Awaiting step updates…</p>'}
-        </div>
-        <div class="job-log">
-          ${logsHtml}
+        <div class="job-details" style="display: ${isCollapsed ? 'none' : 'block'};">
+          <div class="job-meta">
+            <span><strong>Wordlist:</strong> ${escapeHtml(job.wordlist || 'default')}</span>
+            <span><strong>Interval:</strong> ${escapeHtml(job.interval || 0)}s</span>
+            <span><strong>Nikto:</strong> ${job.skip_nikto ? 'Skipped' : 'Enabled'}</span>
+          </div>
+          <div class="job-message">${escapeHtml(job.message || '')}</div>
+          ${renderJobControls(job)}
+          <div class="job-steps">
+            ${stepsHtml || '<p class="muted">Awaiting step updates…</p>'}
+          </div>
+          <div class="job-log">
+            ${logsHtml}
+          </div>
         </div>
       </div>
     `;
   });
   jobsList.innerHTML = cards.join('');
+  
+  // Update pagination controls
+  const paginationEl = document.querySelector('.jobs-pagination');
+  if (totalJobs > 5) {
+    paginationEl.style.display = 'flex';
+    document.getElementById('jobs-page-info').textContent = `Page ${jobsCurrentPage} of ${totalPages} (${totalJobs} jobs)`;
+    document.getElementById('jobs-prev-page').disabled = jobsCurrentPage <= 1;
+    document.getElementById('jobs-next-page').disabled = jobsCurrentPage >= totalPages;
+  } else {
+    paginationEl.style.display = 'none';
+  }
+}
+
+function toggleJobDetails(jobId) {
+  const isCollapsed = jobsCollapsedState[jobId] !== false;
+  jobsCollapsedState[jobId] = !isCollapsed;
+  localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+  
+  const card = document.querySelector(`.job-card[data-job-id="${jobId}"]`);
+  if (card) {
+    const details = card.querySelector('.job-details');
+    const icon = card.querySelector('.job-toggle-icon');
+    if (details) {
+      details.style.display = isCollapsed ? 'block' : 'none';
+    }
+    if (icon) {
+      icon.textContent = isCollapsed ? '▼' : '▶';
+    }
+  }
 }
 
 function renderQueue(queue) {
@@ -9490,6 +9590,113 @@ if (resumeAllBtn) {
         resumeAllBtn.disabled = false;
       }, 2000);
     }
+  });
+}
+
+// Jobs pagination and filter controls
+const jobsFilterDomainInput = document.getElementById('jobs-filter-domain');
+const jobsFilterStatusSelect = document.getElementById('jobs-filter-status');
+const jobsClearFiltersBtn = document.getElementById('jobs-clear-filters');
+const jobsPerPageSelect = document.getElementById('jobs-per-page');
+const jobsPrevPageBtn = document.getElementById('jobs-prev-page');
+const jobsNextPageBtn = document.getElementById('jobs-next-page');
+const jobsExpandAllBtn = document.getElementById('jobs-expand-all-btn');
+const jobsCollapseAllBtn = document.getElementById('jobs-collapse-all-btn');
+
+// Initialize filter values from localStorage
+if (jobsFilterDomainInput) jobsFilterDomainInput.value = jobsFilterDomain;
+if (jobsFilterStatusSelect) jobsFilterStatusSelect.value = jobsFilterStatus;
+if (jobsPerPageSelect) jobsPerPageSelect.value = jobsPerPage.toString();
+
+// Filter domain input handler
+if (jobsFilterDomainInput) {
+  jobsFilterDomainInput.addEventListener('input', (e) => {
+    jobsFilterDomain = e.target.value;
+    localStorage.setItem('jobsFilterDomain', jobsFilterDomain);
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Filter status select handler
+if (jobsFilterStatusSelect) {
+  jobsFilterStatusSelect.addEventListener('change', (e) => {
+    jobsFilterStatus = e.target.value;
+    localStorage.setItem('jobsFilterStatus', jobsFilterStatus);
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Clear filters button
+if (jobsClearFiltersBtn) {
+  jobsClearFiltersBtn.addEventListener('click', () => {
+    jobsFilterDomain = '';
+    jobsFilterStatus = '';
+    jobsCurrentPage = 1;
+    localStorage.setItem('jobsFilterDomain', '');
+    localStorage.setItem('jobsFilterStatus', '');
+    if (jobsFilterDomainInput) jobsFilterDomainInput.value = '';
+    if (jobsFilterStatusSelect) jobsFilterStatusSelect.value = '';
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Per page select handler
+if (jobsPerPageSelect) {
+  jobsPerPageSelect.addEventListener('change', (e) => {
+    jobsPerPage = parseInt(e.target.value, 10);
+    localStorage.setItem('jobsPerPage', jobsPerPage.toString());
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Previous page button
+if (jobsPrevPageBtn) {
+  jobsPrevPageBtn.addEventListener('click', () => {
+    if (jobsCurrentPage > 1) {
+      jobsCurrentPage--;
+      renderJobs(latestRunningJobs);
+    }
+  });
+}
+
+// Next page button
+if (jobsNextPageBtn) {
+  jobsNextPageBtn.addEventListener('click', () => {
+    jobsCurrentPage++;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Expand all jobs button
+if (jobsExpandAllBtn) {
+  jobsExpandAllBtn.addEventListener('click', () => {
+    jobsCollapsedState = {};
+    Object.keys(latestRunningJobs || []).forEach((_, idx) => {
+      const job = latestRunningJobs[idx];
+      if (job && job.domain) {
+        jobsCollapsedState[job.domain] = false;
+      }
+    });
+    localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Collapse all jobs button
+if (jobsCollapseAllBtn) {
+  jobsCollapseAllBtn.addEventListener('click', () => {
+    jobsCollapsedState = {};
+    Object.keys(latestRunningJobs || []).forEach((_, idx) => {
+      const job = latestRunningJobs[idx];
+      if (job && job.domain) {
+        jobsCollapsedState[job.domain] = true;
+      }
+    });
+    localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+    renderJobs(latestRunningJobs);
   });
 }
 
