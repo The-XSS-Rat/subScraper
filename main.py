@@ -3679,12 +3679,14 @@ def findomain_enum(domain: str, config: Optional[Dict[str, Any]] = None, job_dom
             threads = max(1, int(config.get("findomain_threads", threads)))
         except (TypeError, ValueError):
             threads = 40
+    
+    # Newer versions of findomain use different output handling
+    # Instead of --output, we use output redirection
     cmd = [
         TOOLS["findomain"],
         "--target", domain,
         "--threads", str(threads),
         "--quiet",
-        "--output", str(out_path),
     ]
     context = {
         "DOMAIN": domain,
@@ -3692,6 +3694,8 @@ def findomain_enum(domain: str, config: Optional[Dict[str, Any]] = None, job_dom
         "THREADS": threads,
     }
     cmd = apply_template_flags("findomain", cmd, context, config)
+    
+    # Use output redirection instead of --output flag
     success = run_subprocess(cmd, outfile=out_path, job_domain=job_domain, step="findomain")
     return read_lines_file(out_path) if success else []
 
@@ -3723,11 +3727,19 @@ def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
     try:
         import urllib.request
         import json as json_lib
+        import ssl
         url = f"https://crt.sh/?q=%.{domain}&output=json"
         req = urllib.request.Request(url, headers={"User-Agent": "ReconTool/1.0"})
         if job_domain:
             job_log_append(job_domain, f"Querying crt.sh for {domain}", source="crtsh")
-        with urllib.request.urlopen(req, timeout=30) as response:
+        
+        # Create SSL context that doesn't verify certificates
+        # This is needed because crt.sh may be behind proxies with self-signed certs
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
             data = response.read()
         entries = json_lib.loads(data)
         for entry in entries:
@@ -3754,13 +3766,33 @@ def crtsh_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
 def github_subdomains_enum(domain: str, job_domain: Optional[str] = None) -> List[str]:
     """
     Use github-subdomains tool to find subdomains via GitHub.
+    Requires GitHub token - will try to use token from subfinder config if available.
     """
     if not ensure_tool_installed("github-subdomains"):
         return []
+    
+    # Try to get GitHub token from subfinder config
+    github_token = None
+    try:
+        subfinder_keys = read_subfinder_api_keys()
+        github_token = subfinder_keys.get("github", "").strip()
+    except Exception:
+        pass
+    
+    # If no token available, skip with warning
+    if not github_token:
+        if job_domain:
+            job_log_append(job_domain, 
+                "github-subdomains: No GitHub token configured. Add token in API Keys settings.", 
+                source="github-subdomains")
+        log(f"github-subdomains: Skipping {domain} - no GitHub token configured")
+        return []
+    
     out_path = DATA_DIR / f"github_subdomains_{domain}.txt"
     cmd = [
         TOOLS["github-subdomains"],
         "-d", domain,
+        "-t", github_token,  # Add GitHub token
         "-o", str(out_path),
     ]
     context = {
