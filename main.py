@@ -2122,11 +2122,11 @@ def save_config(cfg: Dict[str, Any]) -> None:
         
         # Temporarily set isolation_level to enable proper transaction handling
         # Note: Connection is normally in autocommit mode (isolation_level=None)
-        # We need to switch to a transaction mode for atomic save
+        # We need to switch to manual transaction mode for atomic save
         old_isolation = db.isolation_level
         try:
-            # Switch to deferred transaction mode
-            db.isolation_level = "DEFERRED"
+            # Switch to manual transaction mode (empty string enables manual control)
+            db.isolation_level = ''
             
             # Now start an explicit transaction with IMMEDIATE lock
             cursor.execute("BEGIN IMMEDIATE")
