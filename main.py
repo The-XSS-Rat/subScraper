@@ -6911,13 +6911,22 @@ const settingsAssetfinderThreads = document.getElementById('settings-assetfinder
 const settingsFindomainThreads = document.getElementById('settings-findomain-threads');
 const settingsGlobalRateLimit = document.getElementById('settings-global-rate-limit');
 const settingsMaxJobs = document.getElementById('settings-max-jobs');
+const settingsAmass = document.getElementById('settings-amass');
+const settingsSubfinder = document.getElementById('settings-subfinder');
+const settingsAssetfinder = document.getElementById('settings-assetfinder');
+const settingsFindomain = document.getElementById('settings-findomain');
+const settingsSublist3r = document.getElementById('settings-sublist3r');
+const settingsCrtsh = document.getElementById('settings-crtsh');
+const settingsGithubSubdomains = document.getElementById('settings-github-subdomains');
+const settingsDnsx = document.getElementById('settings-dnsx');
+const settingsHttpx = document.getElementById('settings-httpx');
 const settingsFFUF = document.getElementById('settings-ffuf');
+const settingsWaybackurls = document.getElementById('settings-waybackurls');
+const settingsGau = document.getElementById('settings-gau');
+const settingsNmap = document.getElementById('settings-nmap');
 const settingsNuclei = document.getElementById('settings-nuclei');
 const settingsNikto = document.getElementById('settings-nikto');
 const settingsGowitness = document.getElementById('settings-gowitness');
-const settingsDnsx = document.getElementById('settings-dnsx');
-const settingsWaybackurls = document.getElementById('settings-waybackurls');
-const settingsGau = document.getElementById('settings-gau');
 const settingsDynamicMode = document.getElementById('settings-dynamic-mode');
 const settingsDynamicBaseJobs = document.getElementById('settings-dynamic-base-jobs');
 const settingsDynamicMaxJobs = document.getElementById('settings-dynamic-max-jobs');
@@ -9495,13 +9504,22 @@ function renderSettings(config, tools) {
     settingsFindomainThreads.value = config.findomain_threads || 40;
     settingsGlobalRateLimit.value = config.global_rate_limit || 0;
     settingsMaxJobs.value = config.max_running_jobs || 1;
+    settingsAmass.value = config.max_parallel_amass || 1;
+    settingsSubfinder.value = config.max_parallel_subfinder || 1;
+    settingsAssetfinder.value = config.max_parallel_assetfinder || 1;
+    settingsFindomain.value = config.max_parallel_findomain || 1;
+    settingsSublist3r.value = config.max_parallel_sublist3r || 1;
+    settingsCrtsh.value = config.max_parallel_crtsh || 1;
+    settingsGithubSubdomains.value = config.max_parallel_github_subdomains || 1;
+    settingsDnsx.value = config.max_parallel_dnsx || 1;
+    settingsHttpx.value = config.max_parallel_httpx || 1;
     settingsFFUF.value = config.max_parallel_ffuf || 1;
+    settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
+    settingsGau.value = config.max_parallel_gau || 1;
+    settingsNmap.value = config.max_parallel_nmap || 1;
     settingsNuclei.value = config.max_parallel_nuclei || 1;
     settingsNikto.value = config.max_parallel_nikto || 1;
     settingsGowitness.value = config.max_parallel_gowitness || 1;
-    settingsDnsx.value = config.max_parallel_dnsx || 1;
-    settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
-    settingsGau.value = config.max_parallel_gau || 1;
     settingsDynamicMode.checked = config.dynamic_mode_enabled || false;
     settingsDynamicBaseJobs.value = config.dynamic_mode_base_jobs || 1;
     settingsDynamicMaxJobs.value = config.dynamic_mode_max_jobs || 10;
@@ -9649,13 +9667,22 @@ if (settingsForm) {
         findomain_threads: settingsFindomainThreads ? settingsFindomainThreads.value : '',
         global_rate_limit: settingsGlobalRateLimit ? settingsGlobalRateLimit.value : '',
         max_running_jobs: settingsMaxJobs ? settingsMaxJobs.value : '',
+        max_parallel_amass: settingsAmass ? settingsAmass.value : '',
+        max_parallel_subfinder: settingsSubfinder ? settingsSubfinder.value : '',
+        max_parallel_assetfinder: settingsAssetfinder ? settingsAssetfinder.value : '',
+        max_parallel_findomain: settingsFindomain ? settingsFindomain.value : '',
+        max_parallel_sublist3r: settingsSublist3r ? settingsSublist3r.value : '',
+        max_parallel_crtsh: settingsCrtsh ? settingsCrtsh.value : '',
+        max_parallel_github_subdomains: settingsGithubSubdomains ? settingsGithubSubdomains.value : '',
+        max_parallel_dnsx: settingsDnsx ? settingsDnsx.value : '',
+        max_parallel_httpx: settingsHttpx ? settingsHttpx.value : '',
         max_parallel_ffuf: settingsFFUF ? settingsFFUF.value : '',
+        max_parallel_waybackurls: settingsWaybackurls ? settingsWaybackurls.value : '',
+        max_parallel_gau: settingsGau ? settingsGau.value : '',
+        max_parallel_nmap: settingsNmap ? settingsNmap.value : '',
         max_parallel_nuclei: settingsNuclei ? settingsNuclei.value : '',
         max_parallel_nikto: settingsNikto ? settingsNikto.value : '',
         max_parallel_gowitness: settingsGowitness ? settingsGowitness.value : '',
-        max_parallel_dnsx: settingsDnsx ? settingsDnsx.value : '',
-        max_parallel_waybackurls: settingsWaybackurls ? settingsWaybackurls.value : '',
-        max_parallel_gau: settingsGau ? settingsGau.value : '',
         dynamic_mode_enabled: settingsDynamicMode ? settingsDynamicMode.checked : false,
         dynamic_mode_base_jobs: settingsDynamicBaseJobs ? settingsDynamicBaseJobs.value : '',
         dynamic_mode_max_jobs: settingsDynamicMaxJobs ? settingsDynamicMaxJobs.value : '',
