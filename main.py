@@ -9082,7 +9082,12 @@ async function fetchState() {
 }
 
 launchForm.addEventListener('input', () => { launchFormDirty = true; });
-settingsForm.addEventListener('input', () => { settingsFormDirty = true; });
+
+if (settingsForm) {
+  settingsForm.addEventListener('input', () => { settingsFormDirty = true; });
+} else {
+  console.error('Settings form not found!');
+}
 
 targetsList.addEventListener('click', (event) => {
   const btn = event.target.closest('.sub-link');
@@ -9128,72 +9133,99 @@ launchForm.addEventListener('submit', async (event) => {
   }
 });
 
-settingsForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const payload = {
-    default_wordlist: settingsWordlist.value,
-    default_interval: settingsInterval.value,
-    wildcard_tlds: settingsWildcardTlds.value,
-    skip_nikto_by_default: settingsSkipNikto.checked,
-    enable_screenshots: settingsEnableScreenshots.checked,
-    enable_amass: settingsEnableAmass.checked,
-    amass_timeout: settingsAmassTimeout.value,
-    enable_subfinder: settingsEnableSubfinder.checked,
-    enable_assetfinder: settingsEnableAssetfinder.checked,
-    enable_findomain: settingsEnableFindomain.checked,
-    enable_sublist3r: settingsEnableSublist3r.checked,
-    enable_crtsh: settingsEnableCrtsh.checked,
-    enable_github_subdomains: settingsEnableGithubSubdomains.checked,
-    enable_dnsx: settingsEnableDnsx.checked,
-    enable_waybackurls: settingsEnableWaybackurls.checked,
-    enable_gau: settingsEnableGau.checked,
-    subfinder_threads: settingsSubfinderThreads.value,
-    assetfinder_threads: settingsAssetfinderThreads.value,
-    findomain_threads: settingsFindomainThreads.value,
-    global_rate_limit: settingsGlobalRateLimit.value,
-    max_running_jobs: settingsMaxJobs.value,
-    max_parallel_ffuf: settingsFFUF.value,
-    max_parallel_nuclei: settingsNuclei.value,
-    max_parallel_nikto: settingsNikto.value,
-    max_parallel_gowitness: settingsGowitness.value,
-    max_parallel_dnsx: settingsDnsx.value,
-    max_parallel_waybackurls: settingsWaybackurls.value,
-    max_parallel_gau: settingsGau.value,
-    dynamic_mode_enabled: settingsDynamicMode.checked,
-    dynamic_mode_base_jobs: settingsDynamicBaseJobs.value,
-    dynamic_mode_max_jobs: settingsDynamicMaxJobs.value,
-    dynamic_mode_cpu_threshold: settingsDynamicCpuThreshold.value,
-    dynamic_mode_memory_threshold: settingsDynamicMemoryThreshold.value,
-    auto_backup_enabled: settingsAutoBackupEnabled.checked,
-    auto_backup_interval: settingsAutoBackupInterval.value,
-    auto_backup_max_count: settingsAutoBackupMaxCount.value,
-  };
-  const templatePayload = {};
-  Object.entries(templateInputs).forEach(([key, el]) => {
-    if (!el) return;
-    templatePayload[key] = el.value || '';
-  });
-  payload.tool_flag_templates = templatePayload;
-  settingsStatus.textContent = 'Saving...';
-  settingsStatus.className = 'status';
-  try {
-    const resp = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await resp.json();
-    settingsStatus.textContent = data.message || 'Saved';
-    settingsStatus.className = 'status ' + (data.success ? 'success' : 'error');
-    if (data.success) {
-      settingsFormDirty = false;
-      fetchState();
+if (settingsForm) {
+  settingsForm.addEventListener('submit', async (event) => {
+    try {
+      console.log('Settings form submitted');
+      event.preventDefault();
+      
+      // Validate all required elements exist
+      if (!settingsStatus) {
+        console.error('settingsStatus element not found');
+        alert('Error: Settings status element not found. Please refresh the page.');
+        return;
+      }
+      
+      settingsStatus.textContent = 'Saving...';
+      settingsStatus.className = 'status';
+      
+      const payload = {
+        default_wordlist: settingsWordlist ? settingsWordlist.value : '',
+        default_interval: settingsInterval ? settingsInterval.value : '',
+        wildcard_tlds: settingsWildcardTlds ? settingsWildcardTlds.value : '',
+        skip_nikto_by_default: settingsSkipNikto ? settingsSkipNikto.checked : false,
+        enable_screenshots: settingsEnableScreenshots ? settingsEnableScreenshots.checked : true,
+        enable_amass: settingsEnableAmass ? settingsEnableAmass.checked : true,
+        amass_timeout: settingsAmassTimeout ? settingsAmassTimeout.value : '',
+        enable_subfinder: settingsEnableSubfinder ? settingsEnableSubfinder.checked : true,
+        enable_assetfinder: settingsEnableAssetfinder ? settingsEnableAssetfinder.checked : true,
+        enable_findomain: settingsEnableFindomain ? settingsEnableFindomain.checked : true,
+        enable_sublist3r: settingsEnableSublist3r ? settingsEnableSublist3r.checked : true,
+        enable_crtsh: settingsEnableCrtsh ? settingsEnableCrtsh.checked : true,
+        enable_github_subdomains: settingsEnableGithubSubdomains ? settingsEnableGithubSubdomains.checked : true,
+        enable_dnsx: settingsEnableDnsx ? settingsEnableDnsx.checked : true,
+        enable_waybackurls: settingsEnableWaybackurls ? settingsEnableWaybackurls.checked : true,
+        enable_gau: settingsEnableGau ? settingsEnableGau.checked : true,
+        subfinder_threads: settingsSubfinderThreads ? settingsSubfinderThreads.value : '',
+        assetfinder_threads: settingsAssetfinderThreads ? settingsAssetfinderThreads.value : '',
+        findomain_threads: settingsFindomainThreads ? settingsFindomainThreads.value : '',
+        global_rate_limit: settingsGlobalRateLimit ? settingsGlobalRateLimit.value : '',
+        max_running_jobs: settingsMaxJobs ? settingsMaxJobs.value : '',
+        max_parallel_ffuf: settingsFFUF ? settingsFFUF.value : '',
+        max_parallel_nuclei: settingsNuclei ? settingsNuclei.value : '',
+        max_parallel_nikto: settingsNikto ? settingsNikto.value : '',
+        max_parallel_gowitness: settingsGowitness ? settingsGowitness.value : '',
+        max_parallel_dnsx: settingsDnsx ? settingsDnsx.value : '',
+        max_parallel_waybackurls: settingsWaybackurls ? settingsWaybackurls.value : '',
+        max_parallel_gau: settingsGau ? settingsGau.value : '',
+        dynamic_mode_enabled: settingsDynamicMode ? settingsDynamicMode.checked : false,
+        dynamic_mode_base_jobs: settingsDynamicBaseJobs ? settingsDynamicBaseJobs.value : '',
+        dynamic_mode_max_jobs: settingsDynamicMaxJobs ? settingsDynamicMaxJobs.value : '',
+        dynamic_mode_cpu_threshold: settingsDynamicCpuThreshold ? settingsDynamicCpuThreshold.value : '',
+        dynamic_mode_memory_threshold: settingsDynamicMemoryThreshold ? settingsDynamicMemoryThreshold.value : '',
+        auto_backup_enabled: settingsAutoBackupEnabled ? settingsAutoBackupEnabled.checked : false,
+        auto_backup_interval: settingsAutoBackupInterval ? settingsAutoBackupInterval.value : '',
+        auto_backup_max_count: settingsAutoBackupMaxCount ? settingsAutoBackupMaxCount.value : '',
+      };
+      
+      const templatePayload = {};
+      Object.entries(templateInputs).forEach(([key, el]) => {
+        if (!el) return;
+        templatePayload[key] = el.value || '';
+      });
+      payload.tool_flag_templates = templatePayload;
+      
+      console.log('Sending settings payload:', payload);
+      
+      const resp = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      
+      console.log('Response status:', resp.status);
+      const data = await resp.json();
+      console.log('Response data:', data);
+      
+      settingsStatus.textContent = data.message || 'Saved';
+      settingsStatus.className = 'status ' + (data.success ? 'success' : 'error');
+      if (data.success) {
+        settingsFormDirty = false;
+        fetchState();
+      }
+    } catch (err) {
+      console.error('Settings form submission error:', err);
+      if (settingsStatus) {
+        settingsStatus.textContent = 'Error: ' + err.message;
+        settingsStatus.className = 'status error';
+      } else {
+        alert('Error saving settings: ' + err.message);
+      }
     }
-  } catch (err) {
-    settingsStatus.textContent = err.message;
-    settingsStatus.className = 'status error';
-  }
-});
+  });
+} else {
+  console.error('Cannot attach submit handler: settingsForm is null');
+}
 
 // API Keys functionality
 const apiKeysForm = document.getElementById('api-keys-form');
