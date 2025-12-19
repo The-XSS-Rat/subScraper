@@ -632,8 +632,10 @@ class TestToolConcurrencyLimits:
         
         assert 'limit' in snapshot
         assert 'active' in snapshot
+        assert 'queued' in snapshot
         assert snapshot['limit'] == 3
         assert snapshot['active'] == 0
+        assert snapshot['queued'] == 0
         
         # Acquire and check again
         gate.acquire()
@@ -643,6 +645,224 @@ class TestToolConcurrencyLimits:
         gate.release()
         snapshot = gate.snapshot()
         assert snapshot['active'] == 0
+        
+        # Clean up
+        gate.stop_worker()
+    
+    def test_gate_enqueue_executes_work(self):
+        """Test that enqueued work items are executed"""
+        gate = main.ToolGate(1)
+        results = []
+        
+        def work_func():
+            results.append('executed')
+            return 'result'
+        
+        def result_callback(result):
+            results.append(result)
+        
+        gate.enqueue(work_func, result_callback)
+        
+        # Wait for execution
+        time.sleep(0.5)
+        
+        assert 'executed' in results
+        assert 'result' in results
+        
+        # Clean up
+        gate.stop_worker()
+    
+    def test_gate_queue_respects_capacity(self):
+        """Test that queue doesn't exceed capacity limit"""
+        gate = main.ToolGate(2)
+        active_count = []
+        lock = threading.Lock()
+        
+        def work_func():
+            with lock:
+                active_count.append(1)
+            time.sleep(0.3)  # Simulate work
+            with lock:
+                active_count.pop()
+            return 'done'
+        
+        # Enqueue more work than capacity
+        for _ in range(5):
+            gate.enqueue(work_func)
+        
+        # Give worker time to start processing
+        time.sleep(0.1)
+        
+        # Check that active count never exceeds limit
+        snapshot = gate.snapshot()
+        assert snapshot['active'] <= 2
+        
+        # Wait for all work to complete
+        time.sleep(2)
+        
+        # Clean up
+        gate.stop_worker()
+    
+    def test_gate_handles_errors_in_work(self):
+        """Test that errors in work items are handled gracefully"""
+        gate = main.ToolGate(1)
+        errors = []
+        
+        def failing_work():
+            raise ValueError("Test error")
+        
+        def error_callback(exc):
+            errors.append(str(exc))
+        
+        gate.enqueue(failing_work, error_callback=error_callback)
+        
+        # Wait for execution
+        time.sleep(0.5)
+        
+        assert len(errors) == 1
+        assert "Test error" in errors[0]
+        
+        # Gate should still be functional
+        snapshot = gate.snapshot()
+        assert snapshot['active'] == 0
+        
+        # Clean up
+        gate.stop_worker()
+    
+    def test_gate_multiple_queued_items(self):
+        """Test that multiple items can be queued and processed in order"""
+        gate = main.ToolGate(1)
+        results = []
+        lock = threading.Lock()
+        
+        def make_work_func(value):
+            def work():
+                with lock:
+                    results.append(value)
+                time.sleep(0.1)
+                return value
+            return work
+        
+        # Enqueue multiple items
+        for i in range(5):
+            gate.enqueue(make_work_func(i))
+        
+        # Wait for all to complete
+        time.sleep(1.5)
+        
+        # All items should have been processed
+        assert len(results) == 5
+        # Results should contain all values 0-4
+        assert set(results) == {0, 1, 2, 3, 4}
+        
+        # Clean up
+        gate.stop_worker()
+    
+    def test_gate_backward_compatibility_context_manager(self):
+        """Test that context manager (with statement) still works"""
+        gate = main.ToolGate(2)
+        
+        results = []
+        
+        def worker():
+            with gate:
+                results.append('in_context')
+                time.sleep(0.1)
+        
+        threads = []
+        for _ in range(3):
+            t = threading.Thread(target=worker)
+            t.start()
+            threads.append(t)
+        
+        for t in threads:
+            t.join()
+        
+        assert len(results) == 3
+        
+        # Clean up
+        gate.stop_worker()
+
+
+class TestToolGateQueuing:
+    """Integration tests for tool gate queuing mechanism"""
+    
+    def test_job_can_proceed_when_tool_at_capacity(self):
+        """Test that a job can proceed with other tools when one tool is at capacity"""
+        gate1 = main.ToolGate(1)
+        gate2 = main.ToolGate(1)
+        
+        results = []
+        lock = threading.Lock()
+        
+        def long_work():
+            with lock:
+                results.append('tool1_started')
+            time.sleep(0.5)
+            with lock:
+                results.append('tool1_finished')
+            return 'tool1_done'
+        
+        def quick_work():
+            with lock:
+                results.append('tool2_executed')
+            return 'tool2_done'
+        
+        # Fill tool1 capacity
+        gate1.enqueue(long_work)
+        
+        # Enqueue more work to tool1 (will be queued)
+        gate1.enqueue(long_work)
+        
+        # Execute work on tool2 (should not be blocked)
+        gate2.enqueue(quick_work)
+        
+        # Give time for execution
+        time.sleep(0.2)
+        
+        # Tool2 should have executed quickly
+        with lock:
+            assert 'tool2_executed' in results
+            assert 'tool1_started' in results
+        
+        # Wait for all work to complete
+        time.sleep(1)
+        
+        # Clean up
+        gate1.stop_worker()
+        gate2.stop_worker()
+    
+    def test_multiple_jobs_share_tool_queue(self):
+        """Test that multiple jobs can share the same tool queue"""
+        gate = main.ToolGate(1)
+        
+        results = []
+        lock = threading.Lock()
+        
+        def job_work(job_id):
+            def work():
+                with lock:
+                    results.append(f'job_{job_id}')
+                time.sleep(0.1)
+                return f'job_{job_id}_done'
+            return work
+        
+        # Simulate 3 jobs each trying to use the same tool
+        for i in range(3):
+            gate.enqueue(job_work(i))
+        
+        # Wait for all to complete
+        time.sleep(1)
+        
+        # All jobs should have been processed
+        with lock:
+            assert len(results) == 3
+            assert 'job_0' in results
+            assert 'job_1' in results
+            assert 'job_2' in results
+        
+        # Clean up
+        gate.stop_worker()
 
 
 if __name__ == '__main__':

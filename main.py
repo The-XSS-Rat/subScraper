@@ -119,33 +119,119 @@ TEMPLATE_AWARE_TOOLS = [
 
 
 class ToolGate:
+    """
+    Concurrency gate for tools with backlog queue support.
+    
+    When the tool is at capacity, work items are queued and processed
+    when capacity becomes available. This prevents jobs from blocking
+    indefinitely and allows them to proceed with other tools.
+    """
     def __init__(self, limit: int):
         self._limit = max(1, int(limit))
         self._count = 0
         self._cond = threading.Condition()
-
+        self._queue: deque = deque()  # Backlog queue for pending work
+        self._worker_thread: Optional[threading.Thread] = None
+        self._stop_worker = False
+        self._start_worker()
+    
+    def _start_worker(self) -> None:
+        """Start background worker thread to process queued work."""
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._stop_worker = False
+            self._worker_thread = threading.Thread(
+                target=self._worker_loop,
+                name=f"ToolGate-Worker",
+                daemon=True
+            )
+            self._worker_thread.start()
+    
+    def _worker_loop(self) -> None:
+        """Background worker that processes queued work items."""
+        while not self._stop_worker:
+            work_item = None
+            with self._cond:
+                # Wait for work or until stopped
+                while not self._queue and not self._stop_worker:
+                    self._cond.wait(timeout=1.0)
+                
+                if self._stop_worker:
+                    break
+                
+                # Wait for available capacity
+                while self._count >= self._limit and not self._stop_worker:
+                    self._cond.wait(timeout=1.0)
+                
+                if self._stop_worker:
+                    break
+                
+                # Get work from queue if available
+                if self._queue:
+                    work_item = self._queue.popleft()
+                    self._count += 1
+            
+            # Execute work outside the lock
+            if work_item:
+                try:
+                    func, result_callback, error_callback = work_item
+                    result = func()
+                    if result_callback:
+                        result_callback(result)
+                except Exception as exc:
+                    if error_callback:
+                        error_callback(exc)
+                finally:
+                    with self._cond:
+                        if self._count > 0:
+                            self._count -= 1
+                        self._cond.notify_all()
+    
+    def stop_worker(self) -> None:
+        """Stop the background worker thread."""
+        with self._cond:
+            self._stop_worker = True
+            self._cond.notify_all()
+    
+    def enqueue(self, func, result_callback=None, error_callback=None) -> None:
+        """
+        Enqueue a work item to be executed when capacity is available.
+        
+        Args:
+            func: Callable to execute (no arguments)
+            result_callback: Optional callback for successful result
+            error_callback: Optional callback for exceptions
+        """
+        with self._cond:
+            self._queue.append((func, result_callback, error_callback))
+            self._cond.notify_all()
+    
     def acquire(self) -> None:
+        """Acquire a slot (blocking). For backward compatibility."""
         with self._cond:
             while self._count >= self._limit:
                 self._cond.wait()
             self._count += 1
 
     def release(self) -> None:
+        """Release a slot. For backward compatibility."""
         with self._cond:
             if self._count > 0:
                 self._count -= 1
             self._cond.notify_all()
 
     def update_limit(self, limit: int) -> None:
+        """Update the concurrency limit."""
         with self._cond:
             self._limit = max(1, int(limit))
             self._cond.notify_all()
 
     def snapshot(self) -> Dict[str, int]:
+        """Get current status snapshot."""
         with self._cond:
             return {
                 "limit": self._limit,
                 "active": self._count,
+                "queued": len(self._queue),
             }
 
     def __enter__(self):
