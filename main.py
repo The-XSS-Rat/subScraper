@@ -2155,7 +2155,12 @@ def save_config(cfg: Dict[str, Any]) -> None:
             CONFIG.update(cfg)
         
         # Apply concurrency limits
-        apply_concurrency_limits(cfg)
+        # Wrap in try-except to prevent config save from failing if applying limits fails
+        try:
+            apply_concurrency_limits(cfg)
+        except Exception as apply_err:
+            log(f"Warning: Config saved successfully but failed to apply concurrency limits: {apply_err}")
+            # Don't re-raise - config was saved successfully, we just couldn't apply the runtime changes
     except Exception as e:
         log(f"Failed to save configuration: {e}")
         raise
@@ -2187,7 +2192,15 @@ def load_config() -> Dict[str, Any]:
     with CONFIG_LOCK:
         CONFIG.clear()
         CONFIG.update(cfg)
-    apply_concurrency_limits(cfg)
+    
+    # Apply concurrency limits
+    # Wrap in try-except to prevent config load from failing if applying limits fails
+    try:
+        apply_concurrency_limits(cfg)
+    except Exception as apply_err:
+        log(f"Warning: Config loaded successfully but failed to apply concurrency limits: {apply_err}")
+        # Don't re-raise - config was loaded successfully, we just couldn't apply the runtime changes
+    
     return dict(CONFIG)
 
 
