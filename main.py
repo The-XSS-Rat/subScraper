@@ -6675,7 +6675,7 @@ button:hover { background:#1d4ed8; }
             </div>
           </div>
 
-          <button type="submit">Save Settings</button>
+          <button type="submit" onclick="if(window.saveSettingsNow){console.log('[DEBUG] Button onclick fired'); window.saveSettingsNow(); return false;} else {console.error('[DEBUG] saveSettingsNow not defined yet');}">Save Settings</button>
           <div class="status" id="settings-status"></div>
         </form>
       </div>
@@ -9232,21 +9232,22 @@ if (settingsForm) {
     event.preventDefault();
     console.log('[DEBUG] Form submit event fired');
     await window.saveSettingsNow();
-  });
+  }, true); // Use capture phase
   
-  // Also add a direct button click handler
+  // Also add a direct button click handler with capture
   if (settingsSaveBtn) {
     settingsSaveBtn.addEventListener('click', async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      console.log('[DEBUG] Save button clicked directly, calling saveSettingsNow');
+      event.stopImmediatePropagation();
+      console.log('[DEBUG] Save button clicked directly (addEventListener), calling saveSettingsNow');
       await window.saveSettingsNow();
-    });
+    }, true); // Use capture phase to intercept before any other handler
   } else {
     console.error('[DEBUG] settingsSaveBtn not found!');
   }
   
-  // Add Enter key support for all settings inputs
+  // Add Enter key support for all settings inputs with capture
   const settingsInputs = settingsForm.querySelectorAll('input, textarea, select');
   console.log('[DEBUG] Found', settingsInputs.length, 'form inputs for Enter key binding');
   settingsInputs.forEach(input => {
@@ -9254,10 +9255,11 @@ if (settingsForm) {
       if (event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
         event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         console.log('[DEBUG] Enter pressed in', event.target.id || event.target.name, ', calling saveSettingsNow');
         await window.saveSettingsNow();
       }
-    });
+    }, true); // Use capture phase
   });
   
   console.log('[DEBUG] Settings form handlers attached. Form ID:', settingsForm.id, 'Button:', settingsSaveBtn ? 'found' : 'NOT FOUND');
