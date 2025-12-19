@@ -2137,11 +2137,11 @@ def save_config(cfg: Dict[str, Any]) -> None:
                         (key, json.dumps(value), now)
                     )
                 
-                # Commit the transaction
-                cursor.execute("COMMIT")
+                # Commit the transaction using connection-level method
+                db.commit()
             except Exception as e:
-                # Rollback on any error
-                cursor.execute("ROLLBACK")
+                # Rollback on any error using connection-level method
+                db.rollback()
                 log(f"Error saving config, transaction rolled back: {e}")
                 raise
         finally:
