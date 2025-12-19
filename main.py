@@ -10672,6 +10672,304 @@ if (monitorsList) {
   });
 }
 
+// ================== WORKFLOWS ==================
+
+const workflowForm = document.getElementById('workflow-form');
+const workflowIdInput = document.getElementById('workflow-id');
+const workflowNameInput = document.getElementById('workflow-name');
+const workflowDescriptionInput = document.getElementById('workflow-description');
+const workflowPhasesContainer = document.getElementById('workflow-phases-container');
+const workflowAddPhaseBtn = document.getElementById('workflow-add-phase');
+const workflowCancelBtn = document.getElementById('workflow-cancel');
+const workflowStatus = document.getElementById('workflow-status');
+const workflowsList = document.getElementById('workflows-list');
+
+let workflowPhases = [];
+let editingWorkflowId = null;
+
+const availableTools = [
+  'amass', 'subfinder', 'assetfinder', 'findomain', 'sublist3r', 'crtsh', 
+  'github-subdomains', 'dnsx', 'ffuf', 'httpx', 'waybackurls', 'gau', 
+  'nuclei', 'nikto', 'gowitness', 'nmap', 'custom'
+];
+
+function renderWorkflowPhases() {
+  if (!workflowPhasesContainer) return;
+  
+  workflowPhasesContainer.innerHTML = workflowPhases.map((phase, idx) => {
+    const isCustom = phase.tool === 'custom';
+    return `
+      <div class="workflow-phase" style="border: 1px solid #334155; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+          <h5 style="margin: 0;">Phase ${idx + 1}</h5>
+          <button type="button" class="btn secondary small" onclick="removeWorkflowPhase(${idx})">Remove</button>
+        </div>
+        <div style="display: grid; gap: 0.5rem;">
+          <label style="margin: 0;">
+            Tool/Command Type
+            <select onchange="updatePhaseToolType(${idx}, this.value)" style="width: 100%;">
+              ${availableTools.map(tool => `<option value="${tool}" ${phase.tool === tool ? 'selected' : ''}>${tool === 'custom' ? 'Custom Command' : tool.toUpperCase()}</option>`).join('')}
+            </select>
+          </label>
+          ${isCustom ? `
+            <label style="margin: 0;">
+              Custom Command
+              <textarea onchange="updatePhaseField(${idx}, 'command', this.value)" rows="2" placeholder="echo \\"$DOMAIN$\\" | your-tool --output $OUTPUT$" style="width: 100%; font-family: monospace;">${escapeHtml(phase.command || '')}</textarea>
+            </label>
+          ` : ''}
+          <label style="margin: 0;">
+            Extra Flags (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'flags', this.value)" value="${escapeHtml(phase.flags || '')}" placeholder="e.g., --threads 20 --timeout 60" style="width: 100%;" />
+          </label>
+          <label style="margin: 0;">
+            Input Template (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'input', this.value)" value="${escapeHtml(phase.input || '')}" placeholder="e.g., $INPUT$ or previous_output.txt" style="width: 100%;" />
+          </label>
+          <label style="margin: 0;">
+            Output Template (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'output', this.value)" value="${escapeHtml(phase.output || '')}" placeholder="e.g., $OUTPUT$ or phase${idx + 1}_output.txt" style="width: 100%;" />
+          </label>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  if (workflowPhases.length === 0) {
+    workflowPhasesContainer.innerHTML = '<p class="muted">No phases added yet. Click "Add Phase" to start building your workflow.</p>';
+  }
+}
+
+function addWorkflowPhase() {
+  workflowPhases.push({
+    tool: 'amass',
+    command: '',
+    flags: '',
+    input: '',
+    output: ''
+  });
+  renderWorkflowPhases();
+}
+
+function removeWorkflowPhase(idx) {
+  workflowPhases.splice(idx, 1);
+  renderWorkflowPhases();
+}
+
+function updatePhaseToolType(idx, tool) {
+  if (workflowPhases[idx]) {
+    workflowPhases[idx].tool = tool;
+    renderWorkflowPhases();
+  }
+}
+
+function updatePhaseField(idx, field, value) {
+  if (workflowPhases[idx]) {
+    workflowPhases[idx][field] = value;
+  }
+}
+
+if (workflowAddPhaseBtn) {
+  workflowAddPhaseBtn.addEventListener('click', addWorkflowPhase);
+}
+
+if (workflowCancelBtn) {
+  workflowCancelBtn.addEventListener('click', () => {
+    resetWorkflowForm();
+  });
+}
+
+function resetWorkflowForm() {
+  editingWorkflowId = null;
+  workflowPhases = [];
+  if (workflowIdInput) workflowIdInput.value = '';
+  if (workflowNameInput) workflowNameInput.value = '';
+  if (workflowDescriptionInput) workflowDescriptionInput.value = '';
+  renderWorkflowPhases();
+  if (workflowStatus) {
+    workflowStatus.textContent = '';
+    workflowStatus.className = 'status';
+  }
+}
+
+if (workflowForm) {
+  workflowForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    
+    if (!workflowNameInput || !workflowNameInput.value.trim()) {
+      if (workflowStatus) {
+        workflowStatus.textContent = 'Workflow name is required';
+        workflowStatus.className = 'status error';
+      }
+      return;
+    }
+    
+    if (workflowPhases.length === 0) {
+      if (workflowStatus) {
+        workflowStatus.textContent = 'At least one phase is required';
+        workflowStatus.className = 'status error';
+      }
+      return;
+    }
+    
+    const payload = {
+      name: workflowNameInput.value.trim(),
+      description: workflowDescriptionInput ? workflowDescriptionInput.value.trim() : '',
+      phases: workflowPhases
+    };
+    
+    if (editingWorkflowId) {
+      payload.id = editingWorkflowId;
+    }
+    
+    const endpoint = editingWorkflowId ? '/api/workflows/update' : '/api/workflows/create';
+    
+    if (workflowStatus) {
+      workflowStatus.textContent = 'Saving...';
+      workflowStatus.className = 'status';
+    }
+    
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      
+      if (workflowStatus) {
+        workflowStatus.textContent = data.message || 'Saved';
+        workflowStatus.className = 'status ' + (data.success ? 'success' : 'error');
+      }
+      
+      if (data.success) {
+        resetWorkflowForm();
+        await loadWorkflows();
+      }
+    } catch (err) {
+      if (workflowStatus) {
+        workflowStatus.textContent = err.message;
+        workflowStatus.className = 'status error';
+      }
+    }
+  });
+}
+
+async function loadWorkflows() {
+  try {
+    const resp = await fetch('/api/workflows');
+    const data = await resp.json();
+    renderWorkflows(data.workflows || [], data.default_workflow_id);
+  } catch (err) {
+    console.error('Error loading workflows:', err);
+  }
+}
+
+function renderWorkflows(workflows, defaultWorkflowId) {
+  if (!workflowsList) return;
+  
+  if (workflows.length === 0) {
+    workflowsList.innerHTML = '<div class="section-placeholder">No workflows created yet.</div>';
+    return;
+  }
+  
+  const html = workflows.map(workflow => {
+    const isDefault = workflow.id === defaultWorkflowId;
+    return `
+      <div class="workflow-item" style="border: 1px solid #334155; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: start;">
+          <div style="flex: 1;">
+            <h4 style="margin: 0 0 0.5rem 0;">${escapeHtml(workflow.name)} ${isDefault ? '<span class="badge" style="background: #3b82f6;">Default</span>' : ''}</h4>
+            ${workflow.description ? `<p class="muted" style="margin: 0 0 0.5rem 0;">${escapeHtml(workflow.description)}</p>` : ''}
+            <p class="muted" style="margin: 0;"><strong>${workflow.phase_count}</strong> phases</p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button class="btn secondary small" onclick="editWorkflow('${workflow.id}')">Edit</button>
+            ${!isDefault ? `<button class="btn secondary small" onclick="setDefaultWorkflow('${workflow.id}')">Set as Default</button>` : `<button class="btn secondary small" onclick="setDefaultWorkflow(null)">Clear Default</button>`}
+            <button class="btn secondary small" onclick="deleteWorkflow('${workflow.id}')" style="background: #dc2626;">Delete</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  workflowsList.innerHTML = html;
+}
+
+async function editWorkflow(workflowId) {
+  try {
+    const resp = await fetch(`/api/workflow/${workflowId}`);
+    const data = await resp.json();
+    
+    if (data.success && data.workflow) {
+      const workflow = data.workflow;
+      editingWorkflowId = workflow.id;
+      if (workflowIdInput) workflowIdInput.value = workflow.id;
+      if (workflowNameInput) workflowNameInput.value = workflow.name;
+      if (workflowDescriptionInput) workflowDescriptionInput.value = workflow.description || '';
+      workflowPhases = workflow.phases || [];
+      renderWorkflowPhases();
+      
+      // Scroll to form
+      if (workflowForm) {
+        workflowForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  } catch (err) {
+    alert(`Error loading workflow: ${err.message}`);
+  }
+}
+
+async function deleteWorkflow(workflowId) {
+  if (!confirm('Are you sure you want to delete this workflow?')) {
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/workflows/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: workflowId }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      await loadWorkflows();
+    } else {
+      alert(`Delete failed: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error deleting workflow: ${err.message}`);
+  }
+}
+
+async function setDefaultWorkflow(workflowId) {
+  try {
+    const resp = await fetch('/api/workflows/set-default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: workflowId }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      await loadWorkflows();
+    } else {
+      alert(`Failed to set default: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error setting default workflow: ${err.message}`);
+  }
+}
+
+// Load workflows when the workflows tab is shown
+document.querySelectorAll('.nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    if (link.getAttribute('data-view') === 'workflows') {
+      loadWorkflows();
+    }
+  });
+});
+
 // ================== LOGS VIEW ==================
 
 function saveLogFilters() {
