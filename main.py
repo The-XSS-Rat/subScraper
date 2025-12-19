@@ -2656,8 +2656,7 @@ def add_completed_job(domain: str, job_data: Dict[str, Any]) -> None:
     with JOB_LOCK:
         # Remove thread reference before deepcopy as it's not serializable
         # Thread objects contain locks that cannot be pickled
-        job_data_copy = dict(job_data)
-        job_data_copy.pop("thread", None)
+        job_data_copy = {k: v for k, v in job_data.items() if k != 'thread'}
         job_copy = copy.deepcopy(job_data_copy)
         
         # Add completion timestamp
@@ -5342,14 +5341,8 @@ def _start_job_thread(job: Dict[str, Any]) -> None:
                 if job_record:
                     # Remove thread reference before deepcopy to avoid pickle errors
                     # Thread objects contain locks that cannot be pickled
-                    thread_ref = job_record.pop("thread", None)
-                    try:
-                        # Make a deep copy while we have the lock
-                        job_to_save = copy.deepcopy(job_record)
-                    finally:
-                        # Restore thread reference in case it's needed (defensive)
-                        if thread_ref is not None:
-                            job_record["thread"] = thread_ref
+                    # Create a copy excluding the thread key to preserve original state
+                    job_to_save = copy.deepcopy({k: v for k, v in job_record.items() if k != 'thread'})
                 RUNNING_JOBS.pop(domain, None)
             
             # Save outside the lock to avoid deadlock (add_completed_job acquires lock)
