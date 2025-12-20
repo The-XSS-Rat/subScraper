@@ -1703,6 +1703,221 @@ class TestHTTPHandlerSecurity:
             assert ".." in name or "/" in name or "\\" in name
 
 
+class TestWorkflows:
+    """Tests for workflow management functionality"""
+    
+    def setup_method(self):
+        """Setup test fixtures"""
+        # Create a temporary database for testing
+        self.temp_db = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.db')
+        self.temp_db_path = Path(self.temp_db.name)
+        self.temp_db.close()
+        
+        # Mock the database connection
+        self.original_get_db = main.get_db
+        
+        def mock_get_db():
+            conn = sqlite3.connect(str(self.temp_db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+        
+        main.get_db = mock_get_db
+        
+        # Initialize database schema
+        main.init_database()
+    
+    def teardown_method(self):
+        """Cleanup test fixtures"""
+        # Restore original function
+        main.get_db = self.original_get_db
+        
+        # Remove temp database
+        if self.temp_db_path.exists():
+            self.temp_db_path.unlink()
+    
+    def test_ensure_default_workflow(self):
+        """Test that default workflow is created automatically"""
+        # Call ensure_default_workflow
+        main.ensure_default_workflow()
+        
+        # Check that default workflow exists
+        workflows = main.list_workflows()
+        assert len(workflows) > 0
+        
+        default_workflows = [w for w in workflows if w['is_default']]
+        assert len(default_workflows) == 1
+        
+        default = default_workflows[0]
+        assert default['name'] == "Default Recon Pipeline"
+        assert default['is_default'] is True
+        assert len(default['phases']) > 0
+    
+    def test_create_workflow(self):
+        """Test creating a custom workflow"""
+        phases = [
+            {"tool": "amass", "command": "", "flags": "-passive", "input": "", "output": ""},
+            {"tool": "httpx", "command": "", "flags": "", "input": "$INPUT$", "output": "$OUTPUT$"}
+        ]
+        
+        success, message, workflow_id = main.create_workflow(
+            "Test Workflow",
+            "A test workflow",
+            phases
+        )
+        
+        assert success is True
+        assert workflow_id is not None
+        
+        # Verify workflow was created
+        workflow = main.get_workflow(workflow_id)
+        assert workflow is not None
+        assert workflow['name'] == "Test Workflow"
+        assert len(workflow['phases']) == 2
+    
+    def test_update_workflow(self):
+        """Test updating an existing workflow"""
+        # Create a workflow first
+        phases = [{"tool": "amass", "command": "", "flags": "", "input": "", "output": ""}]
+        success, message, workflow_id = main.create_workflow("Original", "Original desc", phases)
+        assert success is True
+        
+        # Update it
+        new_phases = [
+            {"tool": "subfinder", "command": "", "flags": "", "input": "", "output": ""},
+            {"tool": "httpx", "command": "", "flags": "", "input": "", "output": ""}
+        ]
+        success, message = main.update_workflow(workflow_id, "Updated", "Updated desc", new_phases)
+        assert success is True
+        
+        # Verify updates
+        workflow = main.get_workflow(workflow_id)
+        assert workflow['name'] == "Updated"
+        assert workflow['description'] == "Updated desc"
+        assert len(workflow['phases']) == 2
+    
+    def test_delete_non_default_workflow(self):
+        """Test deleting a non-default workflow"""
+        # Create a workflow
+        phases = [{"tool": "amass", "command": "", "flags": "", "input": "", "output": ""}]
+        success, message, workflow_id = main.create_workflow("To Delete", "Will be deleted", phases)
+        assert success is True
+        
+        # Delete it
+        success, message = main.delete_workflow(workflow_id)
+        assert success is True
+        
+        # Verify deletion
+        workflow = main.get_workflow(workflow_id)
+        assert workflow is None
+    
+    def test_cannot_delete_default_workflow(self):
+        """Test that default workflow cannot be deleted"""
+        # Ensure default workflow exists
+        main.ensure_default_workflow()
+        
+        # Get default workflow
+        workflows = main.list_workflows()
+        default_workflow = next((w for w in workflows if w['is_default']), None)
+        assert default_workflow is not None
+        
+        # Try to delete default workflow
+        success, message = main.delete_workflow(default_workflow['id'])
+        assert success is False
+        assert "cannot delete the default workflow" in message.lower()
+    
+    def test_set_default_workflow(self):
+        """Test setting a workflow as default"""
+        # Ensure original default exists
+        main.ensure_default_workflow()
+        
+        # Create a new workflow
+        phases = [{"tool": "amass", "command": "", "flags": "", "input": "", "output": ""}]
+        success, message, new_workflow_id = main.create_workflow("New Default", "New default workflow", phases)
+        assert success is True
+        
+        # Set it as default
+        success, message = main.set_default_workflow(new_workflow_id)
+        assert success is True
+        
+        # Verify it's now default
+        workflow = main.get_workflow(new_workflow_id)
+        assert workflow['is_default'] is True
+        
+        # Verify old default is no longer default
+        workflows = main.list_workflows()
+        default_workflows = [w for w in workflows if w['is_default']]
+        assert len(default_workflows) == 1
+        assert default_workflows[0]['id'] == new_workflow_id
+    
+    def test_list_workflows(self):
+        """Test listing all workflows"""
+        # Ensure default workflow exists
+        main.ensure_default_workflow()
+        
+        # Create additional workflows
+        phases = [{"tool": "amass", "command": "", "flags": "", "input": "", "output": ""}]
+        main.create_workflow("Workflow 1", "First", phases)
+        main.create_workflow("Workflow 2", "Second", phases)
+        
+        # List workflows
+        workflows = main.list_workflows()
+        assert len(workflows) >= 3  # At least default + 2 created
+        
+        # Check structure
+        for workflow in workflows:
+            assert 'id' in workflow
+            assert 'name' in workflow
+            assert 'phases' in workflow
+            assert 'is_default' in workflow
+    
+    def test_start_pipeline_job_with_workflow(self):
+        """Test that jobs can be started with a specific workflow"""
+        # Ensure default workflow exists
+        main.ensure_default_workflow()
+        
+        # Get default workflow
+        default_workflow = main.get_default_workflow()
+        assert default_workflow is not None
+        
+        # Mock job starting (to avoid actually running tools)
+        with patch('main._start_job_thread'):
+            success, message = main.start_pipeline_job(
+                "test.com",
+                None,
+                False,
+                None,
+                default_workflow['id']
+            )
+            
+            # Job should be queued successfully
+            assert success is True
+            
+            # Check that job has workflow_id
+            with main.JOB_LOCK:
+                job = main.RUNNING_JOBS.get("test.com")
+                assert job is not None
+                assert job.get('workflow_id') == default_workflow['id']
+    
+    def test_workflow_api_endpoints(self):
+        """Test workflow API endpoint data structure"""
+        # Ensure default workflow exists
+        main.ensure_default_workflow()
+        
+        # Test list_workflows returns proper format for API
+        workflows = main.list_workflows()
+        default_workflow = main.get_default_workflow()
+        
+        # Simulate API response
+        api_response = {
+            "workflows": workflows,
+            "default_workflow_id": default_workflow['id'] if default_workflow else None
+        }
+        
+        assert isinstance(api_response['workflows'], list)
+        assert api_response['default_workflow_id'] is not None
+        assert len(api_response['workflows']) > 0
+
+
 if __name__ == '__main__':
     # Run tests with pytest
     pytest.main([__file__, '-v', '--tb=short'])

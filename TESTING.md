@@ -35,6 +35,9 @@ python3 -m pytest test_main.py::TestFilterLogic -v
 
 # Test API endpoints only
 python3 -m pytest test_main.py::TestAPIEndpoints -v
+
+# Test workflow functionality only
+python3 -m pytest test_main.py::TestWorkflows -v
 ```
 
 ### Run specific test:
@@ -77,6 +80,13 @@ The test suite covers:
 - **Input validation**: Tests domain and subdomain detection
 - **Error detection**: Validates rate limit error identification
 - **Data sanitization**: Tests input cleaning and normalization
+
+### 7. Workflow Management (`TestWorkflows`)
+- **Default workflow creation**: Ensures default workflow is auto-created
+- **Workflow CRUD operations**: Tests create, read, update, delete
+- **Default workflow protection**: Validates default cannot be deleted
+- **Workflow selection**: Tests workflow assignment to jobs
+- **API endpoint structure**: Validates workflow API responses
 
 ## Test Results Interpretation
 

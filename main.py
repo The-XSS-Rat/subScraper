@@ -618,6 +618,24 @@ def init_database() -> None:
         )
     """)
     
+    # Workflows table - stores custom user-defined workflows
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS workflows (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            phases TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            is_default INTEGER DEFAULT 0
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_workflows_name 
+        ON workflows(name)
+    """)
+    
     db.commit()
     log("Database schema initialized successfully.")
 
@@ -817,6 +835,60 @@ def ensure_database() -> None:
     """Ensure database is initialized and migrated."""
     init_database()
     migrate_json_to_sqlite()
+    ensure_default_workflow()
+
+
+def ensure_default_workflow() -> None:
+    """
+    Ensure a default workflow exists that matches the current pipeline.
+    This workflow represents the standard recon pipeline and cannot be deleted.
+    """
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Check if default workflow already exists
+        cursor.execute("SELECT id FROM workflows WHERE is_default = 1 LIMIT 1")
+        existing = cursor.fetchone()
+        
+        if existing:
+            return  # Default workflow already exists
+        
+        # Create default workflow based on PIPELINE_STEPS
+        default_phases = []
+        for step in PIPELINE_STEPS:
+            if step == "screenshots":
+                # Screenshots is a special step, not a tool
+                continue
+            default_phases.append({
+                "tool": step,
+                "command": "",
+                "flags": "",
+                "input": "",
+                "output": ""
+            })
+        
+        workflow_id = "default-workflow-builtin"
+        now = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute(
+            """INSERT OR IGNORE INTO workflows 
+               (id, name, description, phases, created_at, updated_at, is_default) 
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                workflow_id,
+                "Default Recon Pipeline",
+                "Standard reconnaissance workflow with all built-in tools. This is the default pipeline that runs when no workflow is selected.",
+                json.dumps(default_phases),
+                now,
+                now,
+                1
+            )
+        )
+        db.commit()
+        log("Created default workflow based on standard pipeline")
+    except Exception as e:
+        log(f"Error ensuring default workflow: {e}")
 
 
 def atomic_write_json(filepath: Path, data: Dict[str, Any], indent: int = 2) -> None:
@@ -1372,7 +1444,7 @@ def process_monitor(monitor_id: str) -> None:
     dispatched_count = 0
     skip_nikto = bool(cfg.get("skip_nikto_by_default", False))
     for meta in new_entries:
-        success, message, details = start_targets_from_input(meta["value"], None, skip_nikto, None)
+        success, message, details = start_targets_from_input(meta["value"], None, skip_nikto, None, None)
         meta["last_dispatch"] = now_iso
         meta["dispatch_message"] = message
         meta["dispatch_results"] = details
@@ -1425,6 +1497,253 @@ def start_monitor_worker() -> None:
     thread.start()
     with MONITOR_LOCK:
         MONITOR_THREAD = thread
+
+
+# ================== WORKFLOW MANAGEMENT ==================
+
+
+WORKFLOW_LOCK = threading.Lock()
+
+
+def create_workflow(name: str, description: str, phases: List[Dict[str, Any]]) -> Tuple[bool, str, Optional[str]]:
+    """
+    Create a new workflow with custom phases.
+    
+    Args:
+        name: Workflow name
+        description: Workflow description
+        phases: List of phase definitions with tool/command, flags, input/output templates
+        
+    Returns:
+        (success, message, workflow_id)
+    """
+    if not name or not name.strip():
+        return False, "Workflow name is required.", None
+    
+    if not phases or not isinstance(phases, list):
+        return False, "At least one phase is required.", None
+    
+    workflow_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            cursor.execute(
+                """INSERT INTO workflows 
+                   (id, name, description, phases, created_at, updated_at, is_default) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (workflow_id, name.strip(), description or "", json.dumps(phases), now, now, 0)
+            )
+            db.commit()
+        
+        log(f"Created workflow '{name}' (id: {workflow_id})")
+        return True, f"Workflow '{name}' created successfully.", workflow_id
+    except Exception as e:
+        log(f"Error creating workflow: {e}")
+        return False, f"Failed to create workflow: {str(e)}", None
+
+
+def list_workflows() -> List[Dict[str, Any]]:
+    """List all available workflows."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows ORDER BY name"
+        )
+        rows = cursor.fetchall()
+        
+        workflows = []
+        for row in rows:
+            try:
+                phases = json.loads(row[3])
+            except json.JSONDecodeError:
+                phases = []
+            
+            workflows.append({
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "phases": phases,
+                "phase_count": len(phases),
+                "created_at": row[4],
+                "updated_at": row[5],
+                "is_default": bool(row[6]),
+            })
+        
+        return workflows
+    except Exception as e:
+        log(f"Error listing workflows: {e}")
+        return []
+
+
+def get_workflow(workflow_id: str) -> Optional[Dict[str, Any]]:
+    """Get a specific workflow by ID."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows WHERE id = ?",
+            (workflow_id,)
+        )
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        try:
+            phases = json.loads(row[3])
+        except json.JSONDecodeError:
+            phases = []
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "phases": phases,
+            "created_at": row[4],
+            "updated_at": row[5],
+            "is_default": bool(row[6]),
+        }
+    except Exception as e:
+        log(f"Error getting workflow: {e}")
+        return None
+
+
+def update_workflow(workflow_id: str, name: str, description: str, phases: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Update an existing workflow."""
+    if not workflow_id:
+        return False, "Workflow ID is required."
+    
+    if not name or not name.strip():
+        return False, "Workflow name is required."
+    
+    if not phases or not isinstance(phases, list):
+        return False, "At least one phase is required."
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        with WORKFLOW_LOCK:
+            cursor.execute(
+                """UPDATE workflows 
+                   SET name = ?, description = ?, phases = ?, updated_at = ? 
+                   WHERE id = ?""",
+                (name.strip(), description or "", json.dumps(phases), now, workflow_id)
+            )
+            
+            if cursor.rowcount == 0:
+                return False, "Workflow not found."
+            
+            db.commit()
+        
+        log(f"Updated workflow '{name}' (id: {workflow_id})")
+        return True, f"Workflow '{name}' updated successfully."
+    except Exception as e:
+        log(f"Error updating workflow: {e}")
+        return False, f"Failed to update workflow: {str(e)}"
+
+
+def delete_workflow(workflow_id: str) -> Tuple[bool, str]:
+    """Delete a workflow. The default workflow cannot be deleted."""
+    if not workflow_id:
+        return False, "Workflow ID is required."
+    
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            # Check if this is the default workflow
+            cursor.execute("SELECT name, is_default FROM workflows WHERE id = ?", (workflow_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False, "Workflow not found."
+            
+            workflow_name = row[0]
+            is_default = bool(row[1])
+            
+            # Prevent deletion of default workflow
+            if is_default:
+                return False, "Cannot delete the default workflow. Please set another workflow as default first."
+            
+            cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+            db.commit()
+        
+        log(f"Deleted workflow '{workflow_name}' (id: {workflow_id})")
+        return True, f"Workflow '{workflow_name}' deleted successfully."
+    except Exception as e:
+        log(f"Error deleting workflow: {e}")
+        return False, f"Failed to delete workflow: {str(e)}"
+
+
+def set_default_workflow(workflow_id: Optional[str]) -> Tuple[bool, str]:
+    """Set or unset the default workflow."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        with WORKFLOW_LOCK:
+            # Clear all defaults first
+            cursor.execute("UPDATE workflows SET is_default = 0")
+            
+            if workflow_id:
+                # Set new default
+                cursor.execute("UPDATE workflows SET is_default = 1 WHERE id = ?", (workflow_id,))
+                if cursor.rowcount == 0:
+                    return False, "Workflow not found."
+            
+            db.commit()
+        
+        if workflow_id:
+            log(f"Set workflow {workflow_id} as default")
+            return True, "Default workflow updated."
+        else:
+            log("Cleared default workflow")
+            return True, "Default workflow cleared."
+    except Exception as e:
+        log(f"Error setting default workflow: {e}")
+        return False, f"Failed to set default workflow: {str(e)}"
+
+
+def get_default_workflow() -> Optional[Dict[str, Any]]:
+    """Get the default workflow if one is set."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        cursor.execute(
+            "SELECT id, name, description, phases, created_at, updated_at, is_default FROM workflows WHERE is_default = 1 LIMIT 1"
+        )
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        try:
+            phases = json.loads(row[3])
+        except json.JSONDecodeError:
+            phases = []
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "phases": phases,
+            "created_at": row[4],
+            "updated_at": row[5],
+            "is_default": bool(row[6]),
+        }
+    except Exception as e:
+        log(f"Error getting default workflow: {e}")
+        return None
 
 
 # ================== SYSTEM RESOURCE MONITORING ==================
@@ -6145,6 +6464,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="reports" href="#reports">Reports</a>
       <a class="nav-link" data-view="gallery" href="#gallery">Gallery</a>
       <a class="nav-link" data-view="logs" href="#logs">Logs</a>
+      <a class="nav-link" data-view="workflows" href="#workflows">Workflows</a>
       <a class="nav-link" data-view="monitors" href="#monitors">Monitors</a>
       <a class="nav-link" data-view="targets" href="#targets">Targets</a>
       <a class="nav-link" data-view="settings" href="#settings">Settings</a>
@@ -6205,6 +6525,14 @@ button:hover { background:#1d4ed8; }
                   Enter one or more domains/wildcards. Separate with commas or newlines.
                 </small>
               </label>
+              <label for="launch-workflow">Workflow
+                <select id="launch-workflow" name="workflow">
+                  <option value="">Loading workflows...</option>
+                </select>
+                <small style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
+                  Select the workflow to use for this scan. Default workflow is used if not specified.
+                </small>
+              </label>
               <label for="launch-wordlist">Wordlist path (optional)
                 <input id="launch-wordlist" type="text" name="wordlist" placeholder="./w.txt" />
               </label>
@@ -6236,10 +6564,44 @@ button:hover { background:#1d4ed8; }
     <section class="module" data-view="jobs">
       <div class="module-header">
         <h2>Active Jobs</h2>
-        <button class="btn secondary small" id="resume-all-btn" style="margin-left: auto;">Resume All Paused</button>
+        <div style="margin-left: auto; display: flex; gap: 0.5rem; align-items: center;">
+          <button class="btn secondary small" id="jobs-expand-all-btn">Expand All</button>
+          <button class="btn secondary small" id="jobs-collapse-all-btn">Collapse All</button>
+          <button class="btn secondary small" id="resume-all-btn">Resume All Paused</button>
+        </div>
       </div>
-      <div class="module-body" id="jobs-list">
-        <div class="section-placeholder">No active jobs.</div>
+      <div class="module-body">
+        <div class="jobs-filters" style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+          <input type="text" id="jobs-filter-domain" placeholder="Filter by domain..." style="flex: 1; min-width: 200px;" />
+          <select id="jobs-filter-status" style="padding: 0.5rem;">
+            <option value="">All Statuses</option>
+            <option value="running">Running</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+            <option value="queued">Queued</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button class="btn secondary small" id="jobs-clear-filters">Clear Filters</button>
+        </div>
+        <div id="jobs-list">
+          <div class="section-placeholder">No active jobs.</div>
+        </div>
+        <div class="jobs-pagination" style="display: none; margin-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <span>Items per page: </span>
+            <select id="jobs-per-page" style="padding: 0.25rem;">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button class="btn secondary small" id="jobs-prev-page" disabled>Previous</button>
+            <span id="jobs-page-info">Page 1 of 1</span>
+            <button class="btn secondary small" id="jobs-next-page" disabled>Next</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -6339,6 +6701,69 @@ button:hover { background:#1d4ed8; }
         <div class="table-pagination" id="logs-pagination"></div>
         <div style="margin-top: 16px; text-align: right;">
           <span class="muted" id="logs-count">0 logs</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="module" data-view="workflows">
+      <div class="module-header"><h2>Custom Workflows</h2></div>
+      <div class="module-body">
+        <div class="card" style="margin-bottom: 1rem;">
+          <h3>Workflow Editor</h3>
+          <form id="workflow-form">
+            <input type="hidden" id="workflow-id" value="" />
+            <label>Name *
+              <input id="workflow-name" type="text" name="name" placeholder="My Custom Workflow" required />
+            </label>
+            <label>Description
+              <textarea id="workflow-description" name="description" rows="2" placeholder="Optional description of what this workflow does"></textarea>
+            </label>
+            
+            <h4 style="margin-top: 1rem;">Phases</h4>
+            <p class="muted" style="margin-bottom: 0.5rem;">Define the steps of your workflow. Each phase can use built-in tools or custom commands.</p>
+            
+            <div id="workflow-phases-container">
+              <!-- Phases will be added here dynamically -->
+            </div>
+            
+            <button type="button" id="workflow-add-phase" class="btn secondary small">+ Add Phase</button>
+            
+            <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+              <button type="submit" class="btn">Save Workflow</button>
+              <button type="button" id="workflow-cancel" class="btn secondary">Cancel</button>
+            </div>
+            <div class="status" id="workflow-status"></div>
+          </form>
+        </div>
+        
+        <div class="card">
+          <h3>Saved Workflows</h3>
+          <div id="workflows-list" class="section-placeholder">No workflows created yet.</div>
+        </div>
+        
+        <div class="card">
+          <h3>How Workflows Work</h3>
+          <ul class="tips">
+            <li><strong>Phases:</strong> Each phase represents a step in your recon workflow (subdomain enum, HTTP probing, vuln scanning, etc.)</li>
+            <li><strong>Built-in Tools:</strong> Select from existing tools like amass, subfinder, httpx, nuclei, etc.</li>
+            <li><strong>Custom Commands:</strong> Add your own tools using custom shell commands</li>
+            <li><strong>Template Variables:</strong> Use <code>$DOMAIN$</code>, <code>$INPUT$</code>, <code>$OUTPUT$</code> in commands and flags</li>
+            <li><strong>Input/Output:</strong> Each phase can read from previous phase output and write to a file for the next phase</li>
+            <li><strong>Default Workflow:</strong> Set one workflow as default to use when launching scans</li>
+          </ul>
+          
+          <h4>Example Custom Command:</h4>
+          <pre style="background: #1e293b; padding: 1rem; border-radius: 4px; overflow-x: auto;">
+echo "$DOMAIN$" | my-custom-tool --output $OUTPUT$ --threads 10
+          </pre>
+          
+          <h4>Available Template Variables:</h4>
+          <ul style="margin-top: 0.5rem;">
+            <li><code>$DOMAIN$</code> - The target domain</li>
+            <li><code>$INPUT$</code> - Input file from previous phase</li>
+            <li><code>$OUTPUT$</code> - Output file for this phase</li>
+            <li><code>$WORDLIST$</code> - Configured wordlist path</li>
+          </ul>
         </div>
       </div>
     </section>
@@ -6959,6 +7384,7 @@ settingsTabs.forEach(tab => {
 
 const POLL_INTERVAL = 8000;
 const launchForm = document.getElementById('launch-form');
+const launchWorkflow = document.getElementById('launch-workflow');
 const launchWordlist = document.getElementById('launch-wordlist');
 const launchInterval = document.getElementById('launch-interval');
 const launchSkipNikto = document.getElementById('launch-skip-nikto');
@@ -7357,6 +7783,13 @@ function renderJobStep(name, info = {}) {
   `;
 }
 
+// Jobs pagination and filtering state
+let jobsCurrentPage = 1;
+let jobsPerPage = parseInt(localStorage.getItem('jobsPerPage') || '10', 10);
+let jobsFilterDomain = localStorage.getItem('jobsFilterDomain') || '';
+let jobsFilterStatus = localStorage.getItem('jobsFilterStatus') || '';
+let jobsCollapsedState = JSON.parse(localStorage.getItem('jobsCollapsedState') || '{}');
+
 function renderJobs(jobs) {
   const all = Array.isArray(jobs) ? jobs : [];
   const running = all.filter(job => job.status !== 'queued');
@@ -7368,22 +7801,50 @@ function renderJobs(jobs) {
   
   if (!running.length) {
     jobsList.innerHTML = '<div class="section-placeholder">No active jobs.</div>';
+    document.querySelector('.jobs-pagination').style.display = 'none';
     return;
   }
   
   // Render active jobs first, then completed jobs
-  const sortedJobs = [...activeJobs, ...completedJobs];
+  let sortedJobs = [...activeJobs, ...completedJobs];
   
-  const cards = sortedJobs.map(job => {
+  // Apply filters
+  if (jobsFilterDomain) {
+    sortedJobs = sortedJobs.filter(job => 
+      (job.domain || '').toLowerCase().includes(jobsFilterDomain.toLowerCase())
+    );
+  }
+  if (jobsFilterStatus) {
+    sortedJobs = sortedJobs.filter(job => 
+      (job.status || '').toLowerCase() === jobsFilterStatus.toLowerCase()
+    );
+  }
+  
+  // Calculate pagination
+  const totalJobs = sortedJobs.length;
+  const totalPages = Math.max(1, Math.ceil(totalJobs / jobsPerPage));
+  jobsCurrentPage = Math.min(jobsCurrentPage, totalPages);
+  const startIdx = (jobsCurrentPage - 1) * jobsPerPage;
+  const endIdx = startIdx + jobsPerPage;
+  const paginatedJobs = sortedJobs.slice(startIdx, endIdx);
+  
+  // Render job cards
+  const cards = paginatedJobs.map(job => {
     const progress = Math.max(0, Math.min(100, job.progress || 0));
     const steps = job.steps || {};
     const stepsHtml = Object.keys(steps).map(step => renderJobStep(step, steps[step])).join('');
     const logsHtml = renderLogEntries(job.logs || []);
+    const jobId = job.domain || '';
+    const isCollapsed = jobsCollapsedState[jobId] !== false; // Default to collapsed
+    
     return `
-      <div class="job-card">
-        <div class="job-summary">
+      <div class="job-card" data-job-id="${escapeHtml(jobId)}">
+        <div class="job-summary" style="cursor: pointer;" onclick="toggleJobDetails('${escapeHtml(jobId)}')">
           <div>
-            <div>${escapeHtml(job.domain || '')}</div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span class="job-toggle-icon">${isCollapsed ? '▶' : '▼'}</span>
+              <strong>${escapeHtml(job.domain || '')}</strong>
+            </div>
             <div class="muted">Started ${fmtTime(job.started)}</div>
             ${job.completed_at ? `<div class="muted">Completed ${fmtTime(job.completed_at)}</div>` : ''}
           </div>
@@ -7393,23 +7854,54 @@ function renderJobs(jobs) {
           </div>
         </div>
         ${renderProgress(progress, job.status)}
-        <div class="job-meta">
-          <span><strong>Wordlist:</strong> ${escapeHtml(job.wordlist || 'default')}</span>
-          <span><strong>Interval:</strong> ${escapeHtml(job.interval || 0)}s</span>
-          <span><strong>Nikto:</strong> ${job.skip_nikto ? 'Skipped' : 'Enabled'}</span>
-        </div>
-        <div class="job-message">${escapeHtml(job.message || '')}</div>
-        ${renderJobControls(job)}
-        <div class="job-steps">
-          ${stepsHtml || '<p class="muted">Awaiting step updates…</p>'}
-        </div>
-        <div class="job-log">
-          ${logsHtml}
+        <div class="job-details" style="display: ${isCollapsed ? 'none' : 'block'};">
+          <div class="job-meta">
+            <span><strong>Wordlist:</strong> ${escapeHtml(job.wordlist || 'default')}</span>
+            <span><strong>Interval:</strong> ${escapeHtml(job.interval || 0)}s</span>
+            <span><strong>Nikto:</strong> ${job.skip_nikto ? 'Skipped' : 'Enabled'}</span>
+          </div>
+          <div class="job-message">${escapeHtml(job.message || '')}</div>
+          ${renderJobControls(job)}
+          <div class="job-steps">
+            ${stepsHtml || '<p class="muted">Awaiting step updates…</p>'}
+          </div>
+          <div class="job-log">
+            ${logsHtml}
+          </div>
         </div>
       </div>
     `;
   });
   jobsList.innerHTML = cards.join('');
+  
+  // Update pagination controls
+  const paginationEl = document.querySelector('.jobs-pagination');
+  if (totalJobs > 5) {
+    paginationEl.style.display = 'flex';
+    document.getElementById('jobs-page-info').textContent = `Page ${jobsCurrentPage} of ${totalPages} (${totalJobs} jobs)`;
+    document.getElementById('jobs-prev-page').disabled = jobsCurrentPage <= 1;
+    document.getElementById('jobs-next-page').disabled = jobsCurrentPage >= totalPages;
+  } else {
+    paginationEl.style.display = 'none';
+  }
+}
+
+function toggleJobDetails(jobId) {
+  const isCollapsed = jobsCollapsedState[jobId] !== false;
+  jobsCollapsedState[jobId] = !isCollapsed;
+  localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+  
+  const card = document.querySelector(`.job-card[data-job-id="${jobId}"]`);
+  if (card) {
+    const details = card.querySelector('.job-details');
+    const icon = card.querySelector('.job-toggle-icon');
+    if (details) {
+      details.style.display = isCollapsed ? 'block' : 'none';
+    }
+    if (icon) {
+      icon.textContent = isCollapsed ? '▼' : '▶';
+    }
+  }
 }
 
 function renderQueue(queue) {
@@ -9773,6 +10265,113 @@ if (resumeAllBtn) {
   });
 }
 
+// Jobs pagination and filter controls
+const jobsFilterDomainInput = document.getElementById('jobs-filter-domain');
+const jobsFilterStatusSelect = document.getElementById('jobs-filter-status');
+const jobsClearFiltersBtn = document.getElementById('jobs-clear-filters');
+const jobsPerPageSelect = document.getElementById('jobs-per-page');
+const jobsPrevPageBtn = document.getElementById('jobs-prev-page');
+const jobsNextPageBtn = document.getElementById('jobs-next-page');
+const jobsExpandAllBtn = document.getElementById('jobs-expand-all-btn');
+const jobsCollapseAllBtn = document.getElementById('jobs-collapse-all-btn');
+
+// Initialize filter values from localStorage
+if (jobsFilterDomainInput) jobsFilterDomainInput.value = jobsFilterDomain;
+if (jobsFilterStatusSelect) jobsFilterStatusSelect.value = jobsFilterStatus;
+if (jobsPerPageSelect) jobsPerPageSelect.value = jobsPerPage.toString();
+
+// Filter domain input handler
+if (jobsFilterDomainInput) {
+  jobsFilterDomainInput.addEventListener('input', (e) => {
+    jobsFilterDomain = e.target.value;
+    localStorage.setItem('jobsFilterDomain', jobsFilterDomain);
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Filter status select handler
+if (jobsFilterStatusSelect) {
+  jobsFilterStatusSelect.addEventListener('change', (e) => {
+    jobsFilterStatus = e.target.value;
+    localStorage.setItem('jobsFilterStatus', jobsFilterStatus);
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Clear filters button
+if (jobsClearFiltersBtn) {
+  jobsClearFiltersBtn.addEventListener('click', () => {
+    jobsFilterDomain = '';
+    jobsFilterStatus = '';
+    jobsCurrentPage = 1;
+    localStorage.setItem('jobsFilterDomain', '');
+    localStorage.setItem('jobsFilterStatus', '');
+    if (jobsFilterDomainInput) jobsFilterDomainInput.value = '';
+    if (jobsFilterStatusSelect) jobsFilterStatusSelect.value = '';
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Per page select handler
+if (jobsPerPageSelect) {
+  jobsPerPageSelect.addEventListener('change', (e) => {
+    jobsPerPage = parseInt(e.target.value, 10);
+    localStorage.setItem('jobsPerPage', jobsPerPage.toString());
+    jobsCurrentPage = 1;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Previous page button
+if (jobsPrevPageBtn) {
+  jobsPrevPageBtn.addEventListener('click', () => {
+    if (jobsCurrentPage > 1) {
+      jobsCurrentPage--;
+      renderJobs(latestRunningJobs);
+    }
+  });
+}
+
+// Next page button
+if (jobsNextPageBtn) {
+  jobsNextPageBtn.addEventListener('click', () => {
+    jobsCurrentPage++;
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Expand all jobs button
+if (jobsExpandAllBtn) {
+  jobsExpandAllBtn.addEventListener('click', () => {
+    jobsCollapsedState = {};
+    Object.keys(latestRunningJobs || []).forEach((_, idx) => {
+      const job = latestRunningJobs[idx];
+      if (job && job.domain) {
+        jobsCollapsedState[job.domain] = false;
+      }
+    });
+    localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+    renderJobs(latestRunningJobs);
+  });
+}
+
+// Collapse all jobs button
+if (jobsCollapseAllBtn) {
+  jobsCollapseAllBtn.addEventListener('click', () => {
+    jobsCollapsedState = {};
+    Object.keys(latestRunningJobs || []).forEach((_, idx) => {
+      const job = latestRunningJobs[idx];
+      if (job && job.domain) {
+        jobsCollapsedState[job.domain] = true;
+      }
+    });
+    localStorage.setItem('jobsCollapsedState', JSON.stringify(jobsCollapsedState));
+    renderJobs(latestRunningJobs);
+  });
+}
+
 document.addEventListener('click', (event) => {
   const header = event.target.closest('.collapsible-header');
   if (!header) return;
@@ -9969,10 +10568,52 @@ detailOverlay.addEventListener('click', (event) => {
   if (event.target === detailOverlay) closeDetailModal();
 });
 
+// Load workflows into launch form dropdown
+async function loadLaunchWorkflows() {
+  if (!launchWorkflow) return;
+  
+  try {
+    const resp = await fetch('/api/workflows');
+    const data = await resp.json();
+    const workflows = data.workflows || [];
+    const defaultWorkflowId = data.default_workflow_id;
+    
+    if (workflows.length === 0) {
+      launchWorkflow.innerHTML = '<option value="">No workflows available</option>';
+      return;
+    }
+    
+    // Build options with default marked
+    const options = workflows.map(wf => {
+      const isDefault = wf.id === defaultWorkflowId;
+      const label = isDefault ? `${wf.name} (Default)` : wf.name;
+      const selected = isDefault ? 'selected' : '';
+      return `<option value="${escapeHtml(wf.id)}" ${selected}>${escapeHtml(label)}</option>`;
+    }).join('');
+    
+    launchWorkflow.innerHTML = options;
+  } catch (err) {
+    console.error('Error loading workflows for launch form:', err);
+    launchWorkflow.innerHTML = '<option value="">Error loading workflows</option>';
+  }
+}
+
+// Load workflows when page loads and when switching to launch view
+loadLaunchWorkflows();
+navLinks.forEach(link => {
+  const originalClickHandler = link.onclick;
+  link.addEventListener('click', () => {
+    if (link.dataset.view === 'launch') {
+      loadLaunchWorkflows();
+    }
+  });
+});
+
 launchForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const payload = {
     domain: event.target.domain.value,
+    workflow_id: launchWorkflow ? launchWorkflow.value : '',
     wordlist: launchWordlist.value,
     interval: launchInterval.value,
     skip_nikto: launchSkipNikto.checked,
@@ -9991,6 +10632,7 @@ launchForm.addEventListener('submit', async (event) => {
     if (data.success) {
       event.target.reset();
       launchFormDirty = false;
+      loadLaunchWorkflows(); // Reload to reset to default
       fetchState();
     }
   } catch (err) {
@@ -10421,6 +11063,304 @@ if (monitorsList) {
     }
   });
 }
+
+// ================== WORKFLOWS ==================
+
+const workflowForm = document.getElementById('workflow-form');
+const workflowIdInput = document.getElementById('workflow-id');
+const workflowNameInput = document.getElementById('workflow-name');
+const workflowDescriptionInput = document.getElementById('workflow-description');
+const workflowPhasesContainer = document.getElementById('workflow-phases-container');
+const workflowAddPhaseBtn = document.getElementById('workflow-add-phase');
+const workflowCancelBtn = document.getElementById('workflow-cancel');
+const workflowStatus = document.getElementById('workflow-status');
+const workflowsList = document.getElementById('workflows-list');
+
+let workflowPhases = [];
+let editingWorkflowId = null;
+
+const availableTools = [
+  'amass', 'subfinder', 'assetfinder', 'findomain', 'sublist3r', 'crtsh', 
+  'github-subdomains', 'dnsx', 'ffuf', 'httpx', 'waybackurls', 'gau', 
+  'nuclei', 'nikto', 'gowitness', 'nmap', 'custom'
+];
+
+function renderWorkflowPhases() {
+  if (!workflowPhasesContainer) return;
+  
+  workflowPhasesContainer.innerHTML = workflowPhases.map((phase, idx) => {
+    const isCustom = phase.tool === 'custom';
+    return `
+      <div class="workflow-phase" style="border: 1px solid #334155; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+          <h5 style="margin: 0;">Phase ${idx + 1}</h5>
+          <button type="button" class="btn secondary small" onclick="removeWorkflowPhase(${idx})">Remove</button>
+        </div>
+        <div style="display: grid; gap: 0.5rem;">
+          <label style="margin: 0;">
+            Tool/Command Type
+            <select onchange="updatePhaseToolType(${idx}, this.value)" style="width: 100%;">
+              ${availableTools.map(tool => `<option value="${tool}" ${phase.tool === tool ? 'selected' : ''}>${tool === 'custom' ? 'Custom Command' : tool.toUpperCase()}</option>`).join('')}
+            </select>
+          </label>
+          ${isCustom ? `
+            <label style="margin: 0;">
+              Custom Command
+              <textarea onchange="updatePhaseField(${idx}, 'command', this.value)" rows="2" placeholder="echo \\"$DOMAIN$\\" | your-tool --output $OUTPUT$" style="width: 100%; font-family: monospace;">${escapeHtml(phase.command || '')}</textarea>
+            </label>
+          ` : ''}
+          <label style="margin: 0;">
+            Extra Flags (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'flags', this.value)" value="${escapeHtml(phase.flags || '')}" placeholder="e.g., --threads 20 --timeout 60" style="width: 100%;" />
+          </label>
+          <label style="margin: 0;">
+            Input Template (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'input', this.value)" value="${escapeHtml(phase.input || '')}" placeholder="e.g., $INPUT$ or previous_output.txt" style="width: 100%;" />
+          </label>
+          <label style="margin: 0;">
+            Output Template (optional)
+            <input type="text" onchange="updatePhaseField(${idx}, 'output', this.value)" value="${escapeHtml(phase.output || '')}" placeholder="e.g., $OUTPUT$ or phase${idx + 1}_output.txt" style="width: 100%;" />
+          </label>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  if (workflowPhases.length === 0) {
+    workflowPhasesContainer.innerHTML = '<p class="muted">No phases added yet. Click "Add Phase" to start building your workflow.</p>';
+  }
+}
+
+function addWorkflowPhase() {
+  workflowPhases.push({
+    tool: 'amass',
+    command: '',
+    flags: '',
+    input: '',
+    output: ''
+  });
+  renderWorkflowPhases();
+}
+
+function removeWorkflowPhase(idx) {
+  workflowPhases.splice(idx, 1);
+  renderWorkflowPhases();
+}
+
+function updatePhaseToolType(idx, tool) {
+  if (workflowPhases[idx]) {
+    workflowPhases[idx].tool = tool;
+    renderWorkflowPhases();
+  }
+}
+
+function updatePhaseField(idx, field, value) {
+  if (workflowPhases[idx]) {
+    workflowPhases[idx][field] = value;
+  }
+}
+
+if (workflowAddPhaseBtn) {
+  workflowAddPhaseBtn.addEventListener('click', addWorkflowPhase);
+}
+
+if (workflowCancelBtn) {
+  workflowCancelBtn.addEventListener('click', () => {
+    resetWorkflowForm();
+  });
+}
+
+function resetWorkflowForm() {
+  editingWorkflowId = null;
+  workflowPhases = [];
+  if (workflowIdInput) workflowIdInput.value = '';
+  if (workflowNameInput) workflowNameInput.value = '';
+  if (workflowDescriptionInput) workflowDescriptionInput.value = '';
+  renderWorkflowPhases();
+  if (workflowStatus) {
+    workflowStatus.textContent = '';
+    workflowStatus.className = 'status';
+  }
+}
+
+if (workflowForm) {
+  workflowForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    
+    if (!workflowNameInput || !workflowNameInput.value.trim()) {
+      if (workflowStatus) {
+        workflowStatus.textContent = 'Workflow name is required';
+        workflowStatus.className = 'status error';
+      }
+      return;
+    }
+    
+    if (workflowPhases.length === 0) {
+      if (workflowStatus) {
+        workflowStatus.textContent = 'At least one phase is required';
+        workflowStatus.className = 'status error';
+      }
+      return;
+    }
+    
+    const payload = {
+      name: workflowNameInput.value.trim(),
+      description: workflowDescriptionInput ? workflowDescriptionInput.value.trim() : '',
+      phases: workflowPhases
+    };
+    
+    if (editingWorkflowId) {
+      payload.id = editingWorkflowId;
+    }
+    
+    const endpoint = editingWorkflowId ? '/api/workflows/update' : '/api/workflows/create';
+    
+    if (workflowStatus) {
+      workflowStatus.textContent = 'Saving...';
+      workflowStatus.className = 'status';
+    }
+    
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      
+      if (workflowStatus) {
+        workflowStatus.textContent = data.message || 'Saved';
+        workflowStatus.className = 'status ' + (data.success ? 'success' : 'error');
+      }
+      
+      if (data.success) {
+        resetWorkflowForm();
+        await loadWorkflows();
+      }
+    } catch (err) {
+      if (workflowStatus) {
+        workflowStatus.textContent = err.message;
+        workflowStatus.className = 'status error';
+      }
+    }
+  });
+}
+
+async function loadWorkflows() {
+  try {
+    const resp = await fetch('/api/workflows');
+    const data = await resp.json();
+    renderWorkflows(data.workflows || [], data.default_workflow_id);
+  } catch (err) {
+    console.error('Error loading workflows:', err);
+  }
+}
+
+function renderWorkflows(workflows, defaultWorkflowId) {
+  if (!workflowsList) return;
+  
+  if (workflows.length === 0) {
+    workflowsList.innerHTML = '<div class="section-placeholder">No workflows created yet.</div>';
+    return;
+  }
+  
+  const html = workflows.map(workflow => {
+    const isDefault = workflow.id === defaultWorkflowId;
+    return `
+      <div class="workflow-item" style="border: 1px solid #334155; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: start;">
+          <div style="flex: 1;">
+            <h4 style="margin: 0 0 0.5rem 0;">${escapeHtml(workflow.name)} ${isDefault ? '<span class="badge" style="background: #3b82f6;">Default</span>' : ''}</h4>
+            ${workflow.description ? `<p class="muted" style="margin: 0 0 0.5rem 0;">${escapeHtml(workflow.description)}</p>` : ''}
+            <p class="muted" style="margin: 0;"><strong>${workflow.phase_count}</strong> phases</p>
+          </div>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button class="btn secondary small" onclick="editWorkflow('${workflow.id}')">Edit</button>
+            ${!isDefault ? `<button class="btn secondary small" onclick="setDefaultWorkflow('${workflow.id}')">Set as Default</button>` : `<button class="btn secondary small" onclick="setDefaultWorkflow(null)">Clear Default</button>`}
+            <button class="btn secondary small" onclick="deleteWorkflow('${workflow.id}')" style="background: #dc2626;">Delete</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  workflowsList.innerHTML = html;
+}
+
+async function editWorkflow(workflowId) {
+  try {
+    const resp = await fetch(`/api/workflow/${workflowId}`);
+    const data = await resp.json();
+    
+    if (data.success && data.workflow) {
+      const workflow = data.workflow;
+      editingWorkflowId = workflow.id;
+      if (workflowIdInput) workflowIdInput.value = workflow.id;
+      if (workflowNameInput) workflowNameInput.value = workflow.name;
+      if (workflowDescriptionInput) workflowDescriptionInput.value = workflow.description || '';
+      workflowPhases = workflow.phases || [];
+      renderWorkflowPhases();
+      
+      // Scroll to form
+      if (workflowForm) {
+        workflowForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  } catch (err) {
+    alert(`Error loading workflow: ${err.message}`);
+  }
+}
+
+async function deleteWorkflow(workflowId) {
+  if (!confirm('Are you sure you want to delete this workflow?')) {
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/workflows/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: workflowId }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      await loadWorkflows();
+    } else {
+      alert(`Delete failed: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error deleting workflow: ${err.message}`);
+  }
+}
+
+async function setDefaultWorkflow(workflowId) {
+  try {
+    const resp = await fetch('/api/workflows/set-default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: workflowId }),
+    });
+    const data = await resp.json();
+    
+    if (data.success) {
+      await loadWorkflows();
+    } else {
+      alert(`Failed to set default: ${data.message}`);
+    }
+  } catch (err) {
+    alert(`Error setting default workflow: ${err.message}`);
+  }
+}
+
+// Load workflows when the workflows tab is shown
+document.querySelectorAll('.nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    if (link.getAttribute('data-view') === 'workflows') {
+      loadWorkflows();
+    }
+  });
+});
 
 // ================== LOGS VIEW ==================
 
@@ -11073,11 +12013,11 @@ def resume_target_scan(domain: str, wordlist: Optional[str] = None,
         cleaned = str(wordlist).strip()
         if cleaned:
             wordlist_val = cleaned
-    return start_pipeline_job(normalized, wordlist_val, skip_flag, None)
+    return start_pipeline_job(normalized, wordlist_val, skip_flag, None, None)
 
 
 def start_targets_from_input(domain_input: str, wordlist: Optional[str],
-                             skip_nikto: bool, interval: Optional[int]) -> Tuple[bool, str, List[Dict[str, Any]]]:
+                             skip_nikto: bool, interval: Optional[int], workflow_id: Optional[str] = None) -> Tuple[bool, str, List[Dict[str, Any]]]:
     cfg = get_config()
     cleaned = _sanitize_domain_input(domain_input)
     requested_any_tld = bool(cleaned.endswith(".*"))
@@ -11089,7 +12029,7 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     details: List[Dict[str, Any]] = []
     success_any = False
     for target in targets:
-        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval)
+        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval, workflow_id)
         if success:
             success_any = True
         details.append({
@@ -11112,7 +12052,7 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     return success_any, " ".join(summary_parts).strip(), details
 
 
-def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int]) -> Tuple[bool, str]:
+def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int], workflow_id: Optional[str] = None) -> Tuple[bool, str]:
     normalized = (domain or "").strip().lower()
     if not normalized:
         return False, "Domain is required."
@@ -11124,6 +12064,11 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
         wordlist_path = default_wordlist.strip()
     else:
         wordlist_path = str(wordlist).strip()
+    
+    # Use provided workflow_id or get default workflow
+    if not workflow_id:
+        default_workflow = get_default_workflow()
+        workflow_id = default_workflow["id"] if default_workflow else None
 
     with JOB_LOCK:
         if normalized in RUNNING_JOBS:
@@ -11138,6 +12083,7 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
             "wordlist": wordlist_path,
             "skip_nikto": skip_nikto,
             "interval": interval_val,
+            "workflow_id": workflow_id,
             "status": "queued",
             "message": "Waiting for a free slot.",
             "steps": init_job_steps(skip_nikto),
@@ -12438,6 +13384,22 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/backups":
             self._send_json({"backups": list_backups()})
             return
+        if self.path == "/api/workflows":
+            workflows = list_workflows()
+            default_workflow = get_default_workflow()
+            self._send_json({
+                "workflows": workflows,
+                "default_workflow_id": default_workflow["id"] if default_workflow else None
+            })
+            return
+        if self.path.startswith("/api/workflow/"):
+            workflow_id = unquote(self.path[len("/api/workflow/"):])
+            workflow = get_workflow(workflow_id)
+            if workflow:
+                self._send_json({"success": True, "workflow": workflow})
+            else:
+                self._send_json({"success": False, "message": "Workflow not found"}, status=HTTPStatus.NOT_FOUND)
+            return
         if self.path.startswith("/api/backup/download/"):
             backup_filename = unquote(self.path[len("/api/backup/download/"):])
             
@@ -12618,6 +13580,10 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/backup/create",
             "/api/backup/restore",
             "/api/backup/delete",
+            "/api/workflows/create",
+            "/api/workflows/update",
+            "/api/workflows/delete",
+            "/api/workflows/set-default",
         }
         if self.path not in allowed:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -12699,6 +13665,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/run":
             domain = payload.get("domain", "")
             wordlist = payload.get("wordlist")
+            workflow_id = payload.get("workflow_id")
             interval_val = payload.get("interval")
             interval_int: Optional[int] = None
             if interval_val not in (None, ""):
@@ -12709,7 +13676,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             skip_default = get_config().get("skip_nikto_by_default", False)
             skip_nikto = bool_from_value(payload.get("skip_nikto"), skip_default)
 
-            success, message, _ = start_targets_from_input(domain, wordlist, skip_nikto, interval_int)
+            success, message, _ = start_targets_from_input(domain, wordlist, skip_nikto, interval_int, workflow_id)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
             return
@@ -12734,6 +13701,39 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             amass_keys = payload.get("amass", {})
             subfinder_keys = payload.get("subfinder", {})
             success, message = save_all_api_keys(amass_keys, subfinder_keys)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/create":
+            name = payload.get("name", "")
+            description = payload.get("description", "")
+            phases = payload.get("phases", [])
+            success, message, workflow_id = create_workflow(name, description, phases)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message, "workflow_id": workflow_id}, status=status)
+            return
+        
+        if self.path == "/api/workflows/update":
+            workflow_id = payload.get("id", "")
+            name = payload.get("name", "")
+            description = payload.get("description", "")
+            phases = payload.get("phases", [])
+            success, message = update_workflow(workflow_id, name, description, phases)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/delete":
+            workflow_id = payload.get("id", "")
+            success, message = delete_workflow(workflow_id)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/workflows/set-default":
+            workflow_id = payload.get("id")  # None to clear default
+            success, message = set_default_workflow(workflow_id)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
             return
