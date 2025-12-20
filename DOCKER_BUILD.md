@@ -4,7 +4,11 @@ This guide explains how to build the subScraper Docker container on macOS for mu
 
 ## What's New
 
+**Kali Linux Base Image**: The Docker image now uses Kali Linux Rolling as the base, providing a comprehensive security-focused environment with pre-installed tools.
+
 **Persistent Completed Job Reports**: As of the latest version, completed scan reports now persist in the dashboard and across container restarts. All job history is stored in `recon_data/completed_jobs.json` and automatically loaded on startup.
+
+**Custom Workflows**: Create and manage custom reconnaissance workflows with built-in tools or custom commands.
 
 ## Prerequisites
 
@@ -43,8 +47,8 @@ docker build -t subscraper:latest .
 To build a multi-platform image that works on different architectures:
 
 ```bash
-# Build for multiple platforms and push to a registry
-docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 \
+# Build for multiple platforms (amd64, arm64) and push to a registry
+docker buildx build --platform linux/amd64,linux/arm64 \
   -t yourusername/subscraper:latest \
   --push .
 

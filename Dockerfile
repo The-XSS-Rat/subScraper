@@ -1,21 +1,25 @@
 # Multi-platform Dockerfile for subScraper reconnaissance tool
-# Supports linux/amd64, linux/arm64, linux/arm/v7
+# Uses Kali Linux base image with pre-installed security tools
+# Supports linux/amd64, linux/arm64
 
-FROM --platform=$BUILDPLATFORM python:3.11-slim AS base
+FROM kalilinux/kali-rolling AS base
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     GO_VERSION=1.21.5
 
-# Install system dependencies
+# Update and install base dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
     curl \
     wget \
     git \
     build-essential \
     libssl-dev \
     ca-certificates \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go (required for many recon tools)
@@ -23,8 +27,7 @@ ARG TARGETARCH
 RUN case ${TARGETARCH} in \
         "amd64") GO_ARCH="amd64" ;; \
         "arm64") GO_ARCH="arm64" ;; \
-        "arm") GO_ARCH="armv6l" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+        *) GO_ARCH="amd64" ;; \
     esac && \
     wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz && \
     tar -C /usr/local -xzf go${GO_VERSION}.linux-${GO_ARCH}.tar.gz && \
@@ -57,7 +60,6 @@ RUN go install -v github.com/sensepost/gowitness@latest
 RUN case ${TARGETARCH} in \
         "amd64") FINDOMAIN_ARCH="x86_64" ;; \
         "arm64") FINDOMAIN_ARCH="aarch64" ;; \
-        "arm") FINDOMAIN_ARCH="armv7" ;; \
         *) FINDOMAIN_ARCH="x86_64" ;; \
     esac && \
     wget -q "https://github.com/Findomain/Findomain/releases/latest/download/findomain-linux-${FINDOMAIN_ARCH}.zip" -O findomain.zip && \
@@ -66,8 +68,8 @@ RUN case ${TARGETARCH} in \
     mv findomain /usr/local/bin/ && \
     rm findomain.zip || echo "Findomain installation skipped for ${TARGETARCH}"
 
-# Install Python-based tools
-RUN pip install --no-cache-dir sublist3r nikto-parser
+# Install Python-based tools and psutil for system monitoring
+RUN pip3 install --no-cache-dir --break-system-packages sublist3r nikto-parser psutil
 
 # Install nikto (Perl-based)
 RUN apt-get update && apt-get install -y nikto && rm -rf /var/lib/apt/lists/*
