@@ -4251,7 +4251,11 @@ def run_downstream_pipeline(
     flags = ensure_target_state(state, domain)["flags"]
     
     # ---------- dnsx (DNS verification) ----------
-    if not flags.get("dnsx_done") and config.get("enable_dnsx", True):
+    if is_tool_disabled("dnsx", config):
+        update_step("dnsx", status="skipped", message="dnsx disabled (tool skipped).", progress=0)
+        flags["dnsx_done"] = True
+        save_state(state)
+    elif not flags.get("dnsx_done") and config.get("enable_dnsx", True):
         # Get all discovered subdomains from state
         tgt_state = ensure_target_state(state, domain)
         all_discovered_subs = sorted(tgt_state["subdomains"].keys())
@@ -4280,7 +4284,11 @@ def run_downstream_pipeline(
         update_step("dnsx", status="skipped", message="dnsx already completed for this target.", progress=0)
 
     # ---------- ffuf ----------
-    if not flags.get("ffuf_done"):
+    if is_tool_disabled("ffuf", config):
+        update_step("ffuf", status="skipped", message="ffuf disabled (tool skipped).", progress=0)
+        flags["ffuf_done"] = True
+        save_state(state)
+    elif not flags.get("ffuf_done"):
         if not wordlist or (wordlist and not Path(wordlist).exists()):
             log("ffuf wordlist not provided or not found; skipping ffuf brute-force.")
             update_step("ffuf", status="skipped", message="Wordlist missing; ffuf skipped.", progress=0)
@@ -4302,52 +4310,63 @@ def run_downstream_pipeline(
         update_step("ffuf", status="skipped", message="ffuf already completed for this target.", progress=0)
 
     # ---------- httpx ----------
-    httpx_processed: set = set()
-    while True:
+    if is_tool_disabled("httpx", config):
         state = load_state()
-        tgt_state = ensure_target_state(state, domain)
-        flags = tgt_state["flags"]
-        submap = tgt_state["subdomains"]
-        new_hosts = [
-            host for host in sorted(submap.keys())
-            if host not in httpx_processed and not (submap.get(host) or {}).get("httpx")
-        ]
-        if not flags.get("httpx_done") and not httpx_processed:
-            log(f"=== httpx scan for {domain} ({len(submap)} hosts tracked) ===")
-        if not new_hosts:
-            if enumerators_done_event.is_set():
-                flags["httpx_done"] = True
-                save_state(state)
-                update_step("httpx", status="completed", message="httpx scan finished.", progress=100)
-                break
-            job_sleep(job_domain, 5)
-            continue
-        update_step("httpx", status="running", message=f"httpx scanning {len(new_hosts)} pending hosts", progress=40)
-        batch_file = write_subdomains_file(domain, new_hosts, suffix="_httpx_batch")
-        if job_domain:
-            job_log_append(job_domain, "Waiting for httpx slot...", "scheduler")
-        with TOOL_GATES["httpx"]:
-            if job_domain:
-                job_log_append(job_domain, "httpx slot acquired.", "scheduler")
-            httpx_json = httpx_scan(batch_file, domain, config=config, job_domain=job_domain)
-        try:
-            batch_file.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-        if not httpx_json:
-            job_log_append(job_domain, "httpx batch failed.", "httpx")
-            update_step("httpx", status="error", message="httpx batch failed. Check logs for details.", progress=100)
-            break
-        enrich_state_with_httpx(state, domain, httpx_json)
-        mark_hosts_scanned(state, domain, new_hosts, "httpx")
-        httpx_processed.update(new_hosts)
+        flags = ensure_target_state(state, domain)["flags"]
+        update_step("httpx", status="skipped", message="httpx disabled (tool skipped).", progress=0)
+        flags["httpx_done"] = True
         save_state(state)
-        job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
+    else:
+        httpx_processed: set = set()
+        while True:
+            state = load_state()
+            tgt_state = ensure_target_state(state, domain)
+            flags = tgt_state["flags"]
+            submap = tgt_state["subdomains"]
+            new_hosts = [
+                host for host in sorted(submap.keys())
+                if host not in httpx_processed and not (submap.get(host) or {}).get("httpx")
+            ]
+            if not flags.get("httpx_done") and not httpx_processed:
+                log(f"=== httpx scan for {domain} ({len(submap)} hosts tracked) ===")
+            if not new_hosts:
+                if enumerators_done_event.is_set():
+                    flags["httpx_done"] = True
+                    save_state(state)
+                    update_step("httpx", status="completed", message="httpx scan finished.", progress=100)
+                    break
+                job_sleep(job_domain, 5)
+                continue
+            update_step("httpx", status="running", message=f"httpx scanning {len(new_hosts)} pending hosts", progress=40)
+            batch_file = write_subdomains_file(domain, new_hosts, suffix="_httpx_batch")
+            if job_domain:
+                job_log_append(job_domain, "Waiting for httpx slot...", "scheduler")
+            with TOOL_GATES["httpx"]:
+                if job_domain:
+                    job_log_append(job_domain, "httpx slot acquired.", "scheduler")
+                httpx_json = httpx_scan(batch_file, domain, config=config, job_domain=job_domain)
+            try:
+                batch_file.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            if not httpx_json:
+                job_log_append(job_domain, "httpx batch failed.", "httpx")
+                update_step("httpx", status="error", message="httpx batch failed. Check logs for details.", progress=100)
+                break
+            enrich_state_with_httpx(state, domain, httpx_json)
+            mark_hosts_scanned(state, domain, new_hosts, "httpx")
+            httpx_processed.update(new_hosts)
+            save_state(state)
+            job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
     
     # ---------- waybackurls (URL discovery) ----------
-    if not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
+    if is_tool_disabled("waybackurls", config):
+        flags["waybackurls_done"] = True
+        save_state(state)
+        update_step("waybackurls", status="skipped", message="waybackurls disabled (tool skipped).", progress=0)
+    elif not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
         log(f"=== waybackurls URL discovery for {domain} ===")
         update_step("waybackurls", status="running", message="Discovering URLs from archive.org", progress=50)
         if job_domain:
@@ -4439,7 +4458,13 @@ def run_downstream_pipeline(
             update_step("screenshots", status="running", message=f"Captured {len(screenshot_map)} screenshots. Waiting for new hosts…", progress=75)
 
     # ---------- nmap ----------
-    if not config.get("enable_nmap", True):
+    if is_tool_disabled("nmap", config):
+        state = load_state()
+        flags = ensure_target_state(state, domain)["flags"]
+        update_step("nmap", status="skipped", message="Nmap disabled (tool skipped).", progress=0)
+        flags["nmap_done"] = True
+        save_state(state)
+    elif not config.get("enable_nmap", True):
         state = load_state()
         flags = ensure_target_state(state, domain)["flags"]
         update_step("nmap", status="skipped", message="Nmap disabled in settings.", progress=0)
@@ -4487,21 +4512,28 @@ def run_downstream_pipeline(
             job_log_append(job_domain, f"Nmap scanned {len(new_hosts)} hosts.", "nmap")
 
     # ---------- nuclei ----------
-    nuclei_processed: set = set()
-    while True:
+    if is_tool_disabled("nuclei", config):
         state = load_state()
-        tgt_state = ensure_target_state(state, domain)
-        flags = tgt_state["flags"]
-        submap = tgt_state["subdomains"]
-        new_hosts = [
-            host for host in sorted(submap.keys())
-            if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
-        ]
-        if not flags.get("nuclei_done") and not nuclei_processed:
-            log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
-        if not new_hosts:
-            if enumerators_done_event.is_set():
-                flags["nuclei_done"] = True
+        flags = ensure_target_state(state, domain)["flags"]
+        update_step("nuclei", status="skipped", message="Nuclei disabled (tool skipped).", progress=0)
+        flags["nuclei_done"] = True
+        save_state(state)
+    else:
+        nuclei_processed: set = set()
+        while True:
+            state = load_state()
+            tgt_state = ensure_target_state(state, domain)
+            flags = tgt_state["flags"]
+            submap = tgt_state["subdomains"]
+            new_hosts = [
+                host for host in sorted(submap.keys())
+                if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
+            ]
+            if not flags.get("nuclei_done") and not nuclei_processed:
+                log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
+            if not new_hosts:
+                if enumerators_done_event.is_set():
+                    flags["nuclei_done"] = True
                 save_state(state)
                 update_step("nuclei", status="completed", message="nuclei scan finished.", progress=100)
                 break
@@ -4536,10 +4568,12 @@ def run_downstream_pipeline(
     all_subs = sorted(ensure_target_state(state, domain)["subdomains"].keys())
 
     # ---------- nikto ----------
-    nikto_processed: set = set()
-    if skip_nikto:
+    if is_tool_disabled("nikto", config):
+        update_step("nikto", status="skipped", message="Nikto disabled (tool skipped).", progress=0)
+    elif skip_nikto:
         update_step("nikto", status="skipped", message="Nikto skipped per run options.", progress=0)
     else:
+        nikto_processed: set = set()
         while True:
             state = load_state()
             tgt_state = ensure_target_state(state, domain)
@@ -5504,6 +5538,9 @@ def run_pipeline(
         enable_github_subdomains = config.get("enable_github_subdomains", True)
 
         def maybe_add_enum(step_name: str, flag_key: str, desc: str, func, enabled: bool = True):
+            if is_tool_disabled(step_name, config):
+                update_step(step_name, status="skipped", message=f"{desc} disabled (tool skipped).", progress=0)
+                return
             if not enabled:
                 update_step(step_name, status="skipped", message=f"{desc} disabled in settings.", progress=0)
                 return
@@ -5512,7 +5549,9 @@ def run_pipeline(
                 return
             enumerator_specs.append((step_name, flag_key, desc, func))
 
-        if config.get("enable_amass", True):
+        if is_tool_disabled("amass", config):
+            update_step("amass", status="skipped", message="Amass disabled (tool skipped).", progress=0)
+        elif config.get("enable_amass", True):
             maybe_add_enum(
                 "amass",
                 "amass_done",
