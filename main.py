@@ -1120,6 +1120,14 @@ def is_subdomain_input(domain: str) -> bool:
     return len(parts) >= 3
 
 
+def is_tool_disabled(tool_name: str, config: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if a tool is disabled in the configuration."""
+    if config is None:
+        config = get_config()
+    disabled_tools = config.get("disabled_tools", [])
+    return tool_name in disabled_tools
+
+
 def job_log_append(domain: Optional[str], text: Optional[str], source: str = "system") -> None:
     if not domain or not text:
         return
@@ -11719,6 +11727,7 @@ function renderDomainDetail(info) {{
           <tr>
             <th>#</th>
             <th>Subdomain</th>
+            <th>Status</th>
             <th>HTTP Status</th>
             <th>Title</th>
             <th>Findings</th>
@@ -11733,11 +11742,20 @@ function renderDomainDetail(info) {{
     const nuclei = entry.nuclei || [];
     const nikto = entry.nikto || [];
     const findings = nuclei.length + nikto.length;
+    const interesting = entry.interesting;
+    
+    let interestingBadge = '';
+    if (interesting === true) {{
+      interestingBadge = '<span class="badge" style="background: #10b981; color: white;">⭐ Interesting</span>';
+    }} else if (interesting === false) {{
+      interestingBadge = '<span class="badge" style="background: #ef4444; color: white;">🚫 Not Interesting</span>';
+    }}
     
     html += `
       <tr>
         <td>${{idx + 1}}</td>
         <td><a href="/subdomain/${{encodeURIComponent(domain)}}/${{encodeURIComponent(sub)}}" class="link">${{escapeHtml(sub)}}</a></td>
+        <td>${{interestingBadge}}</td>
         <td>${{httpx.status_code || '—'}}</td>
         <td>${{escapeHtml(httpx.title || '—')}}</td>
         <td>${{findings > 0 ? findings + ' findings' : '—'}}</td>
@@ -11946,8 +11964,24 @@ function renderSubdomainDetail(info, history) {{
   const screenshot = info.screenshot || {{}};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
+  const nmap = info.nmap || {{}};
+  const interesting = info.interesting;
+  const comments = info.comments || [];
   
   let html = '';
+  
+  // Marking and action buttons
+  html += `
+    <div class="section">
+      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+        <button class="btn" onclick="markSubdomain(true)" style="background: #10b981;">Mark as Interesting</button>
+        <button class="btn" onclick="markSubdomain(false)" style="background: #ef4444;">Mark as Not Interesting</button>
+        <button class="btn secondary" onclick="markSubdomain(null)">Clear Mark</button>
+        ${{interesting === true ? '<span class="badge" style="background: #10b981; color: white; margin-left: 8px;">⭐ Interesting</span>' : ''}}
+        ${{interesting === false ? '<span class="badge" style="background: #ef4444; color: white; margin-left: 8px;">🚫 Not Interesting</span>' : ''}}
+      </div>
+    </div>
+  `;
   
   // Metadata section
   html += `
@@ -11995,6 +12029,39 @@ function renderSubdomainDetail(info, history) {{
       ` : '<p class="muted">No screenshot available</p>'}}
     </div>
   `;
+  
+  // Nmap section
+  html += `<div class="section"><h2>Nmap Scan Results</h2>`;
+  if (nmap && nmap.ports && nmap.ports.length) {{
+    html += `
+      <table>
+        <thead>
+          <tr>
+            <th>Port</th>
+            <th>Protocol</th>
+            <th>State</th>
+            <th>Service</th>
+            <th>Version</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${{nmap.ports.map(port => `
+            <tr>
+              <td>${{escapeHtml(String(port.port || '—'))}}</td>
+              <td>${{escapeHtml(port.protocol || '—')}}</td>
+              <td><span class="badge" style="background: ${{port.state === 'open' ? '#10b981' : '#64748b'}}">${{escapeHtml(port.state || '—')}}</span></td>
+              <td>${{escapeHtml(port.service || '—')}}</td>
+              <td>${{escapeHtml(port.version || '—')}}</td>
+            </tr>
+          `).join('')}}
+        </tbody>
+      </table>
+      ${{nmap.scan_time ? `<p class="muted" style="margin-top: 12px;">Scanned ${{fmtTime(nmap.scan_time)}}</p>` : ''}}
+    `;
+  }} else {{
+    html += '<p class="muted">No Nmap scan data available</p>';
+  }}
+  html += '</div>';
   
   // Nuclei section
   html += `<div class="section"><h2>Nuclei Findings (${{nuclei.length}})</h2>`;
@@ -12065,7 +12132,90 @@ function renderSubdomainDetail(info, history) {{
   }}
   html += '</div>';
   
+  // Comments section
+  html += `
+    <div class="section">
+      <h2>Comments (${{comments.length}})</h2>
+      <div style="margin-bottom: 16px;">
+        <textarea id="comment-input" placeholder="Add a comment..." style="width: 100%; min-height: 80px; padding: 8px; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 4px; font-family: inherit;"></textarea>
+        <button class="btn" onclick="addComment()" style="margin-top: 8px;">Add Comment</button>
+      </div>
+      <div id="comments-list">
+        ${{comments.length ? comments.map(c => `
+          <div style="background: #0f172a; padding: 12px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #334155;">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+              <span class="muted" style="font-size: 0.875rem;">${{fmtTime(c.timestamp)}}</span>
+              <button class="btn secondary small" onclick="deleteComment('${{escapeHtml(c.id)}}')" style="padding: 4px 8px; font-size: 0.75rem;">Delete</button>
+            </div>
+            <div>${{escapeHtml(c.text)}}</div>
+          </div>
+        `).join('') : '<p class="muted">No comments yet</p>'}}
+      </div>
+    </div>
+  `;
+  
   document.getElementById('content').innerHTML = html;
+}}
+
+async function markSubdomain(interesting) {{
+  try {{
+    const resp = await fetch('/api/subdomain/mark', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ domain, subdomain, interesting }})
+    }});
+    const result = await resp.json();
+    if (result.success) {{
+      loadSubdomainDetail(); // Reload to show updated state
+    }} else {{
+      alert('Error: ' + result.message);
+    }}
+  }} catch (err) {{
+    alert('Error marking subdomain: ' + err.message);
+  }}
+}}
+
+async function addComment() {{
+  const input = document.getElementById('comment-input');
+  const comment = input.value.trim();
+  if (!comment) return;
+  
+  try {{
+    const resp = await fetch('/api/subdomain/comment', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ domain, subdomain, comment, action: 'add' }})
+    }});
+    const result = await resp.json();
+    if (result.success) {{
+      input.value = '';
+      loadSubdomainDetail(); // Reload to show new comment
+    }} else {{
+      alert('Error: ' + result.message);
+    }}
+  }} catch (err) {{
+    alert('Error adding comment: ' + err.message);
+  }}
+}}
+
+async function deleteComment(commentId) {{
+  if (!confirm('Delete this comment?')) return;
+  
+  try {{
+    const resp = await fetch('/api/subdomain/comment', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ domain, subdomain, comment_id: commentId, action: 'delete' }})
+    }});
+    const result = await resp.json();
+    if (result.success) {{
+      loadSubdomainDetail(); // Reload to show updated list
+    }} else {{
+      alert('Error: ' + result.message);
+    }}
+  }} catch (err) {{
+    alert('Error deleting comment: ' + err.message);
+  }}
 }}
 
 loadSubdomainDetail();
