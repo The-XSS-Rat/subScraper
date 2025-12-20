@@ -835,6 +835,60 @@ def ensure_database() -> None:
     """Ensure database is initialized and migrated."""
     init_database()
     migrate_json_to_sqlite()
+    ensure_default_workflow()
+
+
+def ensure_default_workflow() -> None:
+    """
+    Ensure a default workflow exists that matches the current pipeline.
+    This workflow represents the standard recon pipeline and cannot be deleted.
+    """
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Check if default workflow already exists
+        cursor.execute("SELECT id FROM workflows WHERE is_default = 1 LIMIT 1")
+        existing = cursor.fetchone()
+        
+        if existing:
+            return  # Default workflow already exists
+        
+        # Create default workflow based on PIPELINE_STEPS
+        default_phases = []
+        for step in PIPELINE_STEPS:
+            if step == "screenshots":
+                # Screenshots is a special step, not a tool
+                continue
+            default_phases.append({
+                "tool": step,
+                "command": "",
+                "flags": "",
+                "input": "",
+                "output": ""
+            })
+        
+        workflow_id = "default-workflow-builtin"
+        now = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute(
+            """INSERT OR IGNORE INTO workflows 
+               (id, name, description, phases, created_at, updated_at, is_default) 
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                workflow_id,
+                "Default Recon Pipeline",
+                "Standard reconnaissance workflow with all built-in tools. This is the default pipeline that runs when no workflow is selected.",
+                json.dumps(default_phases),
+                now,
+                now,
+                1
+            )
+        )
+        db.commit()
+        log("Created default workflow based on standard pipeline")
+    except Exception as e:
+        log(f"Error ensuring default workflow: {e}")
 
 
 def atomic_write_json(filepath: Path, data: Dict[str, Any], indent: int = 2) -> None:
@@ -1390,7 +1444,7 @@ def process_monitor(monitor_id: str) -> None:
     dispatched_count = 0
     skip_nikto = bool(cfg.get("skip_nikto_by_default", False))
     for meta in new_entries:
-        success, message, details = start_targets_from_input(meta["value"], None, skip_nikto, None)
+        success, message, details = start_targets_from_input(meta["value"], None, skip_nikto, None, None)
         meta["last_dispatch"] = now_iso
         meta["dispatch_message"] = message
         meta["dispatch_results"] = details
@@ -1598,7 +1652,7 @@ def update_workflow(workflow_id: str, name: str, description: str, phases: List[
 
 
 def delete_workflow(workflow_id: str) -> Tuple[bool, str]:
-    """Delete a workflow."""
+    """Delete a workflow. The default workflow cannot be deleted."""
     if not workflow_id:
         return False, "Workflow ID is required."
     
@@ -1607,13 +1661,18 @@ def delete_workflow(workflow_id: str) -> Tuple[bool, str]:
         cursor = db.cursor()
         
         with WORKFLOW_LOCK:
-            # Get workflow name for logging
-            cursor.execute("SELECT name FROM workflows WHERE id = ?", (workflow_id,))
+            # Check if this is the default workflow
+            cursor.execute("SELECT name, is_default FROM workflows WHERE id = ?", (workflow_id,))
             row = cursor.fetchone()
             if not row:
                 return False, "Workflow not found."
             
             workflow_name = row[0]
+            is_default = bool(row[1])
+            
+            # Prevent deletion of default workflow
+            if is_default:
+                return False, "Cannot delete the default workflow. Please set another workflow as default first."
             
             cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
             db.commit()
@@ -6461,6 +6520,14 @@ button:hover { background:#1d4ed8; }
                   Enter one or more domains/wildcards. Separate with commas or newlines.
                 </small>
               </label>
+              <label for="launch-workflow">Workflow
+                <select id="launch-workflow" name="workflow">
+                  <option value="">Loading workflows...</option>
+                </select>
+                <small style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
+                  Select the workflow to use for this scan. Default workflow is used if not specified.
+                </small>
+              </label>
               <label for="launch-wordlist">Wordlist path (optional)
                 <input id="launch-wordlist" type="text" name="wordlist" placeholder="./w.txt" />
               </label>
@@ -7312,6 +7379,7 @@ settingsTabs.forEach(tab => {
 
 const POLL_INTERVAL = 8000;
 const launchForm = document.getElementById('launch-form');
+const launchWorkflow = document.getElementById('launch-workflow');
 const launchWordlist = document.getElementById('launch-wordlist');
 const launchInterval = document.getElementById('launch-interval');
 const launchSkipNikto = document.getElementById('launch-skip-nikto');
@@ -10219,10 +10287,52 @@ detailOverlay.addEventListener('click', (event) => {
   if (event.target === detailOverlay) closeDetailModal();
 });
 
+// Load workflows into launch form dropdown
+async function loadLaunchWorkflows() {
+  if (!launchWorkflow) return;
+  
+  try {
+    const resp = await fetch('/api/workflows');
+    const data = await resp.json();
+    const workflows = data.workflows || [];
+    const defaultWorkflowId = data.default_workflow_id;
+    
+    if (workflows.length === 0) {
+      launchWorkflow.innerHTML = '<option value="">No workflows available</option>';
+      return;
+    }
+    
+    // Build options with default marked
+    const options = workflows.map(wf => {
+      const isDefault = wf.id === defaultWorkflowId;
+      const label = isDefault ? `${wf.name} (Default)` : wf.name;
+      const selected = isDefault ? 'selected' : '';
+      return `<option value="${escapeHtml(wf.id)}" ${selected}>${escapeHtml(label)}</option>`;
+    }).join('');
+    
+    launchWorkflow.innerHTML = options;
+  } catch (err) {
+    console.error('Error loading workflows for launch form:', err);
+    launchWorkflow.innerHTML = '<option value="">Error loading workflows</option>';
+  }
+}
+
+// Load workflows when page loads and when switching to launch view
+loadLaunchWorkflows();
+navLinks.forEach(link => {
+  const originalClickHandler = link.onclick;
+  link.addEventListener('click', () => {
+    if (link.dataset.view === 'launch') {
+      loadLaunchWorkflows();
+    }
+  });
+});
+
 launchForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const payload = {
     domain: event.target.domain.value,
+    workflow_id: launchWorkflow ? launchWorkflow.value : '',
     wordlist: launchWordlist.value,
     interval: launchInterval.value,
     skip_nikto: launchSkipNikto.checked,
@@ -10241,6 +10351,7 @@ launchForm.addEventListener('submit', async (event) => {
     if (data.success) {
       event.target.reset();
       launchFormDirty = false;
+      loadLaunchWorkflows(); // Reload to reset to default
       fetchState();
     }
   } catch (err) {
@@ -11621,11 +11732,11 @@ def resume_target_scan(domain: str, wordlist: Optional[str] = None,
         cleaned = str(wordlist).strip()
         if cleaned:
             wordlist_val = cleaned
-    return start_pipeline_job(normalized, wordlist_val, skip_flag, None)
+    return start_pipeline_job(normalized, wordlist_val, skip_flag, None, None)
 
 
 def start_targets_from_input(domain_input: str, wordlist: Optional[str],
-                             skip_nikto: bool, interval: Optional[int]) -> Tuple[bool, str, List[Dict[str, Any]]]:
+                             skip_nikto: bool, interval: Optional[int], workflow_id: Optional[str] = None) -> Tuple[bool, str, List[Dict[str, Any]]]:
     cfg = get_config()
     cleaned = _sanitize_domain_input(domain_input)
     requested_any_tld = bool(cleaned.endswith(".*"))
@@ -11637,7 +11748,7 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     details: List[Dict[str, Any]] = []
     success_any = False
     for target in targets:
-        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval)
+        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval, workflow_id)
         if success:
             success_any = True
         details.append({
@@ -11660,7 +11771,7 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     return success_any, " ".join(summary_parts).strip(), details
 
 
-def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int]) -> Tuple[bool, str]:
+def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int], workflow_id: Optional[str] = None) -> Tuple[bool, str]:
     normalized = (domain or "").strip().lower()
     if not normalized:
         return False, "Domain is required."
@@ -11672,6 +11783,11 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
         wordlist_path = default_wordlist.strip()
     else:
         wordlist_path = str(wordlist).strip()
+    
+    # Use provided workflow_id or get default workflow
+    if not workflow_id:
+        default_workflow = get_default_workflow()
+        workflow_id = default_workflow["id"] if default_workflow else None
 
     with JOB_LOCK:
         if normalized in RUNNING_JOBS:
@@ -11686,6 +11802,7 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
             "wordlist": wordlist_path,
             "skip_nikto": skip_nikto,
             "interval": interval_val,
+            "workflow_id": workflow_id,
             "status": "queued",
             "message": "Waiting for a free slot.",
             "steps": init_job_steps(skip_nikto),
@@ -12766,6 +12883,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/run":
             domain = payload.get("domain", "")
             wordlist = payload.get("wordlist")
+            workflow_id = payload.get("workflow_id")
             interval_val = payload.get("interval")
             interval_int: Optional[int] = None
             if interval_val not in (None, ""):
@@ -12776,7 +12894,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             skip_default = get_config().get("skip_nikto_by_default", False)
             skip_nikto = bool_from_value(payload.get("skip_nikto"), skip_default)
 
-            success, message, _ = start_targets_from_input(domain, wordlist, skip_nikto, interval_int)
+            success, message, _ = start_targets_from_input(domain, wordlist, skip_nikto, interval_int, workflow_id)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
             return
