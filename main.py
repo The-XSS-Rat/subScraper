@@ -93,7 +93,6 @@ TOOLS = {
     "nuclei": "nuclei",
     "nikto": "nikto",
     "gowitness": "gowitness",
-    "nmap": "nmap",
 }
 
 CONFIG_LOCK = threading.Lock()
@@ -114,7 +113,6 @@ TEMPLATE_AWARE_TOOLS = [
     "nuclei",
     "nikto",
     "gowitness",
-    "nmap",
 ]
 
 
@@ -256,7 +254,6 @@ TOOL_GATES: Dict[str, ToolGate] = {
     "waybackurls": ToolGate(1),
     "gau": ToolGate(1),
     "gowitness": ToolGate(1),
-    "nmap": ToolGate(1),
     "nuclei": ToolGate(1),
     "nikto": ToolGate(1),
 }
@@ -266,7 +263,7 @@ RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 COMPLETED_JOBS: Dict[str, Dict[str, Any]] = {}  # Store completed job reports
 MAX_COMPLETED_JOBS_PER_DOMAIN = 10  # Keep last N completed jobs per domain
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nmap", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nuclei", "nikto"]
 
 # Global rate limiter
 RATE_LIMIT_LOCK = threading.Lock()
@@ -1098,7 +1095,6 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         "waybackurls": "max_parallel_waybackurls",
         "gau": "max_parallel_gau",
         "gowitness": "max_parallel_gowitness",
-        "nmap": "max_parallel_nmap",
         "nuclei": "max_parallel_nuclei",
         "nikto": "max_parallel_nikto",
     }
@@ -1118,14 +1114,6 @@ def is_subdomain_input(domain: str) -> bool:
         return False
     parts = [part for part in domain.split(".") if part]
     return len(parts) >= 3
-
-
-def is_tool_disabled(tool_name: str, config: Optional[Dict[str, Any]] = None) -> bool:
-    """Check if a tool is disabled in the configuration."""
-    if config is None:
-        config = get_config()
-    disabled_tools = config.get("disabled_tools", [])
-    return tool_name in disabled_tools
 
 
 def job_log_append(domain: Optional[str], text: Optional[str], source: str = "system") -> None:
@@ -1200,15 +1188,12 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_waybackurls": 1,
         "max_parallel_gau": 1,
         "max_parallel_gowitness": 1,
-        "max_parallel_nmap": 1,
         "max_parallel_nuclei": 1,
         "max_parallel_nikto": 1,
-        "enable_nmap": True,
-        "nmap_timeout": 300,
-        "max_nmap_output_size": 5000,
         "max_running_jobs": 1,
         "global_rate_limit": 0.0,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
+        "tool_binary_paths": {},  # Custom binary paths for tools
         "dynamic_mode_enabled": False,
         "dynamic_mode_base_jobs": 1,
         "dynamic_mode_max_jobs": 10,
@@ -1218,7 +1203,6 @@ def default_config() -> Dict[str, Any]:
         "auto_backup_interval": 3600,
         "auto_backup_max_count": 10,
         "setup_completed": False,
-        "disabled_tools": [],
     }
 
 
@@ -2591,7 +2575,6 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         "max_parallel_ffuf": "FFUF parallel slots",
         "max_parallel_waybackurls": "Waybackurls parallel slots",
         "max_parallel_gau": "GAU parallel slots",
-        "max_parallel_nmap": "Nmap parallel slots",
         "max_parallel_nuclei": "Nuclei parallel slots",
         "max_parallel_nikto": "Nikto parallel slots",
         "max_parallel_gowitness": "Screenshot parallel slots",
@@ -2681,16 +2664,23 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             cfg["auto_backup_max_count"] = new_count
             changed = True
     
-    # Handle disabled tools
-    if "disabled_tools" in values:
-        disabled_str = str(values.get("disabled_tools", "")).strip()
-        if disabled_str:
-            new_disabled = [t.strip() for t in disabled_str.split(",") if t.strip()]
-        else:
-            new_disabled = []
-        if cfg.get("disabled_tools", []) != new_disabled:
-            cfg["disabled_tools"] = new_disabled
-            changed = True
+    # Handle custom tool binary paths
+    if "tool_binary_paths" in values:
+        new_paths = values.get("tool_binary_paths", {})
+        if isinstance(new_paths, dict):
+            # Validate that paths exist
+            validated_paths = {}
+            for tool, path in new_paths.items():
+                if tool in TOOLS and path:
+                    path_obj = Path(path)
+                    if path_obj.exists():
+                        validated_paths[tool] = str(path_obj.resolve())
+                    else:
+                        log(f"Warning: Custom path for {tool} does not exist: {path}")
+            
+            if cfg.get("tool_binary_paths", {}) != validated_paths:
+                cfg["tool_binary_paths"] = validated_paths
+                changed = True
 
     if changed:
         save_config(cfg)
@@ -3003,6 +2993,23 @@ def _validate_tool_binary(tool: str, path_str: str) -> bool:
 
 
 def _resolve_tool_path(tool: str) -> Optional[str]:
+    """
+    Resolve the path to a tool binary, checking custom paths first,
+    then standard locations.
+    """
+    # Check custom binary paths from config first
+    config = get_config()
+    custom_paths = config.get("tool_binary_paths", {})
+    if tool in custom_paths:
+        custom_path = custom_paths[tool]
+        if custom_path and Path(custom_path).exists():
+            if _validate_tool_binary(tool, custom_path):
+                log(f"Using custom binary path for {tool}: {custom_path}")
+                return custom_path
+            else:
+                log(f"Custom path for {tool} at {custom_path} failed validation. Trying standard locations.")
+    
+    # Fall back to standard tool resolution
     exe = TOOLS[tool]
     candidates = _candidate_tool_paths(exe)
     for cand in candidates:
@@ -3016,6 +3023,261 @@ def _resolve_tool_path(tool: str) -> Optional[str]:
         else:
             log(f"Found {tool} at {cand} but it does not look like the expected binary. Ignoring.")
     return None
+
+
+def get_tool_installation_instructions(tool: str) -> str:
+    """
+    Get detailed installation instructions for a specific tool.
+    Returns a formatted string with OS-specific installation commands.
+    """
+    instructions = {
+        "amass": """
+AMASS - OWASP Amass Subdomain Enumeration
+==========================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y amass
+
+macOS (Homebrew):
+  brew install amass
+
+From Source (requires Go 1.19+):
+  go install -v github.com/owasp-amass/amass/v3/...@latest
+  # Binary will be in: ~/go/bin/amass or $GOPATH/bin/amass
+
+Official Releases:
+  https://github.com/OWASP/Amass/releases
+  Download the binary for your platform and add to PATH
+""",
+        "subfinder": """
+SUBFINDER - ProjectDiscovery Subdomain Discovery
+=================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y subfinder
+
+macOS (Homebrew):
+  brew install subfinder
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+  # Binary will be in: ~/go/bin/subfinder or $GOPATH/bin/subfinder
+
+Official Releases:
+  https://github.com/projectdiscovery/subfinder/releases
+  Download the binary for your platform and add to PATH
+""",
+        "assetfinder": """
+ASSETFINDER - Find domains and subdomains
+==========================================
+
+From Source (requires Go 1.19+):
+  go install github.com/tomnomnom/assetfinder@latest
+  # Binary will be in: ~/go/bin/assetfinder or $GOPATH/bin/assetfinder
+
+Official Repository:
+  https://github.com/tomnomnom/assetfinder
+""",
+        "findomain": """
+FINDOMAIN - Fast subdomain enumeration
+=======================================
+
+Ubuntu/Debian:
+  # Download latest release
+  wget https://github.com/Findomain/Findomain/releases/latest/download/findomain-linux
+  chmod +x findomain-linux
+  sudo mv findomain-linux /usr/local/bin/findomain
+
+macOS (Homebrew):
+  brew install findomain
+
+Windows:
+  # Download from: https://github.com/Findomain/Findomain/releases
+  # Add to PATH
+
+Official Repository:
+  https://github.com/Findomain/Findomain
+""",
+        "sublist3r": """
+SUBLIST3R - Python subdomain enumeration
+=========================================
+
+Using pip:
+  pip install sublist3r
+  # OR
+  pip3 install sublist3r
+
+From Source:
+  git clone https://github.com/aboul3la/Sublist3r.git
+  cd Sublist3r
+  pip install -r requirements.txt
+  python sublist3r.py --help
+
+Ubuntu/Debian:
+  sudo apt-get install -y sublist3r
+
+Official Repository:
+  https://github.com/aboul3la/Sublist3r
+""",
+        "dnsx": """
+DNSX - Fast and multi-purpose DNS toolkit
+==========================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y dnsx
+
+macOS (Homebrew):
+  brew install dnsx
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+  # Binary will be in: ~/go/bin/dnsx or $GOPATH/bin/dnsx
+
+Official Releases:
+  https://github.com/projectdiscovery/dnsx/releases
+  Download the binary for your platform and add to PATH
+""",
+        "ffuf": """
+FFUF - Fast web fuzzer
+======================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y ffuf
+
+macOS (Homebrew):
+  brew install ffuf
+
+From Source (requires Go 1.19+):
+  go install github.com/ffuf/ffuf@latest
+  # Binary will be in: ~/go/bin/ffuf or $GOPATH/bin/ffuf
+
+Official Releases:
+  https://github.com/ffuf/ffuf/releases
+  Download the binary for your platform and add to PATH
+""",
+        "httpx": """
+HTTPX - Fast HTTP toolkit from ProjectDiscovery
+================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y httpx-toolkit
+
+macOS (Homebrew):
+  brew install httpx
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+  # Binary will be in: ~/go/bin/httpx or $GOPATH/bin/httpx
+
+Official Releases:
+  https://github.com/projectdiscovery/httpx/releases
+  Download the binary for your platform and add to PATH
+
+Note: Make sure you have ProjectDiscovery's httpx, not the Python httpx client!
+""",
+        "waybackurls": """
+WAYBACKURLS - Fetch URLs from the Wayback Machine
+==================================================
+
+From Source (requires Go 1.19+):
+  go install github.com/tomnomnom/waybackurls@latest
+  # Binary will be in: ~/go/bin/waybackurls or $GOPATH/bin/waybackurls
+
+Official Repository:
+  https://github.com/tomnomnom/waybackurls
+""",
+        "gau": """
+GAU - Get All URLs from various sources
+========================================
+
+From Source (requires Go 1.19+):
+  go install github.com/lc/gau/v2/cmd/gau@latest
+  # Binary will be in: ~/go/bin/gau or $GOPATH/bin/gau
+
+Official Releases:
+  https://github.com/lc/gau/releases
+  Download the binary for your platform and add to PATH
+""",
+        "nuclei": """
+NUCLEI - Fast vulnerability scanner from ProjectDiscovery
+==========================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y nuclei
+
+macOS (Homebrew):
+  brew install nuclei
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+  # Binary will be in: ~/go/bin/nuclei or $GOPATH/bin/nuclei
+
+Official Releases:
+  https://github.com/projectdiscovery/nuclei/releases
+  Download the binary for your platform and add to PATH
+""",
+        "nikto": """
+NIKTO - Web server scanner
+===========================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y nikto
+
+macOS (Homebrew):
+  brew install nikto
+
+From Source:
+  git clone https://github.com/sullo/nikto
+  cd nikto/program
+  perl nikto.pl --help
+
+Official Repository:
+  https://github.com/sullo/nikto
+
+Note: Nikto requires Perl to be installed
+""",
+        "gowitness": """
+GOWITNESS - Web screenshot tool
+================================
+
+macOS (Homebrew):
+  brew install gowitness
+
+From Source (requires Go 1.19+):
+  go install github.com/sensepost/gowitness@latest
+  # Binary will be in: ~/go/bin/gowitness or $GOPATH/bin/gowitness
+
+Official Releases:
+  https://github.com/sensepost/gowitness/releases
+  Download the binary for your platform and add to PATH
+
+Note: gowitness requires Chrome/Chromium to be installed for screenshots
+""",
+        "github-subdomains": """
+GITHUB-SUBDOMAINS - Find subdomains on GitHub
+==============================================
+
+From Source (requires Go 1.19+):
+  go install github.com/gwen001/github-subdomains@latest
+  # Binary will be in: ~/go/bin/github-subdomains or $GOPATH/bin/github-subdomains
+
+Official Repository:
+  https://github.com/gwen001/github-subdomains
+
+Note: Requires GitHub API token for best results
+""",
+        "crtsh": """
+CRT.SH - Certificate Transparency Log Search (API-based)
+=========================================================
+
+This is a virtual tool that uses the crt.sh API.
+No installation required - it works via HTTP requests.
+
+API Endpoint: https://crt.sh/?q=%25.example.com&output=json
+""",
+    }
+    
+    return instructions.get(tool, f"No detailed installation instructions available for {tool}")
 
 
 def ensure_tool_installed(tool: str) -> bool:
@@ -3101,10 +3363,10 @@ def ensure_tool_installed(tool: str) -> bool:
         TOOLS[tool] = "crtsh"  # Virtual tool
         return True
 
-    log(
-        f"Could not auto-install {tool}. Please install it manually and re-run. "
-        f"Checked binary name: {exe}"
-    )
+    # Print detailed installation instructions
+    log(f"Could not auto-install {tool}. Please install it manually.")
+    log(f"Installation instructions for {tool}:")
+    print("\n" + get_tool_installation_instructions(tool))
     return False
 
 
@@ -3267,7 +3529,7 @@ def run_setup_wizard() -> None:
     print("   All required tools should be installed automatically.")
     print("   If any tool is missing, install it manually:")
     print("   - amass, subfinder, assetfinder, findomain, sublist3r")
-    print("   - ffuf, httpx, nuclei, nikto, gowitness, nmap")
+    print("   - ffuf, httpx, nuclei, nikto, gowitness")
     print("   - waybackurls, gau, dnsx")
     
     print("\n2. INSTALL PYTHON DEPENDENCIES (if not already done)")
@@ -4251,11 +4513,7 @@ def run_downstream_pipeline(
     flags = ensure_target_state(state, domain)["flags"]
     
     # ---------- dnsx (DNS verification) ----------
-    if is_tool_disabled("dnsx", config):
-        update_step("dnsx", status="skipped", message="dnsx disabled (tool skipped).", progress=0)
-        flags["dnsx_done"] = True
-        save_state(state)
-    elif not flags.get("dnsx_done") and config.get("enable_dnsx", True):
+    if not flags.get("dnsx_done") and config.get("enable_dnsx", True):
         # Get all discovered subdomains from state
         tgt_state = ensure_target_state(state, domain)
         all_discovered_subs = sorted(tgt_state["subdomains"].keys())
@@ -4284,11 +4542,7 @@ def run_downstream_pipeline(
         update_step("dnsx", status="skipped", message="dnsx already completed for this target.", progress=0)
 
     # ---------- ffuf ----------
-    if is_tool_disabled("ffuf", config):
-        update_step("ffuf", status="skipped", message="ffuf disabled (tool skipped).", progress=0)
-        flags["ffuf_done"] = True
-        save_state(state)
-    elif not flags.get("ffuf_done"):
+    if not flags.get("ffuf_done"):
         if not wordlist or (wordlist and not Path(wordlist).exists()):
             log("ffuf wordlist not provided or not found; skipping ffuf brute-force.")
             update_step("ffuf", status="skipped", message="Wordlist missing; ffuf skipped.", progress=0)
@@ -4310,63 +4564,52 @@ def run_downstream_pipeline(
         update_step("ffuf", status="skipped", message="ffuf already completed for this target.", progress=0)
 
     # ---------- httpx ----------
-    if is_tool_disabled("httpx", config):
+    httpx_processed: set = set()
+    while True:
         state = load_state()
-        flags = ensure_target_state(state, domain)["flags"]
-        update_step("httpx", status="skipped", message="httpx disabled (tool skipped).", progress=0)
-        flags["httpx_done"] = True
-        save_state(state)
-    else:
-        httpx_processed: set = set()
-        while True:
-            state = load_state()
-            tgt_state = ensure_target_state(state, domain)
-            flags = tgt_state["flags"]
-            submap = tgt_state["subdomains"]
-            new_hosts = [
-                host for host in sorted(submap.keys())
-                if host not in httpx_processed and not (submap.get(host) or {}).get("httpx")
-            ]
-            if not flags.get("httpx_done") and not httpx_processed:
-                log(f"=== httpx scan for {domain} ({len(submap)} hosts tracked) ===")
-            if not new_hosts:
-                if enumerators_done_event.is_set():
-                    flags["httpx_done"] = True
-                    save_state(state)
-                    update_step("httpx", status="completed", message="httpx scan finished.", progress=100)
-                    break
-                job_sleep(job_domain, 5)
-                continue
-            update_step("httpx", status="running", message=f"httpx scanning {len(new_hosts)} pending hosts", progress=40)
-            batch_file = write_subdomains_file(domain, new_hosts, suffix="_httpx_batch")
-            if job_domain:
-                job_log_append(job_domain, "Waiting for httpx slot...", "scheduler")
-            with TOOL_GATES["httpx"]:
-                if job_domain:
-                    job_log_append(job_domain, "httpx slot acquired.", "scheduler")
-                httpx_json = httpx_scan(batch_file, domain, config=config, job_domain=job_domain)
-            try:
-                batch_file.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-            if not httpx_json:
-                job_log_append(job_domain, "httpx batch failed.", "httpx")
-                update_step("httpx", status="error", message="httpx batch failed. Check logs for details.", progress=100)
+        tgt_state = ensure_target_state(state, domain)
+        flags = tgt_state["flags"]
+        submap = tgt_state["subdomains"]
+        new_hosts = [
+            host for host in sorted(submap.keys())
+            if host not in httpx_processed and not (submap.get(host) or {}).get("httpx")
+        ]
+        if not flags.get("httpx_done") and not httpx_processed:
+            log(f"=== httpx scan for {domain} ({len(submap)} hosts tracked) ===")
+        if not new_hosts:
+            if enumerators_done_event.is_set():
+                flags["httpx_done"] = True
+                save_state(state)
+                update_step("httpx", status="completed", message="httpx scan finished.", progress=100)
                 break
-            enrich_state_with_httpx(state, domain, httpx_json)
-            mark_hosts_scanned(state, domain, new_hosts, "httpx")
-            httpx_processed.update(new_hosts)
-            save_state(state)
-            job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
+            job_sleep(job_domain, 5)
+            continue
+        update_step("httpx", status="running", message=f"httpx scanning {len(new_hosts)} pending hosts", progress=40)
+        batch_file = write_subdomains_file(domain, new_hosts, suffix="_httpx_batch")
+        if job_domain:
+            job_log_append(job_domain, "Waiting for httpx slot...", "scheduler")
+        with TOOL_GATES["httpx"]:
+            if job_domain:
+                job_log_append(job_domain, "httpx slot acquired.", "scheduler")
+            httpx_json = httpx_scan(batch_file, domain, config=config, job_domain=job_domain)
+        try:
+            batch_file.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        if not httpx_json:
+            job_log_append(job_domain, "httpx batch failed.", "httpx")
+            update_step("httpx", status="error", message="httpx batch failed. Check logs for details.", progress=100)
+            break
+        enrich_state_with_httpx(state, domain, httpx_json)
+        mark_hosts_scanned(state, domain, new_hosts, "httpx")
+        httpx_processed.update(new_hosts)
+        save_state(state)
+        job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
     
     # ---------- waybackurls (URL discovery) ----------
-    if is_tool_disabled("waybackurls", config):
-        flags["waybackurls_done"] = True
-        save_state(state)
-        update_step("waybackurls", status="skipped", message="waybackurls disabled (tool skipped).", progress=0)
-    elif not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
+    if not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
         log(f"=== waybackurls URL discovery for {domain} ===")
         update_step("waybackurls", status="running", message="Discovering URLs from archive.org", progress=50)
         if job_domain:
@@ -4393,11 +4636,7 @@ def run_downstream_pipeline(
         update_step("waybackurls", status="skipped", message="waybackurls already completed for this target.", progress=0)
     
     # ---------- gau (Get All URLs) ----------
-    if is_tool_disabled("gau", config):
-        flags["gau_done"] = True
-        save_state(state)
-        update_step("gau", status="skipped", message="gau disabled (tool skipped).", progress=0)
-    elif not flags.get("gau_done") and config.get("enable_gau", True):
+    if not flags.get("gau_done") and config.get("enable_gau", True):
         log(f"=== gau URL discovery for {domain} ===")
         update_step("gau", status="running", message="Discovering URLs from multiple sources", progress=50)
         if job_domain:
@@ -4424,13 +4663,7 @@ def run_downstream_pipeline(
         update_step("gau", status="skipped", message="gau already completed for this target.", progress=0)
 
     # ---------- screenshots ----------
-    if is_tool_disabled("gowitness", config):
-        state = load_state()
-        flags = ensure_target_state(state, domain)["flags"]
-        update_step("screenshots", status="skipped", message="Screenshots disabled (tool skipped).", progress=0)
-        flags["screenshots_done"] = True
-        save_state(state)
-    elif not config.get("enable_screenshots", True):
+    if not config.get("enable_screenshots", True):
         state = load_state()
         flags = ensure_target_state(state, domain)["flags"]
         update_step("screenshots", status="skipped", message="Screenshots disabled in settings.", progress=0)
@@ -4467,120 +4700,57 @@ def run_downstream_pipeline(
             job_log_append(job_domain, f"Captured screenshots for {len(screenshot_map)} hosts.", "screenshots")
             update_step("screenshots", status="running", message=f"Captured {len(screenshot_map)} screenshots. Waiting for new hosts…", progress=75)
 
-    # ---------- nmap ----------
-    if is_tool_disabled("nmap", config):
-        state = load_state()
-        flags = ensure_target_state(state, domain)["flags"]
-        update_step("nmap", status="skipped", message="Nmap disabled (tool skipped).", progress=0)
-        flags["nmap_done"] = True
-        save_state(state)
-    elif not config.get("enable_nmap", True):
-        state = load_state()
-        flags = ensure_target_state(state, domain)["flags"]
-        update_step("nmap", status="skipped", message="Nmap disabled in settings.", progress=0)
-        flags["nmap_done"] = True
-        save_state(state)
-    else:
-        nmap_processed: set = set()
-        while True:
-            state = load_state()
-            tgt_state = ensure_target_state(state, domain)
-            flags = tgt_state["flags"]
-            submap = tgt_state["subdomains"]
-            # Only scan hosts with HTTP services detected
-            new_hosts = [
-                host for host in sorted(submap.keys())
-                if host not in nmap_processed 
-                and (submap.get(host) or {}).get("httpx")
-                and not (submap.get(host) or {}).get("scans", {}).get("nmap")
-            ]
-            if not flags.get("nmap_done") and not nmap_processed:
-                log(f"=== nmap scan for {domain} ({len(new_hosts)} hosts with HTTP) ===")
-            if not new_hosts:
-                if enumerators_done_event.is_set():
-                    flags["nmap_done"] = True
-                    save_state(state)
-                    update_step("nmap", status="completed", message="Nmap scan finished.", progress=100)
-                    break
-                job_sleep(job_domain, 5)
-                continue
-            update_step("nmap", status="running", message=f"Nmap scanning {len(new_hosts)} pending hosts", progress=40)
-            if job_domain:
-                job_log_append(job_domain, "Waiting for nmap slot...", "scheduler")
-            with TOOL_GATES["nmap"]:
-                if job_domain:
-                    job_log_append(job_domain, "Nmap slot acquired.", "scheduler")
-                nmap_json = nmap_scan(new_hosts, domain, config=config, job_domain=job_domain)
-            if not nmap_json:
-                job_log_append(job_domain, "Nmap batch failed.", "nmap")
-                update_step("nmap", status="error", message="Nmap batch failed. Check logs for details.", progress=100)
-                break
-            enrich_state_with_nmap(state, domain, nmap_json)
-            mark_hosts_scanned(state, domain, new_hosts, "nmap")
-            nmap_processed.update(new_hosts)
-            save_state(state)
-            job_log_append(job_domain, f"Nmap scanned {len(new_hosts)} hosts.", "nmap")
-
     # ---------- nuclei ----------
-    if is_tool_disabled("nuclei", config):
+    nuclei_processed: set = set()
+    while True:
         state = load_state()
-        flags = ensure_target_state(state, domain)["flags"]
-        update_step("nuclei", status="skipped", message="Nuclei disabled (tool skipped).", progress=0)
-        flags["nuclei_done"] = True
-        save_state(state)
-    else:
-        nuclei_processed: set = set()
-        while True:
-            state = load_state()
-            tgt_state = ensure_target_state(state, domain)
-            flags = tgt_state["flags"]
-            submap = tgt_state["subdomains"]
-            new_hosts = [
-                host for host in sorted(submap.keys())
-                if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
-            ]
-            if not flags.get("nuclei_done") and not nuclei_processed:
-                log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
-            if not new_hosts:
-                if enumerators_done_event.is_set():
-                    flags["nuclei_done"] = True
-                    save_state(state)
-                    update_step("nuclei", status="completed", message="nuclei scan finished.", progress=100)
-                    break
-                job_sleep(job_domain, 5)
-                continue
-            update_step("nuclei", status="running", message=f"nuclei scanning {len(new_hosts)} pending hosts", progress=40)
-            batch_file = write_subdomains_file(domain, new_hosts, suffix="_nuclei_batch")
-            if job_domain:
-                job_log_append(job_domain, "Waiting for nuclei slot...", "scheduler")
-            with TOOL_GATES["nuclei"]:
-                if job_domain:
-                    job_log_append(job_domain, "nuclei slot acquired.", "scheduler")
-                nuclei_json = nuclei_scan(batch_file, domain, config=config, job_domain=job_domain)
-            try:
-                batch_file.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-            if not nuclei_json:
-                job_log_append(job_domain, "nuclei batch failed.", "nuclei")
-                update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
+        tgt_state = ensure_target_state(state, domain)
+        flags = tgt_state["flags"]
+        submap = tgt_state["subdomains"]
+        new_hosts = [
+            host for host in sorted(submap.keys())
+            if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
+        ]
+        if not flags.get("nuclei_done") and not nuclei_processed:
+            log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
+        if not new_hosts:
+            if enumerators_done_event.is_set():
+                flags["nuclei_done"] = True
+                save_state(state)
+                update_step("nuclei", status="completed", message="nuclei scan finished.", progress=100)
                 break
-            enrich_state_with_nuclei(state, domain, nuclei_json)
-            mark_hosts_scanned(state, domain, new_hosts, "nuclei")
-            nuclei_processed.update(new_hosts)
-            save_state(state)
-            job_log_append(job_domain, f"nuclei processed {len(new_hosts)} hosts.", "nuclei")
+            job_sleep(job_domain, 5)
+            continue
+        update_step("nuclei", status="running", message=f"nuclei scanning {len(new_hosts)} pending hosts", progress=40)
+        batch_file = write_subdomains_file(domain, new_hosts, suffix="_nuclei_batch")
+        if job_domain:
+            job_log_append(job_domain, "Waiting for nuclei slot...", "scheduler")
+        with TOOL_GATES["nuclei"]:
+            if job_domain:
+                job_log_append(job_domain, "nuclei slot acquired.", "scheduler")
+            nuclei_json = nuclei_scan(batch_file, domain, config=config, job_domain=job_domain)
+        try:
+            batch_file.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        if not nuclei_json:
+            job_log_append(job_domain, "nuclei batch failed.", "nuclei")
+            update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
+            break
+        enrich_state_with_nuclei(state, domain, nuclei_json)
+        mark_hosts_scanned(state, domain, new_hosts, "nuclei")
+        nuclei_processed.update(new_hosts)
+        save_state(state)
+        job_log_append(job_domain, f"nuclei processed {len(new_hosts)} hosts.", "nuclei")
 
     state = load_state()
     flags = ensure_target_state(state, domain)["flags"]
     all_subs = sorted(ensure_target_state(state, domain)["subdomains"].keys())
 
     # ---------- nikto ----------
-    if is_tool_disabled("nikto", config):
-        update_step("nikto", status="skipped", message="Nikto disabled (tool skipped).", progress=0)
-    elif skip_nikto:
+    if skip_nikto:
         update_step("nikto", status="skipped", message="Nikto skipped per run options.", progress=0)
     else:
         nikto_processed: set = set()
@@ -4972,95 +5142,6 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
     return out_json if out_json.exists() else None
 
 
-def nmap_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
-              job_domain: Optional[str] = None) -> Path:
-    """
-    Run nmap port scan on discovered subdomains with live HTTP services.
-    """
-    if not ensure_tool_installed("nmap"):
-        return None
-    out_json = DATA_DIR / f"nmap_{domain}.json"
-
-    results: List[Dict[str, Any]] = []
-    for host in subs:
-        cmd = [
-            TOOLS["nmap"],
-            "-sV",  # Service version detection
-            "-T4",  # Faster timing
-            "--top-ports", "100",  # Scan top 100 ports
-            "-oX", "-",  # Output XML to stdout
-            host,
-        ]
-        context = {
-            "DOMAIN": domain,
-            "SUBDOMAIN": host,
-            "OUTPUT": str(out_json),
-        }
-        cmd = apply_template_flags("nmap", cmd, context, config)
-        log(f"Running nmap against {host}")
-        if job_domain:
-            job_log_append(job_domain, f"Nmap scanning {host}", source="nmap")
-        
-        # Get configurable timeout, default to 300 seconds (5 minutes)
-        nmap_timeout = 300
-        if config:
-            try:
-                nmap_timeout = max(60, int(config.get("nmap_timeout", 300)))
-            except (TypeError, ValueError):
-                nmap_timeout = 300
-        
-        try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                timeout=nmap_timeout,
-            )
-        except FileNotFoundError:
-            log("Nmap binary not found during run.")
-            return None
-        except subprocess.TimeoutExpired:
-            log(f"Nmap timeout for {host}")
-            if job_domain:
-                job_log_append(job_domain, f"Nmap timeout for {host}", source="nmap")
-            continue
-        except Exception as e:
-            log(f"Nmap error for {host}: {e}")
-            if job_domain:
-                job_log_append(job_domain, f"Nmap error for {host}: {e}", source="nmap")
-            continue
-
-        stdout_text = proc.stdout or ""
-        stderr_text = proc.stderr or ""
-        if job_domain and stderr_text:
-            job_log_append(job_domain, stderr_text, source="nmap stderr")
-
-        # Store nmap XML output (raw format for future parsing)
-        # Output is stored as-is; consider implementing XML parsing for structured data extraction
-        if stdout_text.strip():
-            max_output_size = config.get("max_nmap_output_size", 5000) if config else 5000
-            results.append({
-                "host": host,
-                "scan_output": stdout_text[:max_output_size],  # Limit output size to prevent excessive storage
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-            if job_domain:
-                # Log a summary instead of full output
-                log_summary = f"Nmap completed for {host} ({len(stdout_text)} bytes)"
-                job_log_append(job_domain, log_summary, source="nmap")
-
-    try:
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
-    except Exception as e:
-        log(f"Error writing Nmap JSON: {e}")
-        return None
-
-    return out_json if out_json.exists() else None
-
-
 # ================== STATE ENRICHMENT ==================
 
 
@@ -5070,7 +5151,6 @@ def make_subdomain_entry() -> Dict[str, Any]:
         "httpx": None,
         "nuclei": [],
         "nikto": [],
-        "nmap": None,
         "screenshot": None,
         "scans": {},
     }
@@ -5090,7 +5170,6 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
             "ffuf_done": False,
             "httpx_done": False,
             "screenshots_done": False,
-            "nmap_done": False,
             "nuclei_done": False,
             "nikto_done": False,
         }
@@ -5101,7 +5180,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     tgt.setdefault("flags", {})
     tgt.setdefault("options", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
-              "ffuf_done", "httpx_done", "screenshots_done", "nmap_done", "nuclei_done", "nikto_done"]:
+              "ffuf_done", "httpx_done", "screenshots_done", "nuclei_done", "nikto_done"]:
         tgt["flags"].setdefault(k, False)
     for sub, entry in list(tgt["subdomains"].items()):
         if not isinstance(entry, dict):
@@ -5111,7 +5190,6 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
         entry.setdefault("httpx", None)
         entry.setdefault("nuclei", [])
         entry.setdefault("nikto", [])
-        entry.setdefault("nmap", None)
         entry.setdefault("screenshot", None)
         entry.setdefault("scans", {})
     return tgt
@@ -5235,31 +5313,6 @@ def enrich_state_with_nikto(state: Dict[str, Any], domain: str, nikto_json: Path
             entry.setdefault("nikto", []).extend(normalized_vulns)
     except Exception as e:
         log(f"Error enriching state with nikto data: {e}")
-
-
-def enrich_state_with_nmap(state: Dict[str, Any], domain: str, nmap_json: Path) -> None:
-    if not nmap_json or not nmap_json.exists():
-        return
-    tgt = ensure_target_state(state, domain)
-    submap = tgt["subdomains"]
-    try:
-        data = json.loads(nmap_json.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            data = [data]
-        for obj in data:
-            host = obj.get("host")
-            if not host:
-                continue
-            host = str(host).lower()
-            entry = submap.setdefault(host, make_subdomain_entry())
-            entry.setdefault("scans", {})
-            # Store nmap scan data
-            entry["nmap"] = {
-                "scan_output": obj.get("scan_output", ""),
-                "timestamp": obj.get("timestamp"),
-            }
-    except Exception as e:
-        log(f"Error enriching state with nmap data: {e}")
 
 
 def enrich_state_with_screenshots(state: Dict[str, Any], domain: str, mapping: Dict[str, Dict[str, Any]]) -> None:
@@ -5548,9 +5601,6 @@ def run_pipeline(
         enable_github_subdomains = config.get("enable_github_subdomains", True)
 
         def maybe_add_enum(step_name: str, flag_key: str, desc: str, func, enabled: bool = True):
-            if is_tool_disabled(step_name, config):
-                update_step(step_name, status="skipped", message=f"{desc} disabled (tool skipped).", progress=0)
-                return
             if not enabled:
                 update_step(step_name, status="skipped", message=f"{desc} disabled in settings.", progress=0)
                 return
@@ -5559,9 +5609,7 @@ def run_pipeline(
                 return
             enumerator_specs.append((step_name, flag_key, desc, func))
 
-        if is_tool_disabled("amass", config):
-            update_step("amass", status="skipped", message="Amass disabled (tool skipped).", progress=0)
-        elif config.get("enable_amass", True):
+        if config.get("enable_amass", True):
             maybe_add_enum(
                 "amass",
                 "amass_done",
@@ -6861,9 +6909,6 @@ button:hover { background:#1d4ed8; }
               </label>
               
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">Scanning & Analysis Tools</h5>
-              <label>Nmap parallel slots
-                <input id="settings-nmap" type="number" name="max_parallel_nmap" min="1" />
-              </label>
               <label>Nuclei parallel slots
                 <input id="settings-nuclei" type="number" name="max_parallel_nuclei" min="1" />
               </label>
@@ -6980,9 +7025,6 @@ button:hover { background:#1d4ed8; }
                 </label>
                 <label>Screenshot flags (gowitness)
                   <textarea id="template-gowitness" class="template-input" placeholder=""></textarea>
-                </label>
-                <label>Nmap flags
-                  <textarea id="template-nmap" class="template-input" placeholder=""></textarea>
                 </label>
               </div>
               <p class="template-note">Tip: leave a field blank to use the built-in defaults. Need examples? Visit the User Guide from the sidebar.</p>
@@ -7151,7 +7193,6 @@ const settingsHttpx = document.getElementById('settings-httpx');
 const settingsFFUF = document.getElementById('settings-ffuf');
 const settingsWaybackurls = document.getElementById('settings-waybackurls');
 const settingsGau = document.getElementById('settings-gau');
-const settingsNmap = document.getElementById('settings-nmap');
 const settingsNuclei = document.getElementById('settings-nuclei');
 const settingsNikto = document.getElementById('settings-nikto');
 const settingsGowitness = document.getElementById('settings-gowitness');
@@ -7186,7 +7227,6 @@ const templateInputs = {
   nuclei: document.getElementById('template-nuclei'),
   nikto: document.getElementById('template-nikto'),
   gowitness: document.getElementById('template-gowitness'),
-  nmap: document.getElementById('template-nmap'),
 };
 const monitorForm = document.getElementById('monitor-form');
 const monitorName = document.getElementById('monitor-name');
@@ -7225,7 +7265,6 @@ const STEP_SEQUENCE = [
   { flag: 'waybackurls_done', label: 'Waybackurls' },
   { flag: 'gau_done', label: 'GAU' },
   { flag: 'screenshots_done', label: 'Screenshots', skipWhen: () => latestConfig.enable_screenshots === false },
-  { flag: 'nmap_done', label: 'nmap' },
   { flag: 'nuclei_done', label: 'Nuclei' },
   { flag: 'nikto_done', label: 'Nikto', skipWhen: (info) => shouldSkipNikto(info) },
 ];
@@ -7441,8 +7480,8 @@ function linkifyLogText(text) {
   // Escape the text first
   const escaped = escapeHtml(text || '');
   
-  // Pattern to match result file names (nikto_*.json, nuclei_*.json, nmap_*.json, etc.)
-  const filePattern = /(nikto_[a-zA-Z0-9._-]+\.json|nuclei_[a-zA-Z0-9._-]+\.json|nmap_[a-zA-Z0-9._-]+\.json|httpx_[a-zA-Z0-9._-]+\.json|ffuf_[a-zA-Z0-9._-]+\.json)/g;
+  // Pattern to match result file names (nikto_*.json, nuclei_*.json, httpx_*.json, etc.)
+  const filePattern = /(nikto_[a-zA-Z0-9._-]+\.json|nuclei_[a-zA-Z0-9._-]+\.json|httpx_[a-zA-Z0-9._-]+\.json|ffuf_[a-zA-Z0-9._-]+\.json)/g;
   
   // Replace file references with download links
   return escaped.replace(filePattern, (match) => {
@@ -7807,7 +7846,6 @@ function renderTargets(targets) {
       <span class="badge">Wayback: ${flags.waybackurls_done ? '✅' : '⏳'}</span>
       <span class="badge">GAU: ${flags.gau_done ? '✅' : '⏳'}</span>
       <span class="badge">Screenshots: ${flags.screenshots_done ? '✅' : '⏳'}</span>
-      <span class="badge">nmap: ${flags.nmap_done ? '✅' : '⏳'}</span>
       <span class="badge">nuclei: ${flags.nuclei_done ? '✅' : '⏳'}</span>
       <span class="badge">nikto: ${flags.nikto_done ? '✅' : '⏳'}</span>
     `;
@@ -8145,19 +8183,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Port Scanning</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool scanning">Nmap</span>
-      </div>
-      <div class="workflow-description">Port and service detection on hosts with live HTTP services</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 7: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
@@ -10053,7 +10079,6 @@ function renderSettings(config, tools) {
     settingsFFUF.value = config.max_parallel_ffuf || 1;
     settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
     settingsGau.value = config.max_parallel_gau || 1;
-    settingsNmap.value = config.max_parallel_nmap || 1;
     settingsNuclei.value = config.max_parallel_nuclei || 1;
     settingsNikto.value = config.max_parallel_nikto || 1;
     settingsGowitness.value = config.max_parallel_gowitness || 1;
@@ -10217,7 +10242,6 @@ if (settingsForm) {
         max_parallel_ffuf: settingsFFUF ? settingsFFUF.value : '',
         max_parallel_waybackurls: settingsWaybackurls ? settingsWaybackurls.value : '',
         max_parallel_gau: settingsGau ? settingsGau.value : '',
-        max_parallel_nmap: settingsNmap ? settingsNmap.value : '',
         max_parallel_nuclei: settingsNuclei ? settingsNuclei.value : '',
         max_parallel_nikto: settingsNikto ? settingsNikto.value : '',
         max_parallel_gowitness: settingsGowitness ? settingsGowitness.value : '',
@@ -11780,7 +11804,6 @@ function renderDomainDetail(info) {{
     waybackurls_done: 'Wayback URLs',
     gau_done: 'GAU',
     screenshots_done: 'Screenshots',
-    nmap_done: 'Nmap',
     nuclei_done: 'Nuclei',
     nikto_done: 'Nikto'
   }};
@@ -12044,7 +12067,6 @@ function renderSubdomainDetail(info, history) {{
   const screenshot = info.screenshot || {{}};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
-  const nmap = info.nmap || {{}};
   const interesting = info.interesting;
   const comments = info.comments || [];
   
@@ -12109,39 +12131,6 @@ function renderSubdomainDetail(info, history) {{
       ` : '<p class="muted">No screenshot available</p>'}}
     </div>
   `;
-  
-  // Nmap section
-  html += `<div class="section"><h2>Nmap Scan Results</h2>`;
-  if (nmap && nmap.ports && nmap.ports.length) {{
-    html += `
-      <table>
-        <thead>
-          <tr>
-            <th>Port</th>
-            <th>Protocol</th>
-            <th>State</th>
-            <th>Service</th>
-            <th>Version</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${{nmap.ports.map(port => `
-            <tr>
-              <td>${{escapeHtml(String(port.port || '—'))}}</td>
-              <td>${{escapeHtml(port.protocol || '—')}}</td>
-              <td><span class="badge" style="background: ${{port.state === 'open' ? '#10b981' : '#64748b'}}">${{escapeHtml(port.state || '—')}}</span></td>
-              <td>${{escapeHtml(port.service || '—')}}</td>
-              <td>${{escapeHtml(port.version || '—')}}</td>
-            </tr>
-          `).join('')}}
-        </tbody>
-      </table>
-      ${{nmap.scan_time ? `<p class="muted" style="margin-top: 12px;">Scanned ${{fmtTime(nmap.scan_time)}}</p>` : ''}}
-    `;
-  }} else {{
-    html += '<p class="muted">No Nmap scan data available</p>';
-  }}
-  html += '</div>';
   
   // Nuclei section
   html += `<div class="section"><h2>Nuclei Findings (${{nuclei.length}})</h2>`;
@@ -12821,7 +12810,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 return
             
             # Security: only allow JSON files with specific prefixes
-            allowed_prefixes = ["nikto_", "nuclei_", "nmap_", "httpx_", "ffuf_"]
+            allowed_prefixes = ["nikto_", "nuclei_", "httpx_", "ffuf_"]
             if not any(rel_path.startswith(prefix) and rel_path.endswith(".json") for prefix in allowed_prefixes):
                 self.send_error(HTTPStatus.FORBIDDEN, "Forbidden")
                 return
@@ -12931,7 +12920,6 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/subdomain/mark",
             "/api/subdomain/comment",
             "/api/target/comment",
-            "/api/tools/toggle",
         }
         if self.path not in allowed:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
@@ -13172,33 +13160,6 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "message": "Comment deleted"})
             else:
                 self._send_json({"success": False, "message": "Invalid action"}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        if self.path == "/api/tools/toggle":
-            tool_name = payload.get("tool", "").strip().lower()
-            enabled = payload.get("enabled", True)
-            
-            if tool_name not in TOOLS:
-                self._send_json({"success": False, "message": "Invalid tool name"}, status=HTTPStatus.BAD_REQUEST)
-                return
-            
-            config = get_config()
-            disabled_tools = config.get("disabled_tools", [])
-            
-            if enabled:
-                # Enable tool (remove from disabled list)
-                if tool_name in disabled_tools:
-                    disabled_tools.remove(tool_name)
-            else:
-                # Disable tool (add to disabled list)
-                if tool_name not in disabled_tools:
-                    disabled_tools.append(tool_name)
-            
-            # Update config
-            update_payload = {"disabled_tools": ",".join(disabled_tools)}
-            success, message, cfg = update_config_settings(update_payload)
-            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
-            self._send_json({"success": success, "message": message, "config": cfg}, status=status)
             return
 
         success, message, cfg = update_config_settings(payload)
