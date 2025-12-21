@@ -1726,6 +1726,10 @@ class TestBuildStatePayloadSummary:
         main.DATA_DIR = self.original_data_dir
         main.DB_FILE = self.original_db_file
         main.DB_CONN = self.original_db_conn
+        # Clean up temporary directory
+        import shutil
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
     
     def test_build_state_payload_summary_with_none_httpx(self):
         """Test that build_state_payload_summary handles None httpx value"""
