@@ -5363,6 +5363,13 @@ def gather_screenshot_targets(state: Dict[str, Any], domain: str) -> List[Tuple[
         url = httpx_info.get("url")
         if not url:
             continue
+        # Only include subdomains with valid response codes (optimization)
+        status_code = httpx_info.get("status_code")
+        if status_code is None:
+            continue
+        # Filter out invalid responses (0 or no response typically means failed connection)
+        if status_code == 0:
+            continue
         if info.get("screenshot"):
             continue
         norm = url.strip()
