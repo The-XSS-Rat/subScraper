@@ -1033,6 +1033,7 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
     global MAX_RUNNING_JOBS, GLOBAL_RATE_LIMIT_DELAY, DYNAMIC_MODE_ENABLED
     global DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS, DYNAMIC_MODE_CPU_THRESHOLD, DYNAMIC_MODE_MEMORY_THRESHOLD
     global AUTO_BACKUP_ENABLED, AUTO_BACKUP_INTERVAL, AUTO_BACKUP_MAX_COUNT
+    global AUTO_CLEANUP_ENABLED, CLEANUP_SCAN_RESULTS_DAYS, CLEANUP_TEMP_FILES_HOURS, CLEANUP_INTERVAL
     
     # Apply dynamic mode settings
     try:
@@ -1058,6 +1059,18 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         AUTO_BACKUP_INTERVAL = 3600
         AUTO_BACKUP_MAX_COUNT = 10
     
+    # Apply auto-cleanup settings
+    try:
+        AUTO_CLEANUP_ENABLED = bool(cfg.get("auto_cleanup_enabled", True))
+        CLEANUP_SCAN_RESULTS_DAYS = max(1, int(cfg.get("cleanup_scan_results_days", 30)))
+        CLEANUP_TEMP_FILES_HOURS = max(1, int(cfg.get("cleanup_temp_files_hours", 24)))
+        CLEANUP_INTERVAL = max(300, int(cfg.get("cleanup_interval", 3600)))  # Min 5 minutes
+    except (TypeError, ValueError):
+        AUTO_CLEANUP_ENABLED = True
+        CLEANUP_SCAN_RESULTS_DAYS = 30
+        CLEANUP_TEMP_FILES_HOURS = 24
+        CLEANUP_INTERVAL = 3600
+    
     # Start or stop dynamic mode worker based on config
     if DYNAMIC_MODE_ENABLED and PSUTIL_AVAILABLE:
         start_dynamic_mode_worker()
@@ -1069,6 +1082,12 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
         start_auto_backup_worker()
     else:
         stop_auto_backup_worker()
+    
+    # Start or stop auto-cleanup worker based on config
+    if AUTO_CLEANUP_ENABLED:
+        start_cleanup_worker()
+    else:
+        stop_cleanup_worker()
     
     try:
         MAX_RUNNING_JOBS = max(1, int(cfg.get("max_running_jobs", 1)))
@@ -1202,6 +1221,11 @@ def default_config() -> Dict[str, Any]:
         "auto_backup_enabled": False,
         "auto_backup_interval": 3600,
         "auto_backup_max_count": 10,
+        "auto_cleanup_enabled": True,
+        "cleanup_scan_results_days": 30,
+        "cleanup_temp_files_hours": 24,
+        "cleanup_interval": 3600,
+        "screenshots_per_page": 20,
         "setup_completed": False,
     }
 
@@ -2260,6 +2284,214 @@ def get_auto_backup_status() -> Dict[str, Any]:
             "next_backup_timestamp": next_backup_time,
             "next_backup": datetime.fromtimestamp(next_backup_time, tz=timezone.utc).isoformat() if next_backup_time else None,
             "worker_active": AUTO_BACKUP_THREAD and AUTO_BACKUP_THREAD.is_alive() if AUTO_BACKUP_THREAD else False,
+        }
+
+
+# ================== FILE CLEANUP SYSTEM ==================
+
+# Cleanup system configuration
+AUTO_CLEANUP_ENABLED = False
+CLEANUP_SCAN_RESULTS_DAYS = 30
+CLEANUP_TEMP_FILES_HOURS = 24
+CLEANUP_INTERVAL = 3600
+LAST_CLEANUP_TIME = 0.0
+CLEANUP_LOCK = threading.Lock()
+CLEANUP_THREAD: Optional[threading.Thread] = None
+
+
+def cleanup_temporary_files() -> int:
+    """
+    Clean up temporary files (.tmp.*, .backup) older than configured hours.
+    Returns number of files deleted.
+    """
+    try:
+        ensure_dirs()
+        deleted_count = 0
+        cutoff_time = time.time() - (CLEANUP_TEMP_FILES_HOURS * 3600)
+        
+        # Patterns for temporary files
+        temp_patterns = [
+            "*.tmp.*",
+            "*.backup",
+            ".restore_temp"
+        ]
+        
+        for pattern in temp_patterns:
+            for temp_file in DATA_DIR.glob(pattern):
+                try:
+                    # Skip if it's a directory (handle .restore_temp separately)
+                    if temp_file.is_dir():
+                        # Only remove .restore_temp if it's old
+                        if temp_file.name == ".restore_temp":
+                            file_mtime = temp_file.stat().st_mtime
+                            if file_mtime < cutoff_time:
+                                shutil.rmtree(temp_file, ignore_errors=True)
+                                deleted_count += 1
+                                log(f"🗑️  Removed old temp directory: {temp_file.name}")
+                        continue
+                    
+                    # Check file age
+                    file_mtime = temp_file.stat().st_mtime
+                    if file_mtime < cutoff_time:
+                        temp_file.unlink()
+                        deleted_count += 1
+                        log(f"🗑️  Removed old temp file: {temp_file.name}")
+                except Exception as e:
+                    log(f"Warning: Could not remove temp file {temp_file}: {e}")
+        
+        if deleted_count > 0:
+            log(f"✓ Cleaned up {deleted_count} temporary file(s)")
+        
+        return deleted_count
+    except Exception as exc:
+        log(f"Error cleaning up temporary files: {exc}")
+        return 0
+
+
+def cleanup_old_scan_results() -> int:
+    """
+    Clean up old scan result files (nuclei_*.json, nikto_*.json, httpx_*.json, ffuf_*.json)
+    older than configured days. Returns number of files deleted.
+    """
+    try:
+        ensure_dirs()
+        deleted_count = 0
+        cutoff_time = time.time() - (CLEANUP_SCAN_RESULTS_DAYS * 86400)
+        
+        # Patterns for scan result files
+        scan_patterns = [
+            "nuclei_*.json",
+            "nikto_*.json",
+            "httpx_*.json",
+            "ffuf_*.json"
+        ]
+        
+        for pattern in scan_patterns:
+            for scan_file in DATA_DIR.glob(pattern):
+                try:
+                    # Skip if it's not a file
+                    if not scan_file.is_file():
+                        continue
+                    
+                    # Check file age
+                    file_mtime = scan_file.stat().st_mtime
+                    if file_mtime < cutoff_time:
+                        scan_file.unlink()
+                        deleted_count += 1
+                        log(f"🗑️  Removed old scan result: {scan_file.name}")
+                except Exception as e:
+                    log(f"Warning: Could not remove scan file {scan_file}: {e}")
+        
+        if deleted_count > 0:
+            log(f"✓ Cleaned up {deleted_count} old scan result file(s)")
+        
+        return deleted_count
+    except Exception as exc:
+        log(f"Error cleaning up scan results: {exc}")
+        return 0
+
+
+def run_cleanup() -> Dict[str, int]:
+    """Run all cleanup tasks and return statistics."""
+    stats = {
+        "temp_files": 0,
+        "scan_results": 0,
+        "backups": 0
+    }
+    
+    try:
+        # Clean up temporary files
+        stats["temp_files"] = cleanup_temporary_files()
+        
+        # Clean up old scan results
+        stats["scan_results"] = cleanup_old_scan_results()
+        
+        # Clean up old backups
+        stats["backups"] = cleanup_old_backups()
+        
+        total = sum(stats.values())
+        if total > 0:
+            log(f"✓ Cleanup completed: {stats['temp_files']} temp files, "
+                f"{stats['scan_results']} scan results, {stats['backups']} backups removed")
+        
+        return stats
+    except Exception as exc:
+        log(f"Error during cleanup: {exc}")
+        return stats
+
+
+def auto_cleanup_worker_loop() -> None:
+    """Background worker that performs automatic cleanup on a schedule."""
+    global LAST_CLEANUP_TIME
+    
+    log("Auto-cleanup worker started.")
+    
+    # Set initial cleanup time to now to avoid immediate cleanup on start
+    LAST_CLEANUP_TIME = time.time()
+    
+    while True:
+        try:
+            if not AUTO_CLEANUP_ENABLED:
+                time.sleep(60)  # Check every minute if disabled
+                continue
+            
+            current_time = time.time()
+            time_since_cleanup = current_time - LAST_CLEANUP_TIME
+            
+            if time_since_cleanup >= CLEANUP_INTERVAL:
+                log("⏰ Auto-cleanup triggered")
+                stats = run_cleanup()
+                LAST_CLEANUP_TIME = current_time
+            
+            # Sleep for a short interval to check again
+            time.sleep(60)
+        except Exception as exc:
+            log(f"Error in auto-cleanup worker: {exc}")
+            time.sleep(60)
+
+
+def start_cleanup_worker() -> None:
+    """Start the auto-cleanup worker thread."""
+    global CLEANUP_THREAD
+    
+    with CLEANUP_LOCK:
+        already_running = CLEANUP_THREAD and CLEANUP_THREAD.is_alive()
+    
+    if already_running:
+        return
+    
+    thread = threading.Thread(target=auto_cleanup_worker_loop, name="auto-cleanup", daemon=True)
+    thread.start()
+    
+    with CLEANUP_LOCK:
+        CLEANUP_THREAD = thread
+    
+    log("Auto-cleanup worker initialized.")
+
+
+def stop_cleanup_worker() -> None:
+    """Stop the auto-cleanup worker thread."""
+    global CLEANUP_THREAD
+    
+    with CLEANUP_LOCK:
+        if CLEANUP_THREAD and CLEANUP_THREAD.is_alive():
+            CLEANUP_THREAD = None
+            log("Auto-cleanup worker stopped.")
+
+
+def get_cleanup_status() -> Dict[str, Any]:
+    """Get current auto-cleanup status."""
+    with CLEANUP_LOCK:
+        next_cleanup_time = LAST_CLEANUP_TIME + CLEANUP_INTERVAL if AUTO_CLEANUP_ENABLED else None
+        return {
+            "enabled": AUTO_CLEANUP_ENABLED,
+            "interval_seconds": CLEANUP_INTERVAL,
+            "scan_results_retention_days": CLEANUP_SCAN_RESULTS_DAYS,
+            "temp_files_retention_hours": CLEANUP_TEMP_FILES_HOURS,
+            "last_cleanup_timestamp": LAST_CLEANUP_TIME,
+            "next_cleanup_timestamp": next_cleanup_time,
+            "next_cleanup": datetime.fromtimestamp(next_cleanup_time, tz=timezone.utc).isoformat() if next_cleanup_time else None,
+            "worker_active": CLEANUP_THREAD and CLEANUP_THREAD.is_alive() if CLEANUP_THREAD else False,
         }
 
 
@@ -12603,6 +12835,37 @@ h1 {{
   align-items: center;
   justify-content: center;
 }}
+.pagination {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 30px 0;
+  padding: 20px 0;
+}}
+.pagination button {{
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  transition: all 0.2s;
+}}
+.pagination button:hover:not(:disabled) {{
+  background: #334155;
+  border-color: #60a5fa;
+}}
+.pagination button:disabled {{
+  opacity: 0.4;
+  cursor: not-allowed;
+}}
+.pagination .page-info {{
+  color: #94a3b8;
+  font-size: 0.95rem;
+  margin: 0 8px;
+}}
 </style>
 </head>
 <body>
@@ -12612,9 +12875,11 @@ h1 {{
     <h1 id="gallery-title">Screenshots Gallery</h1>
     <div class="subtitle" id="gallery-subtitle">Loading...</div>
   </div>
+  <div class="pagination" id="pagination-top"></div>
   <div id="gallery" class="gallery">
     <div class="loading">Loading screenshots...</div>
   </div>
+  <div class="pagination" id="pagination-bottom"></div>
 </div>
 <div id="modal" class="modal">
   <div class="modal-close" onclick="closeModal()">×</div>
@@ -12622,6 +12887,9 @@ h1 {{
 </div>
 <script>
 const domain = {repr(domain)};
+let allScreenshots = [];
+let currentPage = 1;
+let screenshotsPerPage = 20;
 
 function escapeHtml(text) {{
   const div = document.createElement('div');
@@ -12668,20 +12936,74 @@ async function loadGallery() {{
     const data = await resp.json();
     if (!data.success) throw new Error(data.message || 'Failed to load data');
     
+    allScreenshots = data.screenshots;
     document.getElementById('gallery-title').textContent = `Screenshots Gallery: ${{domain}}`;
-    document.getElementById('gallery-subtitle').textContent = `${{data.screenshots.length}} screenshots`;
-    renderGallery(data.screenshots);
+    document.getElementById('gallery-subtitle').textContent = `${{allScreenshots.length}} screenshots`;
+    
+    // Load screenshots per page from config if available
+    try {{
+      const configResp = await fetch('/api/settings');
+      if (configResp.ok) {{
+        const configData = await configResp.json();
+        screenshotsPerPage = configData.config?.screenshots_per_page || 20;
+      }}
+    }} catch (e) {{
+      // Use default if config fails to load
+    }}
+    
+    renderPage();
   }} catch (err) {{
     document.getElementById('gallery').innerHTML = `<div class="empty">Error: ${{escapeHtml(err.message)}}</div>`;
   }}
 }}
 
-function renderGallery(screenshots) {{
-  if (screenshots.length === 0) {{
+function renderPage() {{
+  if (allScreenshots.length === 0) {{
     document.getElementById('gallery').innerHTML = '<div class="empty">No screenshots available for this domain.</div>';
+    document.getElementById('pagination-top').innerHTML = '';
+    document.getElementById('pagination-bottom').innerHTML = '';
     return;
   }}
   
+  const totalPages = Math.ceil(allScreenshots.length / screenshotsPerPage);
+  const startIdx = (currentPage - 1) * screenshotsPerPage;
+  const endIdx = Math.min(startIdx + screenshotsPerPage, allScreenshots.length);
+  const pageScreenshots = allScreenshots.slice(startIdx, endIdx);
+  
+  renderGallery(pageScreenshots);
+  renderPagination(totalPages, 'pagination-top');
+  renderPagination(totalPages, 'pagination-bottom');
+}}
+
+function renderPagination(totalPages, elementId) {{
+  const paginationEl = document.getElementById(elementId);
+  
+  if (totalPages <= 1) {{
+    paginationEl.innerHTML = '';
+    return;
+  }}
+  
+  const startIdx = (currentPage - 1) * screenshotsPerPage + 1;
+  const endIdx = Math.min(startIdx + screenshotsPerPage - 1, allScreenshots.length);
+  
+  paginationEl.innerHTML = `
+    <button onclick="goToPage(1)" ${{currentPage === 1 ? 'disabled' : ''}}>«</button>
+    <button onclick="goToPage(${{currentPage - 1}})" ${{currentPage === 1 ? 'disabled' : ''}}>‹</button>
+    <span class="page-info">Page ${{currentPage}} of ${{totalPages}} (showing ${{startIdx}}-${{endIdx}} of ${{allScreenshots.length}})</span>
+    <button onclick="goToPage(${{currentPage + 1}})" ${{currentPage === totalPages ? 'disabled' : ''}}>›</button>
+    <button onclick="goToPage(${{totalPages}})" ${{currentPage === totalPages ? 'disabled' : ''}}>»</button>
+  `;
+}}
+
+function goToPage(page) {{
+  const totalPages = Math.ceil(allScreenshots.length / screenshotsPerPage);
+  if (page < 1 || page > totalPages) return;
+  currentPage = page;
+  renderPage();
+  window.scrollTo({{ top: 0, behavior: 'smooth' }});
+}}
+
+function renderGallery(screenshots) {{
   const html = screenshots.map(shot => {{
     const statusClass = getStatusClass(shot.status_code);
     const statusBadge = shot.status_code ? `<span class="status-badge ${{statusClass}}">${{shot.status_code}}</span>` : '';
@@ -12881,6 +13203,9 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/auto-backup-status":
             self._send_json(get_auto_backup_status())
             return
+        if self.path == "/api/cleanup-status":
+            self._send_json(get_cleanup_status())
+            return
         if self.path == "/api/backups":
             self._send_json({"backups": list_backups()})
             return
@@ -13064,6 +13389,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             "/api/backup/create",
             "/api/backup/restore",
             "/api/backup/delete",
+            "/api/cleanup/run",
             "/api/subdomain/mark",
             "/api/subdomain/comment",
             "/api/target/comment",
@@ -13111,6 +13437,16 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             success, message = delete_backup(filename)
             status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
             self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/cleanup/run":
+            try:
+                stats = run_cleanup()
+                total = sum(stats.values())
+                message = f"Cleanup completed: {stats['temp_files']} temp files, {stats['scan_results']} scan results, {stats['backups']} backups removed"
+                self._send_json({"success": True, "message": message, "stats": stats}, status=HTTPStatus.OK)
+            except Exception as exc:
+                self._send_json({"success": False, "message": f"Cleanup failed: {str(exc)}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if self.path == "/api/jobs/pause":
