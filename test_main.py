@@ -1703,6 +1703,124 @@ class TestHTTPHandlerSecurity:
             assert ".." in name or "/" in name or "\\" in name
 
 
+class TestBuildStatePayloadSummary:
+    """Tests for build_state_payload_summary function"""
+    
+    def setup_method(self):
+        """Setup test fixtures"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.original_data_dir = main.DATA_DIR
+        self.original_db_file = main.DB_FILE
+        self.original_db_conn = main.DB_CONN
+        main.DATA_DIR = Path(self.temp_dir)
+        main.DB_FILE = main.DATA_DIR / "test_recon.db"
+        main.DB_CONN = None
+        main.ensure_dirs()
+        main.init_database()
+    
+    def teardown_method(self):
+        """Cleanup"""
+        if main.DB_CONN:
+            main.DB_CONN.close()
+            main.DB_CONN = None
+        main.DATA_DIR = self.original_data_dir
+        main.DB_FILE = self.original_db_file
+        main.DB_CONN = self.original_db_conn
+        # Clean up temporary directory
+        import shutil
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+    
+    def test_build_state_payload_summary_with_none_httpx(self):
+        """Test that build_state_payload_summary handles None httpx value"""
+        db = main.get_db()
+        cursor = db.cursor()
+        
+        # Insert a target
+        now = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            "INSERT INTO targets (domain, data, flags, options, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("example.com", json.dumps({}), json.dumps({}), json.dumps({}), json.dumps([]), now, now)
+        )
+        
+        # Insert subdomain with None httpx (this is the bug case)
+        subdomain_data = {
+            "sources": ["test"],
+            "httpx": None,  # This causes the AttributeError
+            "nuclei": [],
+            "nikto": [],
+            "screenshot": None,
+        }
+        
+        cursor.execute(
+            "INSERT INTO subdomains (domain, subdomain, data, interesting, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("example.com", "sub.example.com", json.dumps(subdomain_data), 0, json.dumps([]), now, now)
+        )
+        db.commit()
+        
+        # This should not raise AttributeError
+        try:
+            payload = main.build_state_payload_summary()
+            assert "targets" in payload
+            assert "example.com" in payload["targets"]
+            assert "subdomains" in payload["targets"]["example.com"]
+            assert "sub.example.com" in payload["targets"]["example.com"]["subdomains"]
+            
+            # httpx should not be in the lightweight data since it was None
+            subdomain = payload["targets"]["example.com"]["subdomains"]["sub.example.com"]
+            assert "httpx" not in subdomain
+            assert "screenshot" not in subdomain
+            assert "sources" in subdomain
+            
+        except AttributeError as e:
+            pytest.fail(f"AttributeError raised: {e}")
+    
+    def test_build_state_payload_summary_with_valid_httpx(self):
+        """Test that build_state_payload_summary works with valid httpx data"""
+        db = main.get_db()
+        cursor = db.cursor()
+        
+        # Insert a target
+        now = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            "INSERT INTO targets (domain, data, flags, options, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("example.com", json.dumps({}), json.dumps({}), json.dumps({}), json.dumps([]), now, now)
+        )
+        
+        # Insert subdomain with valid httpx
+        subdomain_data = {
+            "sources": ["test"],
+            "httpx": {
+                "status_code": 200,
+                "title": "Test Page",
+                "webserver": "nginx",
+            },
+            "nuclei": [],
+            "nikto": [],
+            "screenshot": {
+                "path": "/path/to/screenshot.png"
+            },
+        }
+        
+        cursor.execute(
+            "INSERT INTO subdomains (domain, subdomain, data, interesting, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("example.com", "sub.example.com", json.dumps(subdomain_data), 0, json.dumps([]), now, now)
+        )
+        db.commit()
+        
+        # This should work and include httpx data
+        payload = main.build_state_payload_summary()
+        subdomain = payload["targets"]["example.com"]["subdomains"]["sub.example.com"]
+        
+        assert "httpx" in subdomain
+        assert subdomain["httpx"]["status_code"] == 200
+        assert subdomain["httpx"]["title"] == "Test Page"
+        assert subdomain["httpx"]["webserver"] == "nginx"
+        
+        assert "screenshot" in subdomain
+        assert subdomain["screenshot"]["path"] == "/path/to/screenshot.png"
+
+
 if __name__ == '__main__':
     # Run tests with pytest
     pytest.main([__file__, '-v', '--tb=short'])

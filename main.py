@@ -11854,7 +11854,7 @@ def build_state_payload_summary() -> Dict[str, Any]:
                 }
                 
                 # Add minimal httpx data
-                if "httpx" in full_data:
+                if "httpx" in full_data and full_data["httpx"] is not None:
                     httpx = full_data["httpx"]
                     lightweight_data["httpx"] = {
                         "status_code": httpx.get("status_code"),
@@ -11872,7 +11872,7 @@ def build_state_payload_summary() -> Dict[str, Any]:
                     lightweight_data["nikto"] = nikto  # Keep for counts
                 
                 # Add screenshot path only
-                if "screenshot" in full_data:
+                if "screenshot" in full_data and full_data["screenshot"] is not None:
                     screenshot = full_data["screenshot"]
                     lightweight_data["screenshot"] = {
                         "path": screenshot.get("path")
