@@ -5224,6 +5224,51 @@ def run_downstream_pipeline(
     log("Pipeline finished for this run.")
 
 
+def is_valid_subdomain(subdomain: str) -> bool:
+    """
+    Validate if a subdomain is properly formatted.
+    
+    Valid subdomain components can contain:
+    - Alphanumeric characters (a-z, 0-9)
+    - Hyphens (but not at start/end of a component)
+    - Dots (to separate components)
+    
+    Filters out:
+    - Comment lines (starting with #)
+    - Invalid characters (spaces, special chars)
+    - Malformed domain names
+    """
+    if not subdomain:
+        return False
+    
+    # Remove protocol and path if present
+    subdomain = subdomain.replace("https://", "").replace("http://", "").split("/")[0]
+    
+    # Check for invalid starting characters
+    if subdomain.startswith("#") or subdomain.startswith("-") or subdomain.startswith("."):
+        return False
+    
+    # Check for spaces or other invalid characters
+    if " " in subdomain or "\t" in subdomain or "\n" in subdomain:
+        return False
+    
+    # Split by dots to check each component
+    parts = subdomain.split(".")
+    if len(parts) < 2:  # At least subdomain.domain
+        return False
+    
+    # Check each part
+    for part in parts:
+        if not part:  # Empty part (consecutive dots)
+            return False
+        # Check if part contains only valid characters
+        # Valid: alphanumeric and hyphens, but not starting/ending with hyphen
+        if not re.match(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$', part, re.IGNORECASE):
+            return False
+    
+    return True
+
+
 def ffuf_bruteforce(
     domain: str,
     wordlist: str,
@@ -5233,6 +5278,10 @@ def ffuf_bruteforce(
     """
     Use ffuf to brute-force vhosts via Host header.
     This is HTTP-based vhost brute, not pure DNS brute, but still useful.
+    
+    Only returns subdomains that:
+    1. Have valid HTTP responses (200, 301, 302, 403, 401)
+    2. Are properly formatted as valid subdomains
     """
     if not ensure_tool_installed("ffuf"):
         return []
@@ -5262,14 +5311,31 @@ def ffuf_bruteforce(
         return []
 
     subs = set()
+    invalid_count = 0
     try:
         data = json.loads(out_json.read_text(encoding="utf-8"))
         for r in data.get("results", []):
+            # Only process results with valid status codes
+            status_code = r.get("status")
+            if status_code not in [200, 301, 302, 403, 401]:
+                continue
+            
             host = r.get("host") or r.get("url")
             if host:
                 # ffuf may show host as FUZZ.domain.tld
                 host = host.replace("https://", "").replace("http://", "").split("/")[0]
-                subs.add(host.lower())
+                host = host.lower()
+                
+                # Validate subdomain format before adding
+                if is_valid_subdomain(host):
+                    subs.add(host)
+                else:
+                    invalid_count += 1
+        
+        if invalid_count > 0:
+            log(f"ffuf: Filtered out {invalid_count} invalid subdomain entries")
+            if job_domain:
+                job_log_append(job_domain, f"Filtered out {invalid_count} invalid subdomain entries from ffuf results", "ffuf")
     except Exception as e:
         log(f"Error parsing ffuf JSON: {e}")
     return sorted(subs)
