@@ -6423,8 +6423,11 @@ button:hover { background:#1d4ed8; }
         <h2>Active Jobs</h2>
         <button class="btn secondary small" id="resume-all-btn" style="margin-left: auto;">Resume All Paused</button>
       </div>
-      <div class="module-body" id="jobs-list">
-        <div class="section-placeholder">No active jobs.</div>
+      <div class="module-body">
+        <div id="jobs-list">
+          <div class="section-placeholder">No active jobs.</div>
+        </div>
+        <div class="table-pagination" id="jobs-pagination"></div>
       </div>
     </section>
 
@@ -6450,6 +6453,7 @@ button:hover { background:#1d4ed8; }
       <div class="module-body">
         <p class="muted">Jobs wait here when all worker slots are busy. They start automatically.</p>
         <div id="queue-list" class="queue-list section-placeholder">Queue empty.</div>
+        <div class="table-pagination" id="queue-pagination"></div>
       </div>
     </section>
 
@@ -7533,6 +7537,13 @@ function renderJobStep(name, info = {}) {
   `;
 }
 
+// Pagination state for jobs view
+let jobsPaginationState = {
+  currentPage: 1,
+  pageSize: 10,  // Show 10 jobs per page for performance
+  totalPages: 1
+};
+
 function renderJobs(jobs) {
   const all = Array.isArray(jobs) ? jobs : [];
   const running = all.filter(job => job.status !== 'queued');
@@ -7544,13 +7555,32 @@ function renderJobs(jobs) {
   
   if (!running.length) {
     jobsList.innerHTML = '<div class="section-placeholder">No active jobs.</div>';
+    const pagerEl = document.getElementById('jobs-pagination');
+    if (pagerEl) pagerEl.innerHTML = '';
     return;
   }
   
   // Render active jobs first, then completed jobs
   const sortedJobs = [...activeJobs, ...completedJobs];
   
-  const cards = sortedJobs.map(job => {
+  // Calculate pagination
+  const totalJobs = sortedJobs.length;
+  jobsPaginationState.totalPages = Math.max(1, Math.ceil(totalJobs / jobsPaginationState.pageSize));
+  
+  // Ensure current page is within bounds - handle edge case of 0 pages
+  if (totalJobs === 0) {
+    jobsPaginationState.currentPage = 1;
+  } else if (jobsPaginationState.currentPage > jobsPaginationState.totalPages) {
+    jobsPaginationState.currentPage = jobsPaginationState.totalPages;
+  }
+  
+  // Get jobs for current page
+  const startIdx = (jobsPaginationState.currentPage - 1) * jobsPaginationState.pageSize;
+  const endIdx = startIdx + jobsPaginationState.pageSize;
+  const pageJobs = sortedJobs.slice(startIdx, endIdx);
+  
+  // Render only jobs on current page
+  const cards = pageJobs.map(job => {
     const progress = Math.max(0, Math.min(100, job.progress || 0));
     const steps = job.steps || {};
     const stepsHtml = Object.keys(steps).map(step => renderJobStep(step, steps[step])).join('');
@@ -7586,16 +7616,88 @@ function renderJobs(jobs) {
     `;
   });
   jobsList.innerHTML = cards.join('');
+  
+  // Render pagination controls
+  renderJobsPagination(totalJobs);
 }
+
+function renderJobsPagination(totalJobs) {
+  const pagerEl = document.getElementById('jobs-pagination');
+  if (!pagerEl) return;
+  
+  // Don't show pagination if only one page
+  if (jobsPaginationState.totalPages <= 1) {
+    pagerEl.innerHTML = '';
+    return;
+  }
+  
+  const state = jobsPaginationState;
+  pagerEl.innerHTML = `
+    <span class="page-info">Showing ${(state.currentPage - 1) * state.pageSize + 1}-${Math.min(state.currentPage * state.pageSize, totalJobs)} of ${totalJobs} jobs</span>
+    <button data-jobs-page-action="first" ${state.currentPage === 1 ? 'disabled' : ''}>&laquo;</button>
+    <button data-jobs-page-action="prev" ${state.currentPage === 1 ? 'disabled' : ''}>&lsaquo;</button>
+    <span>Page ${state.currentPage} / ${state.totalPages}</span>
+    <button data-jobs-page-action="next" ${state.currentPage === state.totalPages ? 'disabled' : ''}>&rsaquo;</button>
+    <button data-jobs-page-action="last" ${state.currentPage === state.totalPages ? 'disabled' : ''}>&raquo;</button>
+  `;
+}
+
+// Handle jobs pagination clicks
+// Note: Using document-level event delegation because pagination buttons are dynamically rendered
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-jobs-page-action]');
+  if (!btn) return;
+  
+  const action = btn.getAttribute('data-jobs-page-action');
+  if (action === 'prev') {
+    jobsPaginationState.currentPage = Math.max(1, jobsPaginationState.currentPage - 1);
+  } else if (action === 'next') {
+    jobsPaginationState.currentPage = Math.min(jobsPaginationState.totalPages, jobsPaginationState.currentPage + 1);
+  } else if (action === 'first') {
+    jobsPaginationState.currentPage = 1;
+  } else if (action === 'last') {
+    jobsPaginationState.currentPage = jobsPaginationState.totalPages;
+  }
+  
+  // Re-render jobs with new page - latestRunningJobs is already filtered/sorted from API
+  renderJobs(latestRunningJobs);
+});
+
+// Pagination state for queue view
+let queuePaginationState = {
+  currentPage: 1,
+  pageSize: 10,  // Show 10 queued jobs per page
+  totalPages: 1
+};
 
 function renderQueue(queue) {
   const items = Array.isArray(queue) ? queue : [];
   statQueued.textContent = items.length;
   if (!items.length) {
     queueList.innerHTML = '<div class="section-placeholder">Queue empty.</div>';
+    const pagerEl = document.getElementById('queue-pagination');
+    if (pagerEl) pagerEl.innerHTML = '';
     return;
   }
-  const cards = items.map((job) => {
+  
+  // Calculate pagination
+  const totalItems = items.length;
+  queuePaginationState.totalPages = Math.max(1, Math.ceil(totalItems / queuePaginationState.pageSize));
+  
+  // Ensure current page is within bounds - handle edge case of 0 pages
+  if (totalItems === 0) {
+    queuePaginationState.currentPage = 1;
+  } else if (queuePaginationState.currentPage > queuePaginationState.totalPages) {
+    queuePaginationState.currentPage = queuePaginationState.totalPages;
+  }
+  
+  // Get items for current page
+  const startIdx = (queuePaginationState.currentPage - 1) * queuePaginationState.pageSize;
+  const endIdx = startIdx + queuePaginationState.pageSize;
+  const pageItems = items.slice(startIdx, endIdx);
+  
+  // Render only items on current page
+  const cards = pageItems.map((job) => {
     return `
       <div class="queue-card">
         <div class="queue-row">
@@ -7612,7 +7714,52 @@ function renderQueue(queue) {
     `;
   }).join('');
   queueList.innerHTML = cards;
+  
+  // Render pagination controls
+  renderQueuePagination(totalItems);
 }
+
+function renderQueuePagination(totalItems) {
+  const pagerEl = document.getElementById('queue-pagination');
+  if (!pagerEl) return;
+  
+  // Don't show pagination if only one page
+  if (queuePaginationState.totalPages <= 1) {
+    pagerEl.innerHTML = '';
+    return;
+  }
+  
+  const state = queuePaginationState;
+  pagerEl.innerHTML = `
+    <span class="page-info">Showing ${(state.currentPage - 1) * state.pageSize + 1}-${Math.min(state.currentPage * state.pageSize, totalItems)} of ${totalItems} queued jobs</span>
+    <button data-queue-page-action="first" ${state.currentPage === 1 ? 'disabled' : ''}>&laquo;</button>
+    <button data-queue-page-action="prev" ${state.currentPage === 1 ? 'disabled' : ''}>&lsaquo;</button>
+    <span>Page ${state.currentPage} / ${state.totalPages}</span>
+    <button data-queue-page-action="next" ${state.currentPage === state.totalPages ? 'disabled' : ''}>&rsaquo;</button>
+    <button data-queue-page-action="last" ${state.currentPage === state.totalPages ? 'disabled' : ''}>&raquo;</button>
+  `;
+}
+
+// Handle queue pagination clicks
+// Note: Using document-level event delegation because pagination buttons are dynamically rendered
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-queue-page-action]');
+  if (!btn) return;
+  
+  const action = btn.getAttribute('data-queue-page-action');
+  if (action === 'prev') {
+    queuePaginationState.currentPage = Math.max(1, queuePaginationState.currentPage - 1);
+  } else if (action === 'next') {
+    queuePaginationState.currentPage = Math.min(queuePaginationState.totalPages, queuePaginationState.currentPage + 1);
+  } else if (action === 'first') {
+    queuePaginationState.currentPage = 1;
+  } else if (action === 'last') {
+    queuePaginationState.currentPage = queuePaginationState.totalPages;
+  }
+  
+  // Re-render queue with new page - latestQueuedJobs is already from API
+  renderQueue(latestQueuedJobs);
+});
 
 function renderOverviewTargets(targets) {
   const entries = Object.entries(targets || {});
