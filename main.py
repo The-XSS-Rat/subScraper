@@ -5383,6 +5383,7 @@ def capture_screenshots(
     run_started = time.time()
     cmd = [
         TOOLS["gowitness"],
+        "scan",
         "file",
         "-f", str(target_file),
         "-P", str(dest_dir),
