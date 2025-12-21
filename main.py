@@ -4369,6 +4369,67 @@ def parse_amass_json(json_path: Path) -> List[str]:
     return sorted(subs)
 
 
+def strip_ansi_codes(text: str) -> str:
+    """
+    Remove ANSI escape sequences (color codes, formatting) from text.
+    This handles common terminal color codes that tools like sublist3r add to output.
+    """
+    # Pattern matches ANSI escape sequences including CSI sequences
+    # \x1b is ESC (hex), \033 is ESC (octal)
+    # Matches standard ANSI control sequences ending in A-Za-z
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\033\[[0-9;]*[A-Za-z]')
+    return ansi_escape.sub('', text)
+
+
+def is_valid_subdomain(text: str) -> bool:
+    """
+    Validate that a string looks like a valid domain or subdomain.
+    Returns False for ANSI codes, error messages, status messages, etc.
+    """
+    if not text:
+        return False
+    
+    # Strip ANSI codes first
+    cleaned = strip_ansi_codes(text).strip()
+    if not cleaned:
+        return False
+    
+    # Reject lines that are clearly not domains
+    # Check for common patterns in tool output that shouldn't be domains
+    invalid_patterns = [
+        r'^\[',  # Starts with bracket (ANSI remnants, arrays, etc.)
+        r'^\]',  # Starts with closing bracket
+        r'^[-\+#]',  # Starts with status symbols (but not * for wildcards)
+        r'error|Error|ERROR',  # Contains error keywords
+        r'warning|Warning|WARNING',  # Contains warning keywords
+        r'searching|enumerat|finish|coded by',  # Tool status messages
+        r'^\s*$',  # Empty or whitespace only
+        r'\s{2,}',  # Multiple consecutive spaces (likely formatted output)
+        r'^[0-9]+\s',  # Starts with number and space (table rows)
+        r'^\||^-+$|^\++$',  # Table borders
+        r'^http://|^https://',  # URLs (not raw domains)
+        r'[ \t\r\n\f\v]',  # Contains ASCII whitespace (domains don't have spaces)
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.search(pattern, cleaned, re.IGNORECASE):
+            return False
+    
+    # Basic domain validation: should contain at least one dot and valid chars
+    # Valid domain characters: alphanumeric, dots, hyphens, underscores
+    # Must contain at least one dot (subdomain.domain or domain.tld)
+    if '.' not in cleaned:
+        return False
+    
+    # Check if it looks like a domain (alphanumeric with dots, hyphens, underscores)
+    # Allow wildcards at the start (*.example.com)
+    domain_pattern = r'^(\*\.)?[a-z0-9]([a-z0-9\-_]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-_]*[a-z0-9])?)+$'
+    if not re.match(domain_pattern, cleaned, re.IGNORECASE):
+        return False
+    
+    return True
+
+
 def read_lines_file(path: Path) -> List[str]:
     if not path or not path.exists():
         return []
@@ -4378,7 +4439,10 @@ def read_lines_file(path: Path) -> List[str]:
             for line in f:
                 line = line.strip()
                 if line:
-                    lines.append(line.lower())
+                    # Strip ANSI codes and validate
+                    cleaned = strip_ansi_codes(line).strip()
+                    if cleaned and is_valid_subdomain(cleaned):
+                        lines.append(cleaned.lower())
     except Exception as exc:
         log(f"Error reading {path}: {exc}")
     return lines
