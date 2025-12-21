@@ -2575,7 +2575,6 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         "max_parallel_ffuf": "FFUF parallel slots",
         "max_parallel_waybackurls": "Waybackurls parallel slots",
         "max_parallel_gau": "GAU parallel slots",
-        "max_parallel_nmap": "Nmap parallel slots",
         "max_parallel_nuclei": "Nuclei parallel slots",
         "max_parallel_nikto": "Nikto parallel slots",
         "max_parallel_gowitness": "Screenshot parallel slots",
@@ -3530,7 +3529,7 @@ def run_setup_wizard() -> None:
     print("   All required tools should be installed automatically.")
     print("   If any tool is missing, install it manually:")
     print("   - amass, subfinder, assetfinder, findomain, sublist3r")
-    print("   - ffuf, httpx, nuclei, nikto, gowitness, nmap")
+    print("   - ffuf, httpx, nuclei, nikto, gowitness")
     print("   - waybackurls, gau, dnsx")
     
     print("\n2. INSTALL PYTHON DEPENDENCIES (if not already done)")
@@ -5152,7 +5151,6 @@ def make_subdomain_entry() -> Dict[str, Any]:
         "httpx": None,
         "nuclei": [],
         "nikto": [],
-        "nmap": None,
         "screenshot": None,
         "scans": {},
     }
@@ -5172,7 +5170,6 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
             "ffuf_done": False,
             "httpx_done": False,
             "screenshots_done": False,
-            "nmap_done": False,
             "nuclei_done": False,
             "nikto_done": False,
         }
@@ -5183,7 +5180,7 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
     tgt.setdefault("flags", {})
     tgt.setdefault("options", {})
     for k in ["amass_done", "subfinder_done", "assetfinder_done", "findomain_done", "sublist3r_done",
-              "ffuf_done", "httpx_done", "screenshots_done", "nmap_done", "nuclei_done", "nikto_done"]:
+              "ffuf_done", "httpx_done", "screenshots_done", "nuclei_done", "nikto_done"]:
         tgt["flags"].setdefault(k, False)
     for sub, entry in list(tgt["subdomains"].items()):
         if not isinstance(entry, dict):
@@ -5193,7 +5190,6 @@ def ensure_target_state(state: Dict[str, Any], domain: str) -> Dict[str, Any]:
         entry.setdefault("httpx", None)
         entry.setdefault("nuclei", [])
         entry.setdefault("nikto", [])
-        entry.setdefault("nmap", None)
         entry.setdefault("screenshot", None)
         entry.setdefault("scans", {})
     return tgt
@@ -6913,9 +6909,6 @@ button:hover { background:#1d4ed8; }
               </label>
               
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">Scanning & Analysis Tools</h5>
-              <label>Nmap parallel slots
-                <input id="settings-nmap" type="number" name="max_parallel_nmap" min="1" />
-              </label>
               <label>Nuclei parallel slots
                 <input id="settings-nuclei" type="number" name="max_parallel_nuclei" min="1" />
               </label>
@@ -7032,9 +7025,6 @@ button:hover { background:#1d4ed8; }
                 </label>
                 <label>Screenshot flags (gowitness)
                   <textarea id="template-gowitness" class="template-input" placeholder=""></textarea>
-                </label>
-                <label>Nmap flags
-                  <textarea id="template-nmap" class="template-input" placeholder=""></textarea>
                 </label>
               </div>
               <p class="template-note">Tip: leave a field blank to use the built-in defaults. Need examples? Visit the User Guide from the sidebar.</p>
@@ -7203,7 +7193,6 @@ const settingsHttpx = document.getElementById('settings-httpx');
 const settingsFFUF = document.getElementById('settings-ffuf');
 const settingsWaybackurls = document.getElementById('settings-waybackurls');
 const settingsGau = document.getElementById('settings-gau');
-const settingsNmap = document.getElementById('settings-nmap');
 const settingsNuclei = document.getElementById('settings-nuclei');
 const settingsNikto = document.getElementById('settings-nikto');
 const settingsGowitness = document.getElementById('settings-gowitness');
@@ -7238,7 +7227,6 @@ const templateInputs = {
   nuclei: document.getElementById('template-nuclei'),
   nikto: document.getElementById('template-nikto'),
   gowitness: document.getElementById('template-gowitness'),
-  nmap: document.getElementById('template-nmap'),
 };
 const monitorForm = document.getElementById('monitor-form');
 const monitorName = document.getElementById('monitor-name');
@@ -7277,7 +7265,6 @@ const STEP_SEQUENCE = [
   { flag: 'waybackurls_done', label: 'Waybackurls' },
   { flag: 'gau_done', label: 'GAU' },
   { flag: 'screenshots_done', label: 'Screenshots', skipWhen: () => latestConfig.enable_screenshots === false },
-  { flag: 'nmap_done', label: 'nmap' },
   { flag: 'nuclei_done', label: 'Nuclei' },
   { flag: 'nikto_done', label: 'Nikto', skipWhen: (info) => shouldSkipNikto(info) },
 ];
@@ -7493,8 +7480,8 @@ function linkifyLogText(text) {
   // Escape the text first
   const escaped = escapeHtml(text || '');
   
-  // Pattern to match result file names (nikto_*.json, nuclei_*.json, nmap_*.json, etc.)
-  const filePattern = /(nikto_[a-zA-Z0-9._-]+\.json|nuclei_[a-zA-Z0-9._-]+\.json|nmap_[a-zA-Z0-9._-]+\.json|httpx_[a-zA-Z0-9._-]+\.json|ffuf_[a-zA-Z0-9._-]+\.json)/g;
+  // Pattern to match result file names (nikto_*.json, nuclei_*.json, httpx_*.json, etc.)
+  const filePattern = /(nikto_[a-zA-Z0-9._-]+\.json|nuclei_[a-zA-Z0-9._-]+\.json|httpx_[a-zA-Z0-9._-]+\.json|ffuf_[a-zA-Z0-9._-]+\.json)/g;
   
   // Replace file references with download links
   return escaped.replace(filePattern, (match) => {
@@ -7859,7 +7846,6 @@ function renderTargets(targets) {
       <span class="badge">Wayback: ${flags.waybackurls_done ? '✅' : '⏳'}</span>
       <span class="badge">GAU: ${flags.gau_done ? '✅' : '⏳'}</span>
       <span class="badge">Screenshots: ${flags.screenshots_done ? '✅' : '⏳'}</span>
-      <span class="badge">nmap: ${flags.nmap_done ? '✅' : '⏳'}</span>
       <span class="badge">nuclei: ${flags.nuclei_done ? '✅' : '⏳'}</span>
       <span class="badge">nikto: ${flags.nikto_done ? '✅' : '⏳'}</span>
     `;
@@ -8197,19 +8183,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Port Scanning</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool scanning">Nmap</span>
-      </div>
-      <div class="workflow-description">Port and service detection on hosts with live HTTP services</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 7: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
@@ -10105,7 +10079,6 @@ function renderSettings(config, tools) {
     settingsFFUF.value = config.max_parallel_ffuf || 1;
     settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
     settingsGau.value = config.max_parallel_gau || 1;
-    settingsNmap.value = config.max_parallel_nmap || 1;
     settingsNuclei.value = config.max_parallel_nuclei || 1;
     settingsNikto.value = config.max_parallel_nikto || 1;
     settingsGowitness.value = config.max_parallel_gowitness || 1;
@@ -10269,7 +10242,6 @@ if (settingsForm) {
         max_parallel_ffuf: settingsFFUF ? settingsFFUF.value : '',
         max_parallel_waybackurls: settingsWaybackurls ? settingsWaybackurls.value : '',
         max_parallel_gau: settingsGau ? settingsGau.value : '',
-        max_parallel_nmap: settingsNmap ? settingsNmap.value : '',
         max_parallel_nuclei: settingsNuclei ? settingsNuclei.value : '',
         max_parallel_nikto: settingsNikto ? settingsNikto.value : '',
         max_parallel_gowitness: settingsGowitness ? settingsGowitness.value : '',
@@ -11832,7 +11804,6 @@ function renderDomainDetail(info) {{
     waybackurls_done: 'Wayback URLs',
     gau_done: 'GAU',
     screenshots_done: 'Screenshots',
-    nmap_done: 'Nmap',
     nuclei_done: 'Nuclei',
     nikto_done: 'Nikto'
   }};
@@ -12096,7 +12067,6 @@ function renderSubdomainDetail(info, history) {{
   const screenshot = info.screenshot || {{}};
   const nuclei = info.nuclei || [];
   const nikto = info.nikto || [];
-  const nmap = info.nmap || {{}};
   const interesting = info.interesting;
   const comments = info.comments || [];
   
@@ -12161,39 +12131,6 @@ function renderSubdomainDetail(info, history) {{
       ` : '<p class="muted">No screenshot available</p>'}}
     </div>
   `;
-  
-  // Nmap section
-  html += `<div class="section"><h2>Nmap Scan Results</h2>`;
-  if (nmap && nmap.ports && nmap.ports.length) {{
-    html += `
-      <table>
-        <thead>
-          <tr>
-            <th>Port</th>
-            <th>Protocol</th>
-            <th>State</th>
-            <th>Service</th>
-            <th>Version</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${{nmap.ports.map(port => `
-            <tr>
-              <td>${{escapeHtml(String(port.port || '—'))}}</td>
-              <td>${{escapeHtml(port.protocol || '—')}}</td>
-              <td><span class="badge" style="background: ${{port.state === 'open' ? '#10b981' : '#64748b'}}">${{escapeHtml(port.state || '—')}}</span></td>
-              <td>${{escapeHtml(port.service || '—')}}</td>
-              <td>${{escapeHtml(port.version || '—')}}</td>
-            </tr>
-          `).join('')}}
-        </tbody>
-      </table>
-      ${{nmap.scan_time ? `<p class="muted" style="margin-top: 12px;">Scanned ${{fmtTime(nmap.scan_time)}}</p>` : ''}}
-    `;
-  }} else {{
-    html += '<p class="muted">No Nmap scan data available</p>';
-  }}
-  html += '</div>';
   
   // Nuclei section
   html += `<div class="section"><h2>Nuclei Findings (${{nuclei.length}})</h2>`;
@@ -12873,7 +12810,7 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
                 return
             
             # Security: only allow JSON files with specific prefixes
-            allowed_prefixes = ["nikto_", "nuclei_", "nmap_", "httpx_", "ffuf_"]
+            allowed_prefixes = ["nikto_", "nuclei_", "httpx_", "ffuf_"]
             if not any(rel_path.startswith(prefix) and rel_path.endswith(".json") for prefix in allowed_prefixes):
                 self.send_error(HTTPStatus.FORBIDDEN, "Forbidden")
                 return
