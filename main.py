@@ -10531,10 +10531,37 @@ function renderSettings(config, tools) {
   }
 }
 
+
+
+// Store last ETag for caching
+let lastStateETag = null;
+
 async function fetchState() {
   try {
-    const resp = await fetch('/api/state');
+    // Build request with ETag support for caching
+    const headers = {};
+    if (lastStateETag) {
+      headers['If-None-Match'] = lastStateETag;
+    }
+    
+    const resp = await fetch('/api/state', { headers });
+    
+    // Check for 304 Not Modified - no need to update
+    if (resp.status === 304) {
+      // Data unchanged, just update timestamp
+      const now = new Date().toISOString();
+      document.getElementById('last-updated').textContent = 'Last updated: ' + now + ' (cached)';
+      return;
+    }
+    
     if (!resp.ok) throw new Error('Failed to fetch state');
+    
+    // Store new ETag for next request
+    const etag = resp.headers.get('ETag');
+    if (etag) {
+      lastStateETag = etag;
+    }
+    
     const data = await resp.json();
     latestConfig = data.config || {};
     latestRunningJobs = data.running_jobs || [];
