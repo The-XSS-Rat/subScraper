@@ -4377,8 +4377,7 @@ def strip_ansi_codes(text: str) -> str:
     # Pattern matches ANSI escape sequences including CSI sequences
     # \x1b is ESC (hex), \033 is ESC (octal)
     # Matches standard ANSI control sequences ending in A-Za-z
-    # Also matches simpler bracket sequences like [91m, [0m
-    ansi_escape = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\033\[[0-9;]*[A-Za-z]|\[\d+m')
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\033\[[0-9;]*[A-Za-z]')
     return ansi_escape.sub('', text)
 
 
