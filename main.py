@@ -2664,6 +2664,24 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
         if cfg.get("auto_backup_max_count", 10) != new_count:
             cfg["auto_backup_max_count"] = new_count
             changed = True
+    
+    # Handle custom tool binary paths
+    if "tool_binary_paths" in values:
+        new_paths = values.get("tool_binary_paths", {})
+        if isinstance(new_paths, dict):
+            # Validate that paths exist
+            validated_paths = {}
+            for tool, path in new_paths.items():
+                if tool in TOOLS and path:
+                    path_obj = Path(path)
+                    if path_obj.exists():
+                        validated_paths[tool] = str(path_obj.resolve())
+                    else:
+                        log(f"Warning: Custom path for {tool} does not exist: {path}")
+            
+            if cfg.get("tool_binary_paths", {}) != validated_paths:
+                cfg["tool_binary_paths"] = validated_paths
+                changed = True
 
     if changed:
         save_config(cfg)
@@ -2976,6 +2994,23 @@ def _validate_tool_binary(tool: str, path_str: str) -> bool:
 
 
 def _resolve_tool_path(tool: str) -> Optional[str]:
+    """
+    Resolve the path to a tool binary, checking custom paths first,
+    then standard locations.
+    """
+    # Check custom binary paths from config first
+    config = get_config()
+    custom_paths = config.get("tool_binary_paths", {})
+    if tool in custom_paths:
+        custom_path = custom_paths[tool]
+        if custom_path and Path(custom_path).exists():
+            if _validate_tool_binary(tool, custom_path):
+                log(f"Using custom binary path for {tool}: {custom_path}")
+                return custom_path
+            else:
+                log(f"Custom path for {tool} at {custom_path} failed validation. Trying standard locations.")
+    
+    # Fall back to standard tool resolution
     exe = TOOLS[tool]
     candidates = _candidate_tool_paths(exe)
     for cand in candidates:
@@ -2989,6 +3024,261 @@ def _resolve_tool_path(tool: str) -> Optional[str]:
         else:
             log(f"Found {tool} at {cand} but it does not look like the expected binary. Ignoring.")
     return None
+
+
+def get_tool_installation_instructions(tool: str) -> str:
+    """
+    Get detailed installation instructions for a specific tool.
+    Returns a formatted string with OS-specific installation commands.
+    """
+    instructions = {
+        "amass": """
+AMASS - OWASP Amass Subdomain Enumeration
+==========================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y amass
+
+macOS (Homebrew):
+  brew install amass
+
+From Source (requires Go 1.19+):
+  go install -v github.com/owasp-amass/amass/v3/...@latest
+  # Binary will be in: ~/go/bin/amass or $GOPATH/bin/amass
+
+Official Releases:
+  https://github.com/OWASP/Amass/releases
+  Download the binary for your platform and add to PATH
+""",
+        "subfinder": """
+SUBFINDER - ProjectDiscovery Subdomain Discovery
+=================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y subfinder
+
+macOS (Homebrew):
+  brew install subfinder
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+  # Binary will be in: ~/go/bin/subfinder or $GOPATH/bin/subfinder
+
+Official Releases:
+  https://github.com/projectdiscovery/subfinder/releases
+  Download the binary for your platform and add to PATH
+""",
+        "assetfinder": """
+ASSETFINDER - Find domains and subdomains
+==========================================
+
+From Source (requires Go 1.19+):
+  go install github.com/tomnomnom/assetfinder@latest
+  # Binary will be in: ~/go/bin/assetfinder or $GOPATH/bin/assetfinder
+
+Official Repository:
+  https://github.com/tomnomnom/assetfinder
+""",
+        "findomain": """
+FINDOMAIN - Fast subdomain enumeration
+=======================================
+
+Ubuntu/Debian:
+  # Download latest release
+  wget https://github.com/Findomain/Findomain/releases/latest/download/findomain-linux
+  chmod +x findomain-linux
+  sudo mv findomain-linux /usr/local/bin/findomain
+
+macOS (Homebrew):
+  brew install findomain
+
+Windows:
+  # Download from: https://github.com/Findomain/Findomain/releases
+  # Add to PATH
+
+Official Repository:
+  https://github.com/Findomain/Findomain
+""",
+        "sublist3r": """
+SUBLIST3R - Python subdomain enumeration
+=========================================
+
+Using pip:
+  pip install sublist3r
+  # OR
+  pip3 install sublist3r
+
+From Source:
+  git clone https://github.com/aboul3la/Sublist3r.git
+  cd Sublist3r
+  pip install -r requirements.txt
+  python sublist3r.py --help
+
+Ubuntu/Debian:
+  sudo apt-get install -y sublist3r
+
+Official Repository:
+  https://github.com/aboul3la/Sublist3r
+""",
+        "dnsx": """
+DNSX - Fast and multi-purpose DNS toolkit
+==========================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y dnsx
+
+macOS (Homebrew):
+  brew install dnsx
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+  # Binary will be in: ~/go/bin/dnsx or $GOPATH/bin/dnsx
+
+Official Releases:
+  https://github.com/projectdiscovery/dnsx/releases
+  Download the binary for your platform and add to PATH
+""",
+        "ffuf": """
+FFUF - Fast web fuzzer
+======================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y ffuf
+
+macOS (Homebrew):
+  brew install ffuf
+
+From Source (requires Go 1.19+):
+  go install github.com/ffuf/ffuf@latest
+  # Binary will be in: ~/go/bin/ffuf or $GOPATH/bin/ffuf
+
+Official Releases:
+  https://github.com/ffuf/ffuf/releases
+  Download the binary for your platform and add to PATH
+""",
+        "httpx": """
+HTTPX - Fast HTTP toolkit from ProjectDiscovery
+================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y httpx-toolkit
+
+macOS (Homebrew):
+  brew install httpx
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+  # Binary will be in: ~/go/bin/httpx or $GOPATH/bin/httpx
+
+Official Releases:
+  https://github.com/projectdiscovery/httpx/releases
+  Download the binary for your platform and add to PATH
+
+Note: Make sure you have ProjectDiscovery's httpx, not the Python httpx client!
+""",
+        "waybackurls": """
+WAYBACKURLS - Fetch URLs from the Wayback Machine
+==================================================
+
+From Source (requires Go 1.19+):
+  go install github.com/tomnomnom/waybackurls@latest
+  # Binary will be in: ~/go/bin/waybackurls or $GOPATH/bin/waybackurls
+
+Official Repository:
+  https://github.com/tomnomnom/waybackurls
+""",
+        "gau": """
+GAU - Get All URLs from various sources
+========================================
+
+From Source (requires Go 1.19+):
+  go install github.com/lc/gau/v2/cmd/gau@latest
+  # Binary will be in: ~/go/bin/gau or $GOPATH/bin/gau
+
+Official Releases:
+  https://github.com/lc/gau/releases
+  Download the binary for your platform and add to PATH
+""",
+        "nuclei": """
+NUCLEI - Fast vulnerability scanner from ProjectDiscovery
+==========================================================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y nuclei
+
+macOS (Homebrew):
+  brew install nuclei
+
+From Source (requires Go 1.19+):
+  go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+  # Binary will be in: ~/go/bin/nuclei or $GOPATH/bin/nuclei
+
+Official Releases:
+  https://github.com/projectdiscovery/nuclei/releases
+  Download the binary for your platform and add to PATH
+""",
+        "nikto": """
+NIKTO - Web server scanner
+===========================
+
+Ubuntu/Debian:
+  sudo apt-get update && sudo apt-get install -y nikto
+
+macOS (Homebrew):
+  brew install nikto
+
+From Source:
+  git clone https://github.com/sullo/nikto
+  cd nikto/program
+  perl nikto.pl --help
+
+Official Repository:
+  https://github.com/sullo/nikto
+
+Note: Nikto requires Perl to be installed
+""",
+        "gowitness": """
+GOWITNESS - Web screenshot tool
+================================
+
+macOS (Homebrew):
+  brew install gowitness
+
+From Source (requires Go 1.19+):
+  go install github.com/sensepost/gowitness@latest
+  # Binary will be in: ~/go/bin/gowitness or $GOPATH/bin/gowitness
+
+Official Releases:
+  https://github.com/sensepost/gowitness/releases
+  Download the binary for your platform and add to PATH
+
+Note: gowitness requires Chrome/Chromium to be installed for screenshots
+""",
+        "github-subdomains": """
+GITHUB-SUBDOMAINS - Find subdomains on GitHub
+==============================================
+
+From Source (requires Go 1.19+):
+  go install github.com/gwen001/github-subdomains@latest
+  # Binary will be in: ~/go/bin/github-subdomains or $GOPATH/bin/github-subdomains
+
+Official Repository:
+  https://github.com/gwen001/github-subdomains
+
+Note: Requires GitHub API token for best results
+""",
+        "crtsh": """
+CRT.SH - Certificate Transparency Log Search (API-based)
+=========================================================
+
+This is a virtual tool that uses the crt.sh API.
+No installation required - it works via HTTP requests.
+
+API Endpoint: https://crt.sh/?q=%25.example.com&output=json
+""",
+    }
+    
+    return instructions.get(tool, f"No detailed installation instructions available for {tool}")
 
 
 def ensure_tool_installed(tool: str) -> bool:
@@ -3074,10 +3364,10 @@ def ensure_tool_installed(tool: str) -> bool:
         TOOLS[tool] = "crtsh"  # Virtual tool
         return True
 
-    log(
-        f"Could not auto-install {tool}. Please install it manually and re-run. "
-        f"Checked binary name: {exe}"
-    )
+    # Print detailed installation instructions
+    log(f"Could not auto-install {tool}. Please install it manually.")
+    log(f"Installation instructions for {tool}:")
+    print("\n" + get_tool_installation_instructions(tool))
     return False
 
 
@@ -4413,48 +4703,48 @@ def run_downstream_pipeline(
 
     # ---------- nuclei ----------
     nuclei_processed: set = set()
-        while True:
-            state = load_state()
-            tgt_state = ensure_target_state(state, domain)
-            flags = tgt_state["flags"]
-            submap = tgt_state["subdomains"]
-            new_hosts = [
-                host for host in sorted(submap.keys())
-                if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
-            ]
-            if not flags.get("nuclei_done") and not nuclei_processed:
-                log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
-            if not new_hosts:
-                if enumerators_done_event.is_set():
-                    flags["nuclei_done"] = True
-                    save_state(state)
-                    update_step("nuclei", status="completed", message="nuclei scan finished.", progress=100)
-                    break
-                job_sleep(job_domain, 5)
-                continue
-            update_step("nuclei", status="running", message=f"nuclei scanning {len(new_hosts)} pending hosts", progress=40)
-            batch_file = write_subdomains_file(domain, new_hosts, suffix="_nuclei_batch")
-            if job_domain:
-                job_log_append(job_domain, "Waiting for nuclei slot...", "scheduler")
-            with TOOL_GATES["nuclei"]:
-                if job_domain:
-                    job_log_append(job_domain, "nuclei slot acquired.", "scheduler")
-                nuclei_json = nuclei_scan(batch_file, domain, config=config, job_domain=job_domain)
-            try:
-                batch_file.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-            if not nuclei_json:
-                job_log_append(job_domain, "nuclei batch failed.", "nuclei")
-                update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
+    while True:
+        state = load_state()
+        tgt_state = ensure_target_state(state, domain)
+        flags = tgt_state["flags"]
+        submap = tgt_state["subdomains"]
+        new_hosts = [
+            host for host in sorted(submap.keys())
+            if host not in nuclei_processed and not (submap.get(host) or {}).get("scans", {}).get("nuclei")
+        ]
+        if not flags.get("nuclei_done") and not nuclei_processed:
+            log(f"=== nuclei scan for {domain} ({len(submap)} hosts tracked) ===")
+        if not new_hosts:
+            if enumerators_done_event.is_set():
+                flags["nuclei_done"] = True
+                save_state(state)
+                update_step("nuclei", status="completed", message="nuclei scan finished.", progress=100)
                 break
-            enrich_state_with_nuclei(state, domain, nuclei_json)
-            mark_hosts_scanned(state, domain, new_hosts, "nuclei")
-            nuclei_processed.update(new_hosts)
-            save_state(state)
-            job_log_append(job_domain, f"nuclei processed {len(new_hosts)} hosts.", "nuclei")
+            job_sleep(job_domain, 5)
+            continue
+        update_step("nuclei", status="running", message=f"nuclei scanning {len(new_hosts)} pending hosts", progress=40)
+        batch_file = write_subdomains_file(domain, new_hosts, suffix="_nuclei_batch")
+        if job_domain:
+            job_log_append(job_domain, "Waiting for nuclei slot...", "scheduler")
+        with TOOL_GATES["nuclei"]:
+            if job_domain:
+                job_log_append(job_domain, "nuclei slot acquired.", "scheduler")
+            nuclei_json = nuclei_scan(batch_file, domain, config=config, job_domain=job_domain)
+        try:
+            batch_file.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        if not nuclei_json:
+            job_log_append(job_domain, "nuclei batch failed.", "nuclei")
+            update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
+            break
+        enrich_state_with_nuclei(state, domain, nuclei_json)
+        mark_hosts_scanned(state, domain, new_hosts, "nuclei")
+        nuclei_processed.update(new_hosts)
+        save_state(state)
+        job_log_append(job_domain, f"nuclei processed {len(new_hosts)} hosts.", "nuclei")
 
     state = load_state()
     flags = ensure_target_state(state, domain)["flags"]
