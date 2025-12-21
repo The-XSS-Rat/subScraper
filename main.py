@@ -11741,7 +11741,168 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
     return True, f"{normalized} queued; it will start when a worker is free."
 
 
+def build_state_payload_summary() -> Dict[str, Any]:
+    """
+    Build a lightweight state payload with minimal subdomain data.
+    This is much faster than build_state_payload() for large datasets.
+    
+    For each target, includes lightweight subdomain entries with only:
+    - subdomain name
+    - sources
+    - httpx summary (status_code, title, webserver only)
+    - nuclei/nikto finding counts (not full details)
+    - screenshot path (not full metadata)
+    
+    This allows the dashboard to render basic views without loading full data.
+    """
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT domain, flags, options, comments FROM targets")
+    target_rows = cursor.fetchall()
+    
+    config = get_config()
+    targets = {}
+    
+    for row in target_rows:
+        domain = row[0]
+        flags = json.loads(row[1]) if row[1] else {}
+        options = json.loads(row[2]) if row[2] else {}
+        target_comments = json.loads(row[3]) if row[3] else []
+        
+        # Load subdomain data but only extract essential fields
+        cursor.execute(
+            "SELECT subdomain, data, interesting, comments FROM subdomains WHERE domain = ?",
+            (domain,)
+        )
+        subdomain_rows = cursor.fetchall()
+        
+        subdomains = {}
+        for sub_row in subdomain_rows:
+            subdomain = sub_row[0]
+            try:
+                full_data = json.loads(sub_row[1])
+                
+                # Extract only lightweight fields
+                lightweight_data = {
+                    "sources": full_data.get("sources", []),
+                }
+                
+                # Add minimal httpx data
+                if "httpx" in full_data:
+                    httpx = full_data["httpx"]
+                    lightweight_data["httpx"] = {
+                        "status_code": httpx.get("status_code"),
+                        "title": httpx.get("title", ""),
+                        "webserver": httpx.get("webserver", httpx.get("server", "")),
+                    }
+                
+                # Add nuclei/nikto counts only (not full findings)
+                nuclei = full_data.get("nuclei", [])
+                if nuclei:
+                    lightweight_data["nuclei"] = nuclei  # Keep for severity calculation
+                
+                nikto = full_data.get("nikto", [])
+                if nikto:
+                    lightweight_data["nikto"] = nikto  # Keep for counts
+                
+                # Add screenshot path only
+                if "screenshot" in full_data:
+                    screenshot = full_data["screenshot"]
+                    lightweight_data["screenshot"] = {
+                        "path": screenshot.get("path")
+                    }
+                
+                # Add interesting flag
+                if sub_row[2] is not None:
+                    lightweight_data["interesting"] = bool(sub_row[2])
+                
+                subdomains[subdomain] = lightweight_data
+                
+            except json.JSONDecodeError:
+                subdomains[subdomain] = {}
+        
+        # Build target entry
+        target_data = {
+            "subdomains": subdomains,
+            "flags": flags,
+            "options": options,
+            "comments": target_comments,
+        }
+        
+        # Calculate pending status
+        try:
+            target_data["pending"] = target_has_pending_work(target_data, config)
+        except Exception:
+            target_data["pending"] = True
+        
+        targets[domain] = target_data
+    
+    # Load completed jobs  and merge with active targets
+    completed_jobs = load_completed_jobs()
+    for job_key, job_data in completed_jobs.items():
+        domain = job_key.rsplit("_", 1)[0] if "_" in job_key else job_key
+        
+        if domain in targets:
+            # Add completion timestamp to active target
+            if not targets[domain].get("completed_at"):
+                targets[domain]["completed_at"] = job_data.get("completed_at")
+        else:
+            # Domain not in active targets - create minimal entry from completed job
+            # For completed jobs not in active state, include minimal lightweight data
+            state_data = job_data.get("state", {})
+            subdomains = state_data.get("subdomains", {})
+            
+            # Create lightweight subdomain entries for completed jobs too
+            lightweight_subs = {}
+            for sub, sub_data in list(subdomains.items())[:100]:  # Limit to first 100 for completed jobs
+                lightweight_subs[sub] = {
+                    "sources": sub_data.get("sources", []),
+                    "httpx": {
+                        "status_code": sub_data.get("httpx", {}).get("status_code"),
+                        "title": sub_data.get("httpx", {}).get("title", ""),
+                        "webserver": sub_data.get("httpx", {}).get("webserver", ""),
+                    } if sub_data.get("httpx") else {},
+                    "nuclei": sub_data.get("nuclei", []),
+                    "nikto": sub_data.get("nikto", []),
+                    "screenshot": {
+                        "path": sub_data.get("screenshot", {}).get("path")
+                    } if sub_data.get("screenshot") else {},
+                }
+            
+            targets[domain] = {
+                "subdomains": lightweight_subs,
+                "flags": state_data.get("flags", {}),
+                "options": job_data.get("options", {}),
+                "comments": [],
+                "completed_at": job_data.get("completed_at"),
+                "pending": False,
+                "from_completed_jobs": True,
+            }
+    
+    # Get last updated time
+    cursor.execute("SELECT MAX(updated_at) FROM targets")
+    last_updated_row = cursor.fetchone()
+    last_updated = last_updated_row[0] if last_updated_row and last_updated_row[0] else None
+    
+    tool_info = {name: shutil.which(cmd) or "" for name, cmd in TOOLS.items()}
+    return {
+        "last_updated": last_updated,
+        "targets": targets,
+        "running_jobs": snapshot_running_jobs(),
+        "queued_jobs": job_queue_snapshot(),
+        "config": config,
+        "tools": tool_info,
+        "workers": snapshot_workers(),
+        "monitors": list_monitors(),
+    }
+
+
 def build_state_payload() -> Dict[str, Any]:
+    """
+    Build complete state payload with all subdomain details.
+    This is slower but includes full information.
+    Use this for exports and detail pages only.
+    """
     state = load_state()
     config = get_config()
     targets = state.get("targets", {})
@@ -13191,8 +13352,20 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Invalid request")
             return
         
-        if self.path == "/api/state":
-            self._send_json(build_state_payload())
+        if self.path.startswith("/api/state"):
+            # Parse query parameters
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            full = params.get("full", ["false"])[0].lower() in ("true", "1", "yes")
+            
+            # Use summary by default for better performance
+            # Full data only when explicitly requested
+            if full:
+                payload = build_state_payload()
+            else:
+                payload = build_state_payload_summary()
+            
+            self._send_json(payload)
             return
         if self.path == "/api/settings":
             self._send_json({"config": get_config()})
