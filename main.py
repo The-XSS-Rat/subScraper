@@ -5233,6 +5233,9 @@ def ffuf_bruteforce(
     """
     Use ffuf to brute-force vhosts via Host header.
     This is HTTP-based vhost brute, not pure DNS brute, but still useful.
+    
+    Only returns subdomains that are properly formatted as valid subdomains.
+    ffuf is configured via -mc to only return specific status codes (200, 301, 302, 403, 401).
     """
     if not ensure_tool_installed("ffuf"):
         return []
@@ -5264,12 +5267,25 @@ def ffuf_bruteforce(
     subs = set()
     try:
         data = json.loads(out_json.read_text(encoding="utf-8"))
+        invalid_count = 0
         for r in data.get("results", []):
-            host = r.get("host") or r.get("url")
-            if host:
-                # ffuf may show host as FUZZ.domain.tld
-                host = host.replace("https://", "").replace("http://", "").split("/")[0]
-                subs.add(host.lower())
+            raw_host = r.get("host") or r.get("url")
+            if raw_host:
+                # ffuf may show host as FUZZ.domain.tld - clean and normalize it
+                host = raw_host.replace("https://", "").replace("http://", "").split("/")[0].lower()
+                
+                # Validate subdomain format before adding
+                # This filters out invalid entries from wordlist (comments, malformed names, etc.)
+                if is_valid_subdomain(host):
+                    subs.add(host)
+                else:
+                    invalid_count += 1
+        
+        if invalid_count > 0:
+            msg = f"Filtered out {invalid_count} invalid subdomain entries from results"
+            log(f"ffuf: {msg}")
+            if job_domain:
+                job_log_append(job_domain, msg, "ffuf")
     except Exception as e:
         log(f"Error parsing ffuf JSON: {e}")
     return sorted(subs)
