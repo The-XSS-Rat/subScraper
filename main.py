@@ -7618,6 +7618,7 @@ settingsTabs.forEach(tab => {
 });
 
 const POLL_INTERVAL = 8000;
+const MAX_SUBDOMAINS_PREVIEW = 50; // Maximum subdomains to show in overview before "Show more"
 const launchForm = document.getElementById('launch-form');
 const launchWordlist = document.getElementById('launch-wordlist');
 const launchInterval = document.getElementById('launch-interval');
@@ -8431,8 +8432,20 @@ function renderTargets(targets) {
     const subs = (info && info.subdomains) || {};
     const flags = (info && info.flags) || {};
     const keys = Object.keys(subs).sort();
-    subCount += keys.length;
-    const rows = keys.map((sub, idx) => {
+    
+    // Use total_subdomains from backend if available (handles truncation)
+    const totalSubdomainCount = info.total_subdomains !== undefined ? info.total_subdomains : keys.length;
+    const wasTruncatedByBackend = info.subdomains_truncated || false;
+    
+    subCount += totalSubdomainCount;
+    
+    // PERFORMANCE OPTIMIZATION: For domains with many subdomains, only render a preview in the overview
+    // This prevents browser freezing when rendering 200k+ subdomains at once
+    const hasMany = keys.length > MAX_SUBDOMAINS_PREVIEW;
+    const previewKeys = hasMany ? keys.slice(0, MAX_SUBDOMAINS_PREVIEW) : keys;
+    const hiddenCount = hasMany ? keys.length - MAX_SUBDOMAINS_PREVIEW : 0;
+    
+    const rows = previewKeys.map((sub, idx) => {
       const entry = subs[sub] || {};
       const sources = Array.isArray(entry.sources) ? entry.sources.join(', ') : '';
       const httpx = entry.httpx || {};
@@ -8455,8 +8468,9 @@ function renderTargets(targets) {
         </tr>
       `;
     }).join('');
+    
     const badges = `
-      <span class="badge">Subdomains: ${keys.length}</span>
+      <span class="badge">Subdomains: ${totalSubdomainCount}</span>
       <span class="badge">Amass: ${flags.amass_done ? '✅' : '⏳'}</span>
       <span class="badge">Subfinder: ${flags.subfinder_done ? '✅' : '⏳'}</span>
       <span class="badge">Assetfinder: ${flags.assetfinder_done ? '✅' : '⏳'}</span>
@@ -8473,9 +8487,30 @@ function renderTargets(targets) {
       <span class="badge">nuclei: ${flags.nuclei_done ? '✅' : '⏳'}</span>
       <span class="badge">nikto: ${flags.nikto_done ? '✅' : '⏳'}</span>
     `;
+    
     const tableId = `targets-table-${escapeHtml(domain).replace(/[^a-zA-Z0-9]/g, '-')}`;
     const paginationId = `targets-pagination-${escapeHtml(domain).replace(/[^a-zA-Z0-9]/g, '-')}`;
+    
+    // Show preview notice if subdomains were limited (either by backend or frontend)
+    const previewNotice = (wasTruncatedByBackend || hasMany) ? `
+      <div style="padding: 12px; margin-bottom: 8px; background: #1e293b; border-radius: 8px; border: 1px solid #334155;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <span style="color: #f59e0b;">⚠️</span>
+            <span style="color: var(--muted); font-size: 14px;">
+              ${wasTruncatedByBackend 
+                ? `Showing first ${keys.length} of ${totalSubdomainCount} subdomains for performance.`
+                : `Showing first ${MAX_SUBDOMAINS_PREVIEW} of ${totalSubdomainCount} subdomains for performance.`
+              }
+            </span>
+          </div>
+          <a href="/domain/${encodeURIComponent(domain)}" class="btn small secondary">View All ${totalSubdomainCount}</a>
+        </div>
+      </div>
+    ` : '';
+    
     const table = rows ? `
+      ${previewNotice}
       <div class="table-wrapper">
         <table class="targets-table" id="${tableId}">
           <thead>
@@ -8495,9 +8530,9 @@ function renderTargets(targets) {
       <div class="table-pagination" id="${paginationId}"></div>
     ` : '<p class="muted">No subdomains collected yet.</p>';
     
-    // Generate node map visualization
+    // Generate node map visualization (only for domains with reasonable subdomain counts)
     const nodeMapId = `node-map-${escapeHtml(domain).replace(/[^a-zA-Z0-9]/g, '-')}`;
-    const nodeMap = keys.length > 0 ? `
+    const nodeMap = totalSubdomainCount > 0 && totalSubdomainCount <= 1000 ? `
       <div style="margin: 16px 0;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
           <h4 style="margin: 0; font-size: 14px; color: #93c5fd;">Subdomain Network Map</h4>
@@ -8507,7 +8542,13 @@ function renderTargets(targets) {
           <canvas id="${nodeMapId}-canvas" width="800" height="400" style="width: 100%; height: 400px; background: #050b18; border-radius: 12px; border: 1px solid #1f2937; cursor: pointer;"></canvas>
         </div>
       </div>
-    ` : '';
+    ` : (totalSubdomainCount > 1000 ? `
+      <div style="margin: 16px 0; padding: 12px; background: #1e293b; border-radius: 8px; border: 1px solid #334155;">
+        <span style="color: var(--muted); font-size: 14px;">
+          Network map disabled for ${totalSubdomainCount} subdomains (use domain detail page for visualization).
+        </span>
+      </div>
+    ` : '');
     
     return `
       <div class="target-card" data-domain="${escapeHtml(domain)}">
@@ -11985,12 +12026,19 @@ def build_state_payload_summary() -> Dict[str, Any]:
     - nuclei/nikto finding counts (not full details)
     - screenshot path (not full metadata)
     
+    For performance with large datasets (200k+ subdomains), limits the number
+    of subdomains returned per domain to MAX_SUBDOMAINS_IN_SUMMARY (default 100).
+    Full data is available via the domain detail page.
+    
     This allows the dashboard to render basic views without loading full data.
     
     Optimizations:
     - Uses single JOIN query instead of N+1 queries (70-90% faster)
     - Batches subdomain processing per domain
+    - Limits subdomains per domain to prevent UI freezing
     """
+    MAX_SUBDOMAINS_IN_SUMMARY = 100  # Maximum subdomains to include per domain in summary
+    
     db = get_db()
     cursor = db.cursor()
     
@@ -12010,6 +12058,7 @@ def build_state_payload_summary() -> Dict[str, Any]:
     current_domain = None
     current_target = None
     subdomains = {}
+    subdomain_count = 0  # Track subdomains for current domain
     
     # Process results in a single pass
     for row in cursor:
@@ -12020,6 +12069,8 @@ def build_state_payload_summary() -> Dict[str, Any]:
             # Save previous domain's data if exists
             if current_domain is not None and current_target is not None:
                 current_target["subdomains"] = subdomains
+                current_target["total_subdomains"] = subdomain_count
+                current_target["subdomains_truncated"] = subdomain_count > MAX_SUBDOMAINS_IN_SUMMARY
                 # Calculate pending status
                 try:
                     current_target["pending"] = target_has_pending_work(current_target, config)
@@ -12039,10 +12090,18 @@ def build_state_payload_summary() -> Dict[str, Any]:
                 "comments": target_comments,
             }
             subdomains = {}
+            subdomain_count = 0
         
         # Process subdomain if present (LEFT JOIN may have NULL subdomain)
         subdomain = row[4]
         if subdomain is not None:
+            subdomain_count += 1
+            
+            # PERFORMANCE: Skip subdomains beyond the limit to prevent UI freezing
+            # Full data available in domain detail page
+            if subdomain_count > MAX_SUBDOMAINS_IN_SUMMARY:
+                continue
+            
             try:
                 full_data = json.loads(row[5])
                 
@@ -12088,6 +12147,8 @@ def build_state_payload_summary() -> Dict[str, Any]:
     # Save last domain's data
     if current_domain is not None and current_target is not None:
         current_target["subdomains"] = subdomains
+        current_target["total_subdomains"] = subdomain_count
+        current_target["subdomains_truncated"] = subdomain_count > MAX_SUBDOMAINS_IN_SUMMARY
         # Calculate pending status
         try:
             current_target["pending"] = target_has_pending_work(current_target, config)
