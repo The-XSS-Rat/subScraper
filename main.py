@@ -5437,7 +5437,8 @@ def capture_screenshots(
 
     recent_files: Dict[str, Path] = {}
     cutoff = run_started
-    for path in dest_dir.rglob("*.png"):
+    # gowitness default format is jpeg, but also check for png in case format was customized
+    for path in dest_dir.rglob("*.jpeg"):
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -5446,6 +5447,26 @@ def capture_screenshots(
             continue
         key = _normalize_identifier(path.stem)
         recent_files[key] = path
+    for path in dest_dir.rglob("*.jpg"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+        key = _normalize_identifier(path.stem)
+        if key not in recent_files:  # Don't overwrite if .jpeg was already found
+            recent_files[key] = path
+    for path in dest_dir.rglob("*.png"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+        key = _normalize_identifier(path.stem)
+        if key not in recent_files:  # Don't overwrite if .jpeg/.jpg was already found
+            recent_files[key] = path
 
     mapping: Dict[str, Dict[str, Any]] = {}
     captured_ts = datetime.now(timezone.utc).isoformat()
