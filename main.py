@@ -10077,15 +10077,35 @@ function buildNiktoRows(info) {
   return rows;
 }
 
-function renderReportDetail(domain) {
+async function renderReportDetail(domain) {
   const detail = document.getElementById('report-detail');
   if (!detail) return;
-  const info = latestTargetsData[domain];
+  
+  // Show loading state
+  selectedReportDomain = domain;
+  detail.innerHTML = '<div class="section-placeholder">Loading full report data...</div>';
+  updateReportNavSelection();
+  
+  // Fetch full domain data from API (not truncated summary)
+  let info;
+  try {
+    const resp = await fetch(`/api/domain/${encodeURIComponent(domain)}`);
+    if (!resp.ok) throw new Error('Failed to load domain data');
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.message || 'Failed to load data');
+    info = data.data;
+    
+    // Update latestTargetsData with full data so it's available for future use
+    latestTargetsData[domain] = info;
+  } catch (err) {
+    detail.innerHTML = `<div class="section-placeholder">Error loading report: ${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  
   if (!info) {
     detail.innerHTML = '<div class="section-placeholder">Select a program to view its report.</div>';
     return;
   }
-  selectedReportDomain = domain;
   const stats = computeReportStats(info);
   const badge = info.pending
     ? '<span class="report-badge pending">Pending</span>'
