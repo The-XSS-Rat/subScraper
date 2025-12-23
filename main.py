@@ -8973,14 +8973,23 @@ function renderWorkers(workers) {
     const active = info.active || 0;
     const queued = info.queued || 0;
     
+    // Check if tool is disabled
+    const disabledTools = (latestConfig && latestConfig.disabled_tools) || [];
+    const isDisabled = disabledTools.includes(name);
+    const disabledClass = isDisabled ? ' style="opacity: 0.5; border: 2px solid #ef4444;"' : '';
+    const disabledBadge = isDisabled ? '<div class="badge" style="background: #ef4444; margin-top: 4px;">🚫 Disabled</div>' : '';
+    const toggleButton = `<button class="btn secondary small" onclick="toggleTool('${escapeHtml(name)}', ${isDisabled})" style="margin-top: 8px; padding: 4px 8px; font-size: 0.75rem;">${isDisabled ? 'Enable' : 'Disable'}</button>`;
+    
     // Handle tools with and without concurrency gates
     if (limit == null) {
       // Tool without gate - just show as available
       return `
-        <div class="worker-card">
+        <div class="worker-card"${disabledClass}>
           <h3>${escapeHtml(name)}</h3>
           <div class="metric">Available</div>
           <div class="muted">no concurrency limit</div>
+          ${disabledBadge}
+          ${toggleButton}
         </div>
       `;
     } else {
@@ -8988,17 +8997,39 @@ function renderWorkers(workers) {
       const pct = limit ? Math.min(100, Math.round(active / limit * 100)) : 0;
       const queueInfo = queued > 0 ? `<div class="muted" style="margin-top: 4px;">📋 ${queued} queued</div>` : '';
       return `
-        <div class="worker-card">
+        <div class="worker-card"${disabledClass}>
           <h3>${escapeHtml(name)}</h3>
           <div class="metric">${active}/${limit}</div>
           <div class="muted">slots in use</div>
           ${queueInfo}
+          ${disabledBadge}
+          ${toggleButton}
           <div class="worker-progress">${renderProgress(pct, active >= limit ? 'running' : 'completed')}</div>
         </div>
       `;
     }
   }).join('') || '<div class="section-placeholder">No tool data.</div>';
   workersBody.innerHTML = `<div class="worker-grid">${jobCard}${dynamicCard}${backupCard}${rateLimitCard}${toolCards}</div>`;
+}
+
+async function toggleTool(toolName, enable) {
+  if (!confirm(`${enable ? 'Enable' : 'Disable'} ${toolName}? This will affect all future jobs.`)) return;
+  
+  try {
+    const resp = await fetch('/api/tools/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: toolName, enabled: enable })
+    });
+    const result = await resp.json();
+    if (result.success) {
+      fetchState(); // Reload to show updated state
+    } else {
+      alert('Error: ' + result.message);
+    }
+  } catch (err) {
+    alert('Error toggling tool: ' + err.message);
+  }
 }
 
 function renderSystemResources(data) {
