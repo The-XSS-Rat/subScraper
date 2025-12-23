@@ -5417,6 +5417,8 @@ def capture_screenshots(
         "--db", str(db_path),
         "--write-db",
         "--log-level", "error",
+        "--timeout", "30",  # Timeout per URL to prevent getting stuck
+        "--delay", "1",      # Small delay between requests
     ]
     context = {
         "DOMAIN": domain,
