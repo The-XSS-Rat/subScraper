@@ -5029,9 +5029,13 @@ def run_downstream_pipeline(
             job_log_append(job_domain, "httpx batch failed. Continuing with pipeline.", "httpx")
             update_step("httpx", status="error", message="httpx batch failed (timeouts or connection issues). Continuing with pipeline.", progress=100)
             # Don't break - httpx failures (especially timeouts) are common and shouldn't stop the pipeline
-            # Mark as done so we don't retry indefinitely
+            # Mark these hosts as processed (failed) so we don't retry them indefinitely
+            # and mark them as scanned to track the failure
+            mark_hosts_scanned(state, domain, new_hosts, "httpx")
+            httpx_processed.update(new_hosts)
             flags["httpx_done"] = True
             save_state(state)
+            break
         else:
             enrich_state_with_httpx(state, domain, httpx_json)
             mark_hosts_scanned(state, domain, new_hosts, "httpx")
@@ -5124,6 +5128,9 @@ def run_downstream_pipeline(
             if not screenshot_map:
                 job_log_append(job_domain, "Screenshot batch failed.", "screenshots")
                 update_step("screenshots", status="error", message="Screenshot capture failed.", progress=100)
+                # Mark screenshot step as done on failure to prevent infinite retry
+                flags["screenshots_done"] = True
+                save_state(state)
                 break
             state = load_state()
             enrich_state_with_screenshots(state, domain, screenshot_map)
@@ -5169,6 +5176,11 @@ def run_downstream_pipeline(
         if not nuclei_json:
             job_log_append(job_domain, "nuclei batch failed.", "nuclei")
             update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
+            # Mark these hosts as processed (failed) so we don't retry them
+            mark_hosts_scanned(state, domain, new_hosts, "nuclei")
+            nuclei_processed.update(new_hosts)
+            flags["nuclei_done"] = True
+            save_state(state)
             break
         enrich_state_with_nuclei(state, domain, nuclei_json)
         mark_hosts_scanned(state, domain, new_hosts, "nuclei")
@@ -5214,6 +5226,11 @@ def run_downstream_pipeline(
             if not nikto_json:
                 job_log_append(job_domain, "Nikto batch failed.", "nikto")
                 update_step("nikto", status="error", message="Nikto batch failed. Check logs for details.", progress=100)
+                # Mark these hosts as processed (failed) so we don't retry them
+                mark_hosts_scanned(state, domain, new_hosts, "nikto")
+                nikto_processed.update(new_hosts)
+                flags["nikto_done"] = True
+                save_state(state)
                 break
             enrich_state_with_nikto(state, domain, nikto_json)
             mark_hosts_scanned(state, domain, new_hosts, "nikto")
