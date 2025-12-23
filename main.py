@@ -8628,10 +8628,12 @@ function initNodeMap(domain, info, mapId) {
   
   const subs = (info && info.subdomains) || {};
   const subdomains = Object.keys(subs).sort();
+  const totalSubdomainCount = info.total_subdomains !== undefined ? info.total_subdomains : subdomains.length;
   
   // Store data in canvas dataset
   canvas.dataset.domain = domain;
   canvas.dataset.subdomains = JSON.stringify(subdomains);
+  canvas.dataset.totalSubdomains = totalSubdomainCount;
   
   // Set actual canvas resolution
   const rect = canvas.getBoundingClientRect();
@@ -8654,6 +8656,7 @@ function drawNodeMap(canvas) {
   const ctx = canvas.getContext('2d');
   const domain = canvas.dataset.domain;
   const subdomains = JSON.parse(canvas.dataset.subdomains || '[]');
+  const totalSubdomains = parseInt(canvas.dataset.totalSubdomains) || subdomains.length;
   
   const width = canvas.width;
   const height = canvas.height;
@@ -8758,7 +8761,10 @@ function drawNodeMap(canvas) {
   ctx.fillStyle = '#94a3b8';
   ctx.font = `${10 * window.devicePixelRatio}px system-ui`;
   ctx.textAlign = 'left';
-  ctx.fillText(`${subdomains.length} subdomains`, 10 * window.devicePixelRatio, height - 10 * window.devicePixelRatio);
+  const legendText = subdomains.length < totalSubdomains 
+    ? `${totalSubdomains} subdomains (showing ${subdomains.length})`
+    : `${totalSubdomains} subdomains`;
+  ctx.fillText(legendText, 10 * window.devicePixelRatio, height - 10 * window.devicePixelRatio);
 }
 
 function handleNodeMapClick(canvas, x, y) {
