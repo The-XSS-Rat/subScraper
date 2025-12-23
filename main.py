@@ -5322,6 +5322,10 @@ def httpx_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = 
         "-o", str(out_json),
         "-timeout", "10",
         "-follow-redirects",
+        "-title",         # Extract page titles
+        "-tech-detect",   # Detect technologies  
+        "-status-code",   # Show status codes
+        "-server",        # Extract server headers
         "-v",
     ]
     context = {
@@ -5409,10 +5413,12 @@ def capture_screenshots(
         "scan",
         "file",
         "-f", str(target_file),
-        "-P", str(dest_dir),
+        "-s", str(dest_dir),
         "--db", str(db_path),
         "--write-db",
         "--log-level", "error",
+        "--timeout", "30",  # Timeout per URL to prevent getting stuck
+        "--delay", "1",      # Small delay between requests
     ]
     context = {
         "DOMAIN": domain,
@@ -5431,15 +5437,19 @@ def capture_screenshots(
 
     recent_files: Dict[str, Path] = {}
     cutoff = run_started
-    for path in dest_dir.rglob("*.png"):
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        if mtime < cutoff:
-            continue
-        key = _normalize_identifier(path.stem)
-        recent_files[key] = path
+    # gowitness default format is jpeg, but also check for png in case format was customized
+    # Check in order of preference: .jpeg, .jpg, .png
+    for extension in ["*.jpeg", "*.jpg", "*.png"]:
+        for path in dest_dir.rglob(extension):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            key = _normalize_identifier(path.stem)
+            if key not in recent_files:  # Don't overwrite if already found with higher priority extension
+                recent_files[key] = path
 
     mapping: Dict[str, Dict[str, Any]] = {}
     captured_ts = datetime.now(timezone.utc).isoformat()
@@ -8622,10 +8632,12 @@ function initNodeMap(domain, info, mapId) {
   
   const subs = (info && info.subdomains) || {};
   const subdomains = Object.keys(subs).sort();
+  const totalSubdomainCount = info.total_subdomains !== undefined ? info.total_subdomains : subdomains.length;
   
   // Store data in canvas dataset
   canvas.dataset.domain = domain;
   canvas.dataset.subdomains = JSON.stringify(subdomains);
+  canvas.dataset.totalSubdomains = totalSubdomainCount;
   
   // Set actual canvas resolution
   const rect = canvas.getBoundingClientRect();
@@ -8648,6 +8660,7 @@ function drawNodeMap(canvas) {
   const ctx = canvas.getContext('2d');
   const domain = canvas.dataset.domain;
   const subdomains = JSON.parse(canvas.dataset.subdomains || '[]');
+  const totalSubdomains = parseInt(canvas.dataset.totalSubdomains) || subdomains.length;
   
   const width = canvas.width;
   const height = canvas.height;
@@ -8752,7 +8765,10 @@ function drawNodeMap(canvas) {
   ctx.fillStyle = '#94a3b8';
   ctx.font = `${10 * window.devicePixelRatio}px system-ui`;
   ctx.textAlign = 'left';
-  ctx.fillText(`${subdomains.length} subdomains`, 10 * window.devicePixelRatio, height - 10 * window.devicePixelRatio);
+  const legendText = subdomains.length < totalSubdomains 
+    ? `${totalSubdomains} subdomains (showing ${subdomains.length})`
+    : `${totalSubdomains} subdomains`;
+  ctx.fillText(legendText, 10 * window.devicePixelRatio, height - 10 * window.devicePixelRatio);
 }
 
 function handleNodeMapClick(canvas, x, y) {
