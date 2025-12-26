@@ -1082,7 +1082,8 @@ class TestDomainHandling:
         assert main._sanitize_domain_input('EXAMPLE.COM') == 'example.com'
         assert main._sanitize_domain_input('  example.com  ') == 'example.com'
         assert main._sanitize_domain_input('example.com\n\r') == 'example.com'
-        assert main._sanitize_domain_input('http://example.com') == 'http://example.com'
+        assert main._sanitize_domain_input('http://example.com') == 'example.com'
+        assert main._sanitize_domain_input('https://example.com') == 'example.com'
     
     def test_is_subdomain_input(self):
         """Test subdomain detection"""
@@ -1099,17 +1100,33 @@ class TestDomainHandling:
         config['wildcard_tlds'] = ['com', 'net', 'org']
         
         # Test wildcard expansion
-        targets = main.expand_wildcard_targets('example.*', config)
-        assert 'example.com' in targets
-        assert 'example.net' in targets
-        assert 'example.org' in targets
-        assert len(targets) == 3
+        targets_with_flags = main.expand_wildcard_targets('example.*', config)
+        domains = [domain for domain, _ in targets_with_flags]
+        assert 'example.com' in domains
+        assert 'example.net' in domains
+        assert 'example.org' in domains
+        assert len(domains) == 3
+        # Should not be broad scope for TLD wildcards
+        for domain, is_broad in targets_with_flags:
+            assert not is_broad
     
     def test_expand_wildcard_targets_no_wildcard(self):
         """Test that non-wildcard input returns as-is"""
         config = main.default_config()
-        targets = main.expand_wildcard_targets('example.com', config)
-        assert targets == ['example.com']
+        targets_with_flags = main.expand_wildcard_targets('example.com', config)
+        assert len(targets_with_flags) == 1
+        domain, is_broad = targets_with_flags[0]
+        assert domain == 'example.com'
+        assert not is_broad
+    
+    def test_expand_wildcard_subdomain(self):
+        """Test subdomain wildcard expansion (*.dev.example.com)"""
+        config = main.default_config()
+        targets_with_flags = main.expand_wildcard_targets('*.dev.example.com', config)
+        assert len(targets_with_flags) == 1
+        domain, is_broad = targets_with_flags[0]
+        assert domain == 'dev.example.com'
+        assert is_broad  # Should be marked as broad scope
 
 
 class TestJobManagement:

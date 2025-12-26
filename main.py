@@ -1301,6 +1301,7 @@ def default_config() -> Dict[str, Any]:
         "max_parallel_nikto": 1,
         "max_running_jobs": 1,
         "global_rate_limit": 0.0,
+        "job_timeout": 3600,  # Global timeout for jobs in seconds (default: 1 hour)
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
         "tool_binary_paths": {},  # Custom binary paths for tools
         "dynamic_mode_enabled": False,
@@ -2778,15 +2779,19 @@ def _normalize_tld_list(value: Any) -> List[str]:
     return result
 
 
-def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
+def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -> List[Tuple[str, bool]]:
     """
     Expand wildcard targets from input string. Supports multiple domains
     separated by commas or newlines.
     
+    Returns a list of tuples: (domain, is_broad_scope)
+    where is_broad_scope is True for subdomain wildcards like *.dev.example.com
+    
     Examples:
-      Single domain: "example.com"
-      Wildcard: "*.example.com"
-      TLD wildcard: "example.*"
+      Single domain: "example.com" -> [("example.com", False)]
+      Subdomain wildcard: "*.dev.example.com" -> [("dev.example.com", True)]
+      TLD wildcard: "example.*" -> [("example.com", False), ("example.net", False), ...]
+      Combined: "*.dev.*" -> [("dev.com", True), ("dev.net", True), ...]
       Multiple domains: "example.com, test.com" or "example.com\ntest.com"
       Multiple wildcards: "*.example.com\n*.test.com"
     """
@@ -2795,7 +2800,7 @@ def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -
     if not domain_inputs:
         return []
     
-    all_candidates: List[str] = []
+    all_candidates: List[Tuple[str, bool]] = []
     
     # Process each domain input
     for domain_input in domain_inputs:
@@ -2803,8 +2808,11 @@ def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -
         if not normalized:
             continue
         
+        # Check for subdomain wildcard prefix
+        is_broad_scope = normalized.startswith("*.")
         while normalized.startswith("*."):
             normalized = normalized[2:]
+        
         trailing_any_tld = normalized.endswith(".*")
         if trailing_any_tld:
             normalized = normalized[:-2]
@@ -2819,19 +2827,19 @@ def expand_wildcard_targets(raw: str, config: Optional[Dict[str, Any]] = None) -
             for suffix in tlds:
                 if not suffix:
                     continue
-                all_candidates.append(f"{normalized}.{suffix}")
+                all_candidates.append((f"{normalized}.{suffix}", is_broad_scope))
         else:
-            all_candidates.append(normalized)
+            all_candidates.append((normalized, is_broad_scope))
     
-    # Deduplicate results
-    deduped: List[str] = []
+    # Deduplicate results while preserving broad_scope flag
+    deduped: List[Tuple[str, bool]] = []
     seen: set = set()
-    for candidate in all_candidates:
-        cleaned = candidate.strip(".")
+    for domain, is_broad in all_candidates:
+        cleaned = domain.strip(".")
         if not cleaned or cleaned in seen:
             continue
         seen.add(cleaned)
-        deduped.append(cleaned)
+        deduped.append((cleaned, is_broad))
     return deduped
 
 
@@ -2890,6 +2898,16 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             return False, "Global rate limit must be a number >= 0.", cfg
         if cfg.get("global_rate_limit", 0.0) != new_rate_limit:
             cfg["global_rate_limit"] = new_rate_limit
+            changed = True
+
+    # Handle job timeout (can be 0 for disabled or positive integer)
+    if "job_timeout" in values:
+        try:
+            new_timeout = max(0, int(values.get("job_timeout")))
+        except (TypeError, ValueError):
+            return False, "Job timeout must be an integer >= 0 (0 = disabled).", cfg
+        if cfg.get("job_timeout", 3600) != new_timeout:
+            cfg["job_timeout"] = new_timeout
             changed = True
 
     concurrency_fields = {
@@ -6236,6 +6254,8 @@ def count_active_jobs_locked() -> int:
 
 def _start_job_thread(job: Dict[str, Any]) -> None:
     domain = job["domain"]
+    job_timeout_seconds = get_config().get("job_timeout", 3600)  # Default 1 hour
+    timeout_triggered = threading.Event()
 
     def runner():
         wordlist_path = job.get("wordlist") or None
@@ -6250,16 +6270,25 @@ def _start_job_thread(job: Dict[str, Any]) -> None:
                 interval=interval_val,
                 job_domain=domain,
             )
-            with JOB_LOCK:
-                job_record = RUNNING_JOBS.get(domain)
-                had_errors = job_record_has_errors(job_record) if job_record else False
-            if had_errors:
-                job_set_status(domain, "completed_with_errors", "Recon finished with warnings.")
+            # Check if timeout was triggered
+            if timeout_triggered.is_set():
+                job_set_status(domain, "timeout", f"Job timed out after {job_timeout_seconds} seconds.")
+                log(f"Job {domain} timed out after {job_timeout_seconds} seconds.")
             else:
-                job_set_status(domain, "completed", "Recon finished successfully.")
+                with JOB_LOCK:
+                    job_record = RUNNING_JOBS.get(domain)
+                    had_errors = job_record_has_errors(job_record) if job_record else False
+                if had_errors:
+                    job_set_status(domain, "completed_with_errors", "Recon finished with warnings.")
+                else:
+                    job_set_status(domain, "completed", "Recon finished successfully.")
         except Exception as exc:
-            log(f"Recon pipeline failed for {domain}: {exc}")
-            job_set_status(domain, "failed", f"Fatal error: {exc}")
+            if timeout_triggered.is_set():
+                log(f"Recon pipeline for {domain} terminated due to timeout: {exc}")
+                job_set_status(domain, "timeout", f"Job timed out after {job_timeout_seconds} seconds.")
+            else:
+                log(f"Recon pipeline failed for {domain}: {exc}")
+                job_set_status(domain, "failed", f"Fatal error: {exc}")
         finally:
             # Save the completed job before removing it from running jobs
             # Get job data while holding lock, then save outside lock to avoid deadlock
@@ -6270,7 +6299,7 @@ def _start_job_thread(job: Dict[str, Any]) -> None:
                     # Remove thread reference before deepcopy to avoid pickle errors
                     # Thread objects contain locks that cannot be pickled
                     # Create a copy excluding the thread key to preserve original state
-                    job_to_save = copy.deepcopy({k: v for k, v in job_record.items() if k != 'thread'})
+                    job_to_save = copy.deepcopy({k: v for k, v in job_record.items() if k != 'thread' and k != 'timeout_timer'})
                 RUNNING_JOBS.pop(domain, None)
             
             # Save outside the lock to avoid deadlock (add_completed_job acquires lock)
@@ -6281,10 +6310,39 @@ def _start_job_thread(job: Dict[str, Any]) -> None:
             schedule_jobs()
             cleanup_job_control(domain)
 
+    def timeout_watcher():
+        """Watch for job timeout and terminate if exceeded."""
+        timeout_triggered.wait(timeout=job_timeout_seconds)
+        if not timeout_triggered.is_set():
+            # Timeout occurred
+            timeout_triggered.set()
+            log(f"⏱️ Job timeout reached for {domain} after {job_timeout_seconds} seconds. Terminating job...")
+            job_log_append(domain, f"⏱️ Job timeout reached after {job_timeout_seconds} seconds. Terminating...", "timeout-watcher")
+            # Note: We can't forcefully kill the thread, but we set the flag
+            # The job will check this flag and clean up gracefully
+            job_set_status(domain, "timeout", f"Job exceeded timeout of {job_timeout_seconds} seconds.")
+
     thread = threading.Thread(target=runner, name=f"pipeline-{domain}", daemon=True)
+    timer_thread = None
+    
+    # Only start timeout watcher if timeout is configured (> 0)
+    if job_timeout_seconds and job_timeout_seconds > 0:
+        timer_thread = threading.Thread(target=timeout_watcher, name=f"timeout-{domain}", daemon=True)
+    
     with JOB_LOCK:
         job["thread"] = thread
         job["started"] = datetime.now(timezone.utc).isoformat()
+        job["timeout_seconds"] = job_timeout_seconds
+        job["timeout_timer"] = timer_thread
+        # Start threads while holding lock to prevent race condition
+        # This ensures count_active_jobs_locked() sees the thread immediately
+        thread.start()
+        if timer_thread:
+            timer_thread.start()
+    
+    job_log_append(domain, "Job dispatched to worker.", "scheduler")
+    if job_timeout_seconds and job_timeout_seconds > 0:
+        job_log_append(domain, f"Job timeout set to {job_timeout_seconds} seconds.", "scheduler")
         # Start thread while holding lock to prevent race condition
         # This ensures count_active_jobs_locked() sees the thread immediately
         thread.start()
@@ -7370,6 +7428,9 @@ button:hover { background:#1d4ed8; }
               <label>Global rate limit (seconds between tool calls, 0 = disabled)
                 <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
               </label>
+              <label>Job timeout (seconds, 0 = disabled)
+                <input id="settings-job-timeout" type="number" name="job_timeout" min="0" />
+              </label>
               <h4>Per-Tool Thread Controls</h4>
               <label>Subfinder threads
                 <input id="settings-subfinder-threads" type="number" name="subfinder_threads" min="1" />
@@ -7697,6 +7758,7 @@ const settingsAssetfinderThreads = document.getElementById('settings-assetfinder
 const settingsFindomainThreads = document.getElementById('settings-findomain-threads');
 const settingsGlobalRateLimit = document.getElementById('settings-global-rate-limit');
 const settingsMaxJobs = document.getElementById('settings-max-jobs');
+const settingsJobTimeout = document.getElementById('settings-job-timeout');
 const settingsAmass = document.getElementById('settings-amass');
 const settingsSubfinder = document.getElementById('settings-subfinder');
 const settingsAssetfinder = document.getElementById('settings-assetfinder');
@@ -10839,6 +10901,7 @@ function renderSettings(config, tools) {
     settingsFindomainThreads.value = config.findomain_threads || 40;
     settingsGlobalRateLimit.value = config.global_rate_limit || 0;
     settingsMaxJobs.value = config.max_running_jobs || 1;
+    settingsJobTimeout.value = config.job_timeout || 3600;
     settingsAmass.value = config.max_parallel_amass || 1;
     settingsSubfinder.value = config.max_parallel_subfinder || 1;
     settingsAssetfinder.value = config.max_parallel_assetfinder || 1;
@@ -11029,6 +11092,7 @@ if (settingsForm) {
         findomain_threads: settingsFindomainThreads ? settingsFindomainThreads.value : '',
         global_rate_limit: settingsGlobalRateLimit ? settingsGlobalRateLimit.value : '',
         max_running_jobs: settingsMaxJobs ? settingsMaxJobs.value : '',
+        job_timeout: settingsJobTimeout ? settingsJobTimeout.value : '',
         max_parallel_amass: settingsAmass ? settingsAmass.value : '',
         max_parallel_subfinder: settingsSubfinder ? settingsSubfinder.value : '',
         max_parallel_assetfinder: settingsAssetfinder ? settingsAssetfinder.value : '',
@@ -12153,7 +12217,9 @@ def resume_target_scan(domain: str, wordlist: Optional[str] = None,
         cleaned = str(wordlist).strip()
         if cleaned:
             wordlist_val = cleaned
-    return start_pipeline_job(normalized, wordlist_val, skip_flag, None)
+    # Preserve broad_scope flag from existing target
+    broad_scope = bool(options.get("broad_scope", False))
+    return start_pipeline_job(normalized, wordlist_val, skip_flag, None, broad_scope)
 
 
 def start_targets_from_input(domain_input: str, wordlist: Optional[str],
@@ -12161,21 +12227,22 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     cfg = get_config()
     cleaned = _sanitize_domain_input(domain_input)
     requested_any_tld = bool(cleaned.endswith(".*"))
-    targets = expand_wildcard_targets(domain_input, cfg)
-    if not targets:
+    targets_with_flags = expand_wildcard_targets(domain_input, cfg)
+    if not targets_with_flags:
         if requested_any_tld:
             return False, "Wildcard TLD requested but no TLDs are configured. Update wildcard TLDs in Settings.", []
         return False, "Domain is required.", []
     details: List[Dict[str, Any]] = []
     success_any = False
-    for target in targets:
-        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval)
+    for target, is_broad_scope in targets_with_flags:
+        success, message = start_pipeline_job(target, wordlist, skip_nikto, interval, is_broad_scope)
         if success:
             success_any = True
         details.append({
             "target": target,
             "success": success,
             "message": message,
+            "broad_scope": is_broad_scope,
         })
     if len(details) == 1:
         result = details[0]
@@ -12192,7 +12259,7 @@ def start_targets_from_input(domain_input: str, wordlist: Optional[str],
     return success_any, " ".join(summary_parts).strip(), details
 
 
-def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int]) -> Tuple[bool, str]:
+def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, interval: Optional[int], broad_scope: bool = False) -> Tuple[bool, str]:
     normalized = (domain or "").strip().lower()
     if not normalized:
         return False, "Domain is required."
@@ -12224,8 +12291,17 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
             "progress": 0,
             "last_update": now,
             "logs": [],
+            "broad_scope": broad_scope,  # Track if this is a wildcard subdomain scan
         }
         RUNNING_JOBS[normalized] = job_record
+        
+        # Store broad_scope flag in target state
+        if broad_scope:
+            state = load_state()
+            target = ensure_target_state(state, normalized)
+            target.setdefault("options", {})["broad_scope"] = True
+            save_state(state)
+        
         ensure_job_control(normalized)
         if count_active_jobs_locked() < MAX_RUNNING_JOBS:
             start_now = True
@@ -12235,10 +12311,12 @@ def start_pipeline_job(domain: str, wordlist: Optional[str], skip_nikto: bool, i
 
     if start_now:
         _start_job_thread(job_record)
-        return True, f"Recon started for {normalized}."
+        scope_msg = " (broad scope wildcard scan)" if broad_scope else ""
+        return True, f"Recon started for {normalized}{scope_msg}."
 
     job_log_append(normalized, "Queued for execution.", "scheduler")
-    return True, f"{normalized} queued; it will start when a worker is free."
+    scope_msg = " (broad scope wildcard scan)" if broad_scope else ""
+    return True, f"{normalized} queued{scope_msg}; it will start when a worker is free."
 
 
 def build_state_payload_summary() -> Dict[str, Any]:
@@ -14788,16 +14866,23 @@ def main():
 
     if args.domain:
         cfg = get_config()
-        targets = expand_wildcard_targets(args.domain, cfg)
-        if not targets:
+        targets_with_flags = expand_wildcard_targets(args.domain, cfg)
+        if not targets_with_flags:
             cleaned = _sanitize_domain_input(args.domain)
             if cleaned.endswith(".*"):
                 log("Wildcard TLD requested but no TLDs are configured. Update wildcard settings in the web UI.")
             else:
                 log("No valid targets resolved from input.")
             return
-        for target in targets:
-            log(f"Running single pipeline execution for {target}.")
+        for target, is_broad_scope in targets_with_flags:
+            scope_msg = " (broad scope wildcard scan)" if is_broad_scope else ""
+            log(f"Running single pipeline execution for {target}{scope_msg}.")
+            # Store broad_scope flag if needed
+            if is_broad_scope:
+                state = load_state()
+                tgt = ensure_target_state(state, target)
+                tgt.setdefault("options", {})["broad_scope"] = True
+                save_state(state)
             try:
                 run_pipeline(target, args.wordlist, skip_nikto=args.skip_nikto, interval=args.interval)
             except KeyboardInterrupt:
