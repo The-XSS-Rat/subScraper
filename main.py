@@ -19,11 +19,13 @@ import argparse
 import copy
 import csv
 import hashlib
+import hmac
 import io
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shlex
 import shutil
 import sqlite3
@@ -34,7 +36,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -63,6 +65,11 @@ SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 MONITORS_FILE = DATA_DIR / "monitors.json"
 BACKUPS_DIR = DATA_DIR / "backups"
 COMPLETED_JOBS_FILE = DATA_DIR / "completed_jobs.json"
+
+# Authentication & Session Management
+SESSION_TIMEOUT_HOURS = 24
+SESSIONS: Dict[str, Dict[str, Any]] = {}
+SESSION_LOCK = threading.Lock()
 
 # SQLite connection pool
 DB_LOCK = threading.Lock()
@@ -651,6 +658,23 @@ def init_database() -> None:
         )
     """)
     
+    # Users table - stores authentication credentials
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_users_username 
+        ON users(username)
+    """)
+    
     db.commit()
     log("Database schema initialized successfully.")
 
@@ -1067,6 +1091,212 @@ def atomic_write_text(filepath: Path, content: str) -> None:
                 tmp_path.unlink()
             except Exception:
                 pass
+
+
+# ================== AUTHENTICATION & USER MANAGEMENT ==================
+
+def hash_password(password: str) -> str:
+    """Hash a password using PBKDF2-HMAC-SHA256."""
+    salt = secrets.token_bytes(32)
+    pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    # Store salt + hash as hex
+    return salt.hex() + pwd_hash.hex()
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a password against a stored hash."""
+    try:
+        # Extract salt (first 64 hex chars = 32 bytes)
+        salt = bytes.fromhex(stored_hash[:64])
+        stored_pwd_hash = stored_hash[64:]
+        # Hash the input password with the same salt
+        pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+        # Compare in constant time
+        return hmac.compare_digest(pwd_hash.hex(), stored_pwd_hash)
+    except (ValueError, IndexError):
+        return False
+
+
+def create_user(username: str, password: str, is_admin: bool = False) -> Tuple[bool, str]:
+    """Create a new user."""
+    if not username or not password:
+        return False, "Username and password are required"
+    
+    if len(username) < 3:
+        return False, "Username must be at least 3 characters long"
+    
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters long"
+    
+    # Validate username (alphanumeric, underscore, hyphen only)
+    if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+        return False, "Username can only contain letters, numbers, underscores, and hyphens"
+    
+    db = get_db()
+    cursor = db.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        password_hash = hash_password(password)
+        cursor.execute(
+            """INSERT INTO users (username, password_hash, is_admin, created_at, updated_at) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (username.lower(), password_hash, 1 if is_admin else 0, now, now)
+        )
+        db.commit()
+        log(f"User '{username}' created successfully (admin={is_admin})")
+        return True, f"User '{username}' created successfully"
+    except sqlite3.IntegrityError:
+        return False, f"Username '{username}' already exists"
+    except Exception as e:
+        log(f"Error creating user: {e}")
+        return False, f"Error creating user: {str(e)}"
+
+
+def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Authenticate a user and return user info if successful."""
+    if not username or not password:
+        return None
+    
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT id, username, password_hash, is_admin FROM users WHERE username = ?",
+        (username.lower(),)
+    )
+    row = cursor.fetchone()
+    
+    if not row:
+        return None
+    
+    if verify_password(password, row[2]):
+        return {
+            "id": row[0],
+            "username": row[1],
+            "is_admin": bool(row[3])
+        }
+    
+    return None
+
+
+def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get user information by ID."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT id, username, is_admin, created_at FROM users WHERE id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    
+    if row:
+        return {
+            "id": row[0],
+            "username": row[1],
+            "is_admin": bool(row[2]),
+            "created_at": row[3]
+        }
+    return None
+
+
+def list_users() -> List[Dict[str, Any]]:
+    """List all users."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT id, username, is_admin, created_at FROM users ORDER BY created_at")
+    rows = cursor.fetchall()
+    
+    return [
+        {
+            "id": row[0],
+            "username": row[1],
+            "is_admin": bool(row[2]),
+            "created_at": row[3]
+        }
+        for row in rows
+    ]
+
+
+def has_admin_user() -> bool:
+    """Check if at least one admin user exists."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+    count = cursor.fetchone()[0]
+    return count > 0
+
+
+def generate_session_token() -> str:
+    """Generate a secure random session token."""
+    return secrets.token_urlsafe(32)
+
+
+def create_session(user: Dict[str, Any]) -> str:
+    """Create a new session for a user."""
+    token = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TIMEOUT_HOURS)
+    
+    with SESSION_LOCK:
+        SESSIONS[token] = {
+            "user_id": user["id"],
+            "username": user["username"],
+            "is_admin": user["is_admin"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at.isoformat()
+        }
+    
+    log(f"Session created for user '{user['username']}' (expires: {expires_at.isoformat()})")
+    return token
+
+
+def validate_session(token: str) -> Optional[Dict[str, Any]]:
+    """Validate a session token and return user info if valid."""
+    if not token:
+        return None
+    
+    with SESSION_LOCK:
+        session = SESSIONS.get(token)
+        if not session:
+            return None
+        
+        # Check if expired
+        expires_at = datetime.fromisoformat(session["expires_at"])
+        if datetime.now(timezone.utc) >= expires_at:
+            del SESSIONS[token]
+            return None
+        
+        return {
+            "user_id": session["user_id"],
+            "username": session["username"],
+            "is_admin": session["is_admin"]
+        }
+
+
+def delete_session(token: str) -> None:
+    """Delete a session (logout)."""
+    with SESSION_LOCK:
+        if token in SESSIONS:
+            username = SESSIONS[token].get("username", "unknown")
+            del SESSIONS[token]
+            log(f"Session deleted for user '{username}'")
+
+
+def cleanup_expired_sessions() -> None:
+    """Remove expired sessions."""
+    with SESSION_LOCK:
+        now = datetime.now(timezone.utc)
+        expired_tokens = []
+        
+        for token, session in SESSIONS.items():
+            expires_at = datetime.fromisoformat(session["expires_at"])
+            if now >= expires_at:
+                expired_tokens.append(token)
+        
+        for token in expired_tokens:
+            del SESSIONS[token]
+        
+        if expired_tokens:
+            log(f"Cleaned up {len(expired_tokens)} expired session(s)")
 
 
 def _normalize_tool_flag_templates(value: Any) -> Dict[str, str]:
@@ -3755,6 +3985,51 @@ def run_setup_wizard() -> None:
     print("You can always change these settings later in the web UI.\n")
     
     config = get_config()
+    
+    # Admin Account Setup
+    print("\n" + "-"*70)
+    print("👤 ADMIN ACCOUNT SETUP")
+    print("-"*70)
+    print("\nTo secure the web interface, you need to create an admin account.")
+    print("This account will have full access to all features and can create")
+    print("additional user accounts.\n")
+    
+    admin_created = False
+    if has_admin_user():
+        print("✓ Admin account already exists.")
+        admin_created = True
+    else:
+        while not admin_created:
+            try:
+                username = input("Admin username (min 3 chars): ").strip()
+                if not username:
+                    print("⚠ Username is required. Please try again.")
+                    continue
+                
+                password = input("Admin password (min 6 chars): ").strip()
+                if not password:
+                    print("⚠ Password is required. Please try again.")
+                    continue
+                
+                password_confirm = input("Confirm password: ").strip()
+                if password != password_confirm:
+                    print("⚠ Passwords don't match. Please try again.\n")
+                    continue
+                
+                success, message = create_user(username, password, is_admin=True)
+                if success:
+                    print(f"✓ {message}")
+                    admin_created = True
+                else:
+                    print(f"⚠ {message}. Please try again.\n")
+            except (EOFError, KeyboardInterrupt):
+                print("\n\n⚠ Admin account creation is required to continue.")
+                print("Press Ctrl+C again to exit or Enter to continue...")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nSetup cancelled. Exiting...")
+                    sys.exit(1)
     
     # Basic Settings
     print("\n" + "-"*70)
@@ -14028,6 +14303,209 @@ loadGallery();
 class CommandCenterHandler(BaseHTTPRequestHandler):
     server_version = "ReconCommandCenter/1.0"
 
+    def _get_session_token(self) -> Optional[str]:
+        """Extract session token from Cookie header."""
+        cookie_header = self.headers.get("Cookie")
+        if not cookie_header:
+            return None
+        
+        # Parse cookies
+        cookies = {}
+        for item in cookie_header.split(";"):
+            item = item.strip()
+            if "=" in item:
+                key, value = item.split("=", 1)
+                cookies[key.strip()] = value.strip()
+        
+        return cookies.get("session_token")
+    
+    def _get_current_user(self) -> Optional[Dict[str, Any]]:
+        """Get current authenticated user from session."""
+        token = self._get_session_token()
+        if not token:
+            return None
+        return validate_session(token)
+    
+    def _require_auth(self) -> Optional[Dict[str, Any]]:
+        """Check authentication and return user or send login page."""
+        user = self._get_current_user()
+        if not user:
+            self._send_login_page()
+            return None
+        return user
+    
+    def _require_admin(self) -> Optional[Dict[str, Any]]:
+        """Check admin authentication and return user or send error."""
+        user = self._get_current_user()
+        if not user:
+            self._send_login_page()
+            return None
+        if not user.get("is_admin"):
+            self._send_json({"success": False, "message": "Admin access required"}, status=HTTPStatus.FORBIDDEN)
+            return None
+        return user
+    
+    def _send_login_page(self) -> None:
+        """Send the login page."""
+        html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login - Recon Command Center</title>
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  color: #e2e8f0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-container {
+  background: #1e293b;
+  border-radius: 12px;
+  padding: 40px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  width: 100%;
+  max-width: 400px;
+}
+.login-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+.login-header h1 {
+  margin: 0 0 10px 0;
+  font-size: 2rem;
+  color: #f1f5f9;
+}
+.login-header p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+.form-group {
+  margin-bottom: 20px;
+}
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  color: #cbd5e1;
+  font-weight: 500;
+}
+.form-group input {
+  width: 100%;
+  padding: 12px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+.form-group input:focus {
+  outline: none;
+  border-color: #60a5fa;
+}
+.btn {
+  width: 100%;
+  padding: 12px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.btn:hover {
+  background: #2563eb;
+}
+.btn:disabled {
+  background: #475569;
+  cursor: not-allowed;
+}
+.error-message {
+  background: #7f1d1d;
+  border: 1px solid #991b1b;
+  color: #fca5a5;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  display: none;
+}
+.error-message.show {
+  display: block;
+}
+</style>
+</head>
+<body>
+<div class="login-container">
+  <div class="login-header">
+    <h1>🔐 Login</h1>
+    <p>Recon Command Center</p>
+  </div>
+  <div id="error-message" class="error-message"></div>
+  <form id="login-form">
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required autofocus>
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
+    </div>
+    <button type="submit" class="btn" id="login-btn">Login</button>
+  </form>
+</div>
+<script>
+const form = document.getElementById('login-form');
+const errorMsg = document.getElementById('error-message');
+const loginBtn = document.getElementById('login-btn');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  
+  errorMsg.classList.remove('show');
+  loginBtn.disabled = true;
+  loginBtn.textContent = 'Logging in...';
+  
+  const username = document.getElementById('username').value;
+  const password = document.getElementById('password').value;
+  
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    
+    const data = await resp.json();
+    
+    if (data.success) {
+      window.location.href = '/';
+    } else {
+      errorMsg.textContent = data.message || 'Login failed';
+      errorMsg.classList.add('show');
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Login';
+    }
+  } catch (err) {
+    errorMsg.textContent = 'An error occurred. Please try again.';
+    errorMsg.classList.add('show');
+    loginBtn.disabled = false;
+    loginBtn.textContent = 'Login';
+  }
+});
+</script>
+</body>
+</html>"""
+        self._send_bytes(html.encode("utf-8"))
+
     def _send_bytes(self, payload: bytes, status: HTTPStatus = HTTPStatus.OK, content_type: str = "text/html") -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -14040,6 +14518,16 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         self._send_bytes(data, status=status, content_type="application/json")
 
     def do_GET(self):
+        # Public endpoints (no auth required)
+        if self.path == "/login":
+            self._send_login_page()
+            return
+        
+        # All other endpoints require authentication
+        user = self._require_auth()
+        if not user:
+            return
+        
         if self.path in ("/", "/index.html"):
             self._send_bytes(INDEX_HTML.encode("utf-8"))
             return
@@ -14230,6 +14718,18 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         if self.path == "/api/cleanup-status":
             self._send_json(get_cleanup_status())
             return
+        if self.path == "/api/auth/user":
+            # Return current user info
+            self._send_json({"success": True, "user": {"username": user["username"], "is_admin": user["is_admin"]}})
+            return
+        if self.path == "/api/users":
+            # List users (admin only)
+            if not user.get("is_admin"):
+                self._send_json({"success": False, "message": "Admin access required"}, status=HTTPStatus.FORBIDDEN)
+                return
+            users = list_users()
+            self._send_json({"success": True, "users": users})
+            return
         if self.path == "/api/backups":
             self._send_json({"backups": list_backups()})
             return
@@ -14401,6 +14901,91 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
     def do_POST(self):
+        # Public auth endpoints (no auth required)
+        if self.path == "/api/auth/login":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_json({"success": False, "message": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            username = payload.get("username", "").strip()
+            password = payload.get("password", "").strip()
+            
+            if not username or not password:
+                self._send_json({"success": False, "message": "Username and password are required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            user = authenticate_user(username, password)
+            if user:
+                token = create_session(user)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Set-Cookie", f"session_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TIMEOUT_HOURS * 3600}")
+                response = json.dumps({"success": True, "message": "Login successful", "user": {"username": user["username"], "is_admin": user["is_admin"]}}).encode("utf-8")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+                return
+            else:
+                self._send_json({"success": False, "message": "Invalid username or password"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+        
+        if self.path == "/api/auth/logout":
+            token = self._get_session_token()
+            if token:
+                delete_session(token)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "session_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+            response = json.dumps({"success": True, "message": "Logged out"}).encode("utf-8")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+            return
+        
+        # All other endpoints require authentication
+        user = self._require_auth()
+        if not user:
+            return
+        
+        # User management endpoints (admin only)
+        if self.path == "/api/users":
+            admin = self._require_admin()
+            if not admin:
+                return
+            
+            # GET users list via POST for simplicity (could be GET but keeping pattern)
+            users = list_users()
+            self._send_json({"success": True, "users": users})
+            return
+        
+        if self.path == "/api/users/create":
+            admin = self._require_admin()
+            if not admin:
+                return
+            
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_json({"success": False, "message": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            username = payload.get("username", "").strip()
+            password = payload.get("password", "").strip()
+            is_admin = payload.get("is_admin", False)
+            
+            success, message = create_user(username, password, is_admin=is_admin)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
         allowed = {
             "/api/run",
             "/api/settings",
@@ -14694,6 +15279,54 @@ class CommandCenterHandler(BaseHTTPRequestHandler):
         log(f"HTTP {self.address_string()} - {format % args}")
 
 
+def prompt_admin_creation() -> bool:
+    """
+    Prompt for admin account creation if none exists (interactive mode only).
+    Returns True if admin exists or was created, False if cancelled.
+    """
+    if has_admin_user():
+        return True
+    
+    if not sys.stdin.isatty():
+        log("ERROR: No admin account exists and running in non-interactive mode.")
+        log("Please run in interactive mode to create an admin account first.")
+        return False
+    
+    print("\n" + "="*70)
+    print("⚠️  ADMIN ACCOUNT REQUIRED")
+    print("="*70)
+    print("\nNo admin account exists. You need to create one to access the web UI.")
+    print("This account will have full access and can create additional users.\n")
+    
+    while True:
+        try:
+            username = input("Admin username (min 3 chars): ").strip()
+            if not username:
+                print("⚠ Username is required.")
+                continue
+            
+            password = input("Admin password (min 6 chars): ").strip()
+            if not password:
+                print("⚠ Password is required.")
+                continue
+            
+            password_confirm = input("Confirm password: ").strip()
+            if password != password_confirm:
+                print("⚠ Passwords don't match. Please try again.\n")
+                continue
+            
+            success, message = create_user(username, password, is_admin=True)
+            if success:
+                print(f"✓ {message}\n")
+                return True
+            else:
+                print(f"⚠ {message}. Please try again.\n")
+        except (EOFError, KeyboardInterrupt):
+            print("\n\nAdmin account creation cancelled.")
+            print("An admin account is required to run the web server.")
+            return False
+
+
 def run_server(host: str, port: int, interval: int) -> None:
     global HTML_REFRESH_SECONDS, COMPLETED_JOBS
     config = get_config()
@@ -14817,6 +15450,12 @@ def main():
         return
 
     log("Launching Recon Command Center web server.")
+    
+    # Ensure admin account exists before starting server
+    if not prompt_admin_creation():
+        log("ERROR: Cannot start web server without an admin account.")
+        return
+    
     run_server(args.host, args.port, args.interval)
 
 
