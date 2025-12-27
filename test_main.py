@@ -1838,6 +1838,155 @@ class TestBuildStatePayloadSummary:
         assert subdomain["screenshot"]["path"] == "/path/to/screenshot.png"
 
 
+class TestWildcardSubdomainFiltering:
+    """
+    Tests for wildcard subdomain filtering to prevent recursive job issues.
+    
+    When entering *.openai.com, the tool should:
+    1. Strip the * and create ONE job for openai.com with broad_scope=True
+    2. Reject any wildcard subdomains discovered by enumeration tools
+    3. Never create recursive jobs for discovered wildcard DNS records
+    """
+    
+    def test_is_valid_subdomain_rejects_wildcards(self):
+        """Test that is_valid_subdomain rejects wildcard patterns"""
+        # These should be REJECTED (wildcards from tool output)
+        assert main.is_valid_subdomain('*.openai.com') == False
+        assert main.is_valid_subdomain('*.api.openai.com') == False
+        assert main.is_valid_subdomain('*.test.example.com') == False
+        assert main.is_valid_subdomain('*test.com') == False
+        assert main.is_valid_subdomain('test*.com') == False
+        assert main.is_valid_subdomain('test.*.com') == False
+        
+        # These should be ACCEPTED (normal subdomains)
+        assert main.is_valid_subdomain('api.openai.com') == True
+        assert main.is_valid_subdomain('chat.openai.com') == True
+        assert main.is_valid_subdomain('openai.com') == True
+        assert main.is_valid_subdomain('deep.api.openai.com') == True
+        assert main.is_valid_subdomain('test-api.example.com') == True
+        assert main.is_valid_subdomain('test_api.example.com') == True
+    
+    def test_read_lines_file_filters_wildcards(self):
+        """Test that read_lines_file filters out wildcard subdomains"""
+        # Create temporary file with mixed content
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write("api.openai.com\n")
+            f.write("*.wildcard.openai.com\n")  # Should be filtered
+            f.write("chat.openai.com\n")
+            f.write("*.another.openai.com\n")  # Should be filtered
+            f.write("valid.subdomain.com\n")
+            f.write("*.test.example.com\n")  # Should be filtered
+            temp_path = f.name
+        
+        try:
+            result = main.read_lines_file(Path(temp_path))
+            
+            # Should only contain non-wildcard subdomains
+            assert 'api.openai.com' in result
+            assert 'chat.openai.com' in result
+            assert 'valid.subdomain.com' in result
+            
+            # Should NOT contain wildcard entries
+            assert '*.wildcard.openai.com' not in result
+            assert '*.another.openai.com' not in result
+            assert '*.test.example.com' not in result
+            
+            # Verify count
+            assert len(result) == 3
+        finally:
+            os.unlink(temp_path)
+    
+    def test_expand_wildcard_creates_single_job(self):
+        """Test that *.openai.com creates exactly ONE job for openai.com"""
+        config = main.default_config()
+        
+        # Test subdomain wildcard
+        targets_with_flags = main.expand_wildcard_targets('*.openai.com', config)
+        
+        # Should create exactly ONE target
+        assert len(targets_with_flags) == 1
+        
+        # Should be openai.com (without the *)
+        domain, is_broad = targets_with_flags[0]
+        assert domain == 'openai.com'
+        
+        # Should be marked as broad scope
+        assert is_broad == True
+    
+    def test_wildcard_tld_expansion(self):
+        """Test that wildcard TLD expansion works correctly"""
+        config = main.default_config()
+        config['wildcard_tlds'] = ['com', 'net', 'org']
+        
+        # Test TLD wildcard
+        targets_with_flags = main.expand_wildcard_targets('example.*', config)
+        
+        # Should create multiple targets (one per TLD)
+        assert len(targets_with_flags) == 3
+        
+        domains = [domain for domain, _ in targets_with_flags]
+        assert 'example.com' in domains
+        assert 'example.net' in domains
+        assert 'example.org' in domains
+        
+        # TLD wildcards should NOT be marked as broad scope
+        for domain, is_broad in targets_with_flags:
+            assert is_broad == False
+    
+    def test_combined_wildcards(self):
+        """Test combined subdomain and TLD wildcards"""
+        config = main.default_config()
+        config['wildcard_tlds'] = ['com', 'net']
+        
+        # Test *.example.*
+        targets_with_flags = main.expand_wildcard_targets('*.example.*', config)
+        
+        # Should expand TLDs but strip subdomain wildcard
+        assert len(targets_with_flags) == 2
+        
+        domains = [domain for domain, _ in targets_with_flags]
+        assert 'example.com' in domains
+        assert 'example.net' in domains
+        
+        # Should be marked as broad scope (due to subdomain wildcard)
+        for domain, is_broad in targets_with_flags:
+            assert is_broad == True
+    
+    def test_no_recursive_jobs_from_discovered_wildcards(self):
+        """
+        Integration test: Verify that wildcard subdomains discovered by tools
+        don't create recursive jobs
+        """
+        # This test documents the expected behavior:
+        # 1. User enters *.openai.com
+        # 2. System creates ONE job for openai.com
+        # 3. Tools discover subdomains, possibly including wildcard DNS records
+        # 4. Wildcard DNS records are filtered and NOT added to state
+        # 5. NO new jobs are created for discovered subdomains
+        
+        config = main.default_config()
+        
+        # Simulate user input
+        targets_with_flags = main.expand_wildcard_targets('*.openai.com', config)
+        assert len(targets_with_flags) == 1
+        
+        # Simulate tool output containing wildcards
+        tool_output = [
+            'api.openai.com',
+            '*.wildcard.openai.com',  # Wildcard DNS record
+            'chat.openai.com',
+        ]
+        
+        # Filter using is_valid_subdomain (as read_lines_file does)
+        filtered = [s for s in tool_output if main.is_valid_subdomain(s)]
+        
+        # Should only have non-wildcard entries
+        assert len(filtered) == 2
+        assert 'api.openai.com' in filtered
+        assert 'chat.openai.com' in filtered
+        assert '*.wildcard.openai.com' not in filtered
+
+
 if __name__ == '__main__':
     # Run tests with pytest
     pytest.main([__file__, '-v', '--tb=short'])

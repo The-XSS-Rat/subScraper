@@ -4487,7 +4487,11 @@ def strip_ansi_codes(text: str) -> str:
 def is_valid_subdomain(text: str) -> bool:
     """
     Validate that a string looks like a valid domain or subdomain.
-    Returns False for ANSI codes, error messages, status messages, etc.
+    Returns False for ANSI codes, error messages, status messages, wildcards, etc.
+    
+    NOTE: This function is used to validate tool output (discovered subdomains).
+    Wildcards are rejected here because tools should return concrete subdomains,
+    not wildcard patterns. Wildcard inputs are handled separately by expand_wildcard_targets().
     """
     if not text:
         return False
@@ -4497,12 +4501,17 @@ def is_valid_subdomain(text: str) -> bool:
     if not cleaned:
         return False
     
+    # Reject wildcards - these should not appear in tool output
+    # Wildcard DNS records like *.api.example.com should be ignored
+    if '*' in cleaned:
+        return False
+    
     # Reject lines that are clearly not domains
     # Check for common patterns in tool output that shouldn't be domains
     invalid_patterns = [
         r'^\[',  # Starts with bracket (ANSI remnants, arrays, etc.)
         r'^\]',  # Starts with closing bracket
-        r'^[-\+#]',  # Starts with status symbols (but not * for wildcards)
+        r'^[-\+#]',  # Starts with status symbols
         r'error|Error|ERROR',  # Contains error keywords
         r'warning|Warning|WARNING',  # Contains warning keywords
         r'searching|enumerat|finish|coded by',  # Tool status messages
@@ -4525,8 +4534,8 @@ def is_valid_subdomain(text: str) -> bool:
         return False
     
     # Check if it looks like a domain (alphanumeric with dots, hyphens, underscores)
-    # Allow wildcards at the start (*.example.com)
-    domain_pattern = r'^(\*\.)?[a-z0-9]([a-z0-9\-_]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-_]*[a-z0-9])?)+$'
+    # No wildcards allowed in tool output
+    domain_pattern = r'^[a-z0-9]([a-z0-9\-_]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-_]*[a-z0-9])?)+$'
     if not re.match(domain_pattern, cleaned, re.IGNORECASE):
         return False
     
