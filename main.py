@@ -3666,7 +3666,10 @@ def get_tool_installation_instructions(tool: str) -> str:
 AMASS - OWASP Amass Subdomain Enumeration
 ==========================================
 
-Ubuntu/Debian:
+Ubuntu (Snap - Recommended):
+  sudo snap install amass
+
+Ubuntu/Debian (APT):
   sudo apt-get update && sudo apt-get install -y amass
 
 macOS (Homebrew):
@@ -3948,6 +3951,24 @@ def ensure_tool_installed(tool: str) -> bool:
     except Exception as e:
         log(f"apt-get install attempt failed for {tool}: {e}")
 
+    # Try snap for amass on Ubuntu
+    if tool == "amass":
+        try:
+            if shutil.which("snap"):
+                log(f"Trying: sudo snap install amass")
+                subprocess.run(
+                    ["sudo", "snap", "install", "amass"],
+                    check=False,
+                )
+                # Snap installs to /snap/bin which should be in PATH
+                resolved = _resolve_tool_path(tool)
+                if resolved:
+                    TOOLS[tool] = resolved
+                    log(f"{tool} installed via snap.")
+                    return True
+        except Exception as e:
+            log(f"snap install attempt failed for {tool}: {e}")
+
     # Try Homebrew
     try:
         if shutil.which("brew"):
@@ -4213,7 +4234,7 @@ def run_setup_wizard() -> None:
     
     print("\n3. START THE WEB SERVER")
     print("   $ python3 main.py")
-    print("   Then open: http://127.0.0.1:8342")
+    print("   Then open: http://0.0.0.0:8342 (or http://<your-ip>:8342)")
     
     print("\n4. OR RUN A DIRECT SCAN")
     print("   $ python3 main.py example.com --wordlist /path/to/wordlist.txt")
@@ -15585,8 +15606,8 @@ def main():
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Host/IP for the web UI (default: 127.0.0.1)."
+        default="0.0.0.0",
+        help="Host/IP for the web UI (default: 0.0.0.0)."
     )
     parser.add_argument(
         "--port",

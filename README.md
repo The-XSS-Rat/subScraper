@@ -62,7 +62,7 @@ python3 main.py --skip-setup
 ### Native Installation
 
 ```bash
-# After setup, launch the web UI (default: http://127.0.0.1:8342)
+# After setup, launch the web UI (default: http://0.0.0.0:8342)
 python3 main.py
 
 # Run a one-off target directly from the CLI
