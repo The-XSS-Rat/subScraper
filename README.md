@@ -5,6 +5,8 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 ## Highlights
 
 - **Full pipeline automation** – Amass/Subfinder/Assetfinder/Findomain/Sublist3r feed ffuf, httpx, screenshot capture, nuclei, and nikto in one go.
+- **User authentication & management** – Secure login system with admin and regular user roles. Create, edit, and delete users through the web UI. See [USER_MANAGEMENT_AND_HTTPS.md](USER_MANAGEMENT_AND_HTTPS.md) for details.
+- **HTTPS support** – Serve the web UI over HTTPS with automatic self-signed certificate generation or bring your own certificates. See [USER_MANAGEMENT_AND_HTTPS.md](USER_MANAGEMENT_AND_HTTPS.md) for details.
 - **Stateful & resumable** – Results live in `recon_data/state.json`, so re-running a target picks up exactly where it left off. Jobs can be paused/resumed live.
 - **Persistent job reports** – Completed scan reports remain visible in the dashboard with completion timestamps. All job history persists across restarts in `recon_data/completed_jobs.json`.
 - **Live dashboard** – A modern SPA served from `main.py` tracks jobs, queue, worker slots, tool availability, and detailed per-program reports.
@@ -64,6 +66,12 @@ python3 main.py --skip-setup
 ```bash
 # After setup, launch the web UI (default: http://0.0.0.0:8342)
 python3 main.py
+
+# Launch with HTTPS (auto-generates self-signed certificate)
+python3 main.py --https
+
+# Launch with custom SSL certificate
+python3 main.py --https --cert /path/to/cert.pem --key /path/to/key.pem
 
 # Run a one-off target directly from the CLI
 python3 main.py example.com --wordlist ./w.txt --skip-nikto
