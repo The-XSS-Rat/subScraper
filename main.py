@@ -29,6 +29,7 @@ import secrets
 import shlex
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -1224,6 +1225,110 @@ def has_admin_user() -> bool:
     cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
     count = cursor.fetchone()[0]
     return count > 0
+
+
+def update_user(user_id: int, username: Optional[str] = None, password: Optional[str] = None, is_admin: Optional[bool] = None) -> Tuple[bool, str]:
+    """Update an existing user."""
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Check if user exists
+    cursor.execute("SELECT id, username, is_admin FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        return False, "User not found"
+    
+    old_username = row[1]
+    old_is_admin = bool(row[2])
+    
+    # Validate inputs if provided
+    if username is not None:
+        username = username.strip()
+        if len(username) < 3:
+            return False, "Username must be at least 3 characters long"
+        if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+            return False, "Username can only contain letters, numbers, underscores, and hyphens"
+    
+    if password is not None:
+        password = password.strip()
+        if len(password) < 6:
+            return False, "Password must be at least 6 characters long"
+    
+    # Check if this is the last admin and trying to remove admin privileges
+    if is_admin is not None and old_is_admin and not is_admin:
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+        admin_count = cursor.fetchone()[0]
+        if admin_count <= 1:
+            return False, "Cannot remove admin privileges from the last admin user"
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        # Build update query dynamically based on what's being updated
+        updates = []
+        params = []
+        
+        if username is not None:
+            updates.append("username = ?")
+            params.append(username.lower())
+        
+        if password is not None:
+            updates.append("password_hash = ?")
+            params.append(hash_password(password))
+        
+        if is_admin is not None:
+            updates.append("is_admin = ?")
+            params.append(1 if is_admin else 0)
+        
+        if not updates:
+            return False, "No changes specified"
+        
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.append(user_id)
+        
+        query = f"UPDATE users SET {', '.join(updates)} WHERE id = ?"
+        cursor.execute(query, params)
+        db.commit()
+        
+        log(f"User '{old_username}' (ID: {user_id}) updated successfully")
+        return True, "User updated successfully"
+    except sqlite3.IntegrityError:
+        return False, f"Username '{username}' already exists"
+    except Exception as e:
+        log(f"Error updating user: {e}")
+        return False, f"Error updating user: {str(e)}"
+
+
+def delete_user(user_id: int) -> Tuple[bool, str]:
+    """Delete a user."""
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Check if user exists
+    cursor.execute("SELECT username, is_admin FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        return False, "User not found"
+    
+    username = row[0]
+    is_admin = bool(row[1])
+    
+    # Prevent deletion of the last admin
+    if is_admin:
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+        admin_count = cursor.fetchone()[0]
+        if admin_count <= 1:
+            return False, "Cannot delete the last admin user"
+    
+    try:
+        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        db.commit()
+        log(f"User '{username}' (ID: {user_id}) deleted successfully")
+        return True, f"User '{username}' deleted successfully"
+    except Exception as e:
+        log(f"Error deleting user: {e}")
+        return False, f"Error deleting user: {str(e)}"
 
 
 def generate_session_token() -> str:
@@ -8291,10 +8396,85 @@ function displayUsers(users) {
         ${user.is_admin ? '<span class="badge" style="background: #3b82f6;">Admin</span>' : ''}
         <div class="muted" style="font-size: 12px; margin-top: 4px;">Created: ${fmtTime(user.created_at)}</div>
       </div>
+      <div style="display: flex; gap: 8px;">
+        <button onclick="editUser(${user.id}, '${escapeHtml(user.username)}', ${user.is_admin})" style="padding: 6px 12px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Edit</button>
+        <button onclick="deleteUser(${user.id}, '${escapeHtml(user.username)}')" style="padding: 6px 12px; background: #dc2626; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
+      </div>
     </div>
   `).join('');
   
   listEl.innerHTML = html;
+}
+
+async function editUser(userId, username, isAdmin) {
+  const newUsername = prompt('Enter new username (leave empty to keep current):', username);
+  if (newUsername === null) return; // Cancelled
+  
+  const newPassword = prompt('Enter new password (leave empty to keep current):');
+  if (newPassword === null) return; // Cancelled
+  
+  const changeAdmin = confirm(`Current admin status: ${isAdmin ? 'Admin' : 'Regular user'}.\n\nClick OK to toggle admin status, or Cancel to keep current.`);
+  
+  const payload = { user_id: userId };
+  if (newUsername && newUsername.trim() !== username) {
+    payload.username = newUsername.trim();
+  }
+  if (newPassword && newPassword.trim()) {
+    payload.password = newPassword.trim();
+  }
+  if (changeAdmin) {
+    payload.is_admin = !isAdmin;
+  }
+  
+  // Check if any changes were made
+  if (!payload.username && !payload.password && !('is_admin' in payload)) {
+    alert('No changes specified');
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/users/edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    
+    const data = await resp.json();
+    if (data.success) {
+      alert(data.message);
+      loadUsers();
+    } else {
+      alert('Error: ' + (data.message || 'Failed to update user'));
+    }
+  } catch (err) {
+    console.error('Failed to update user:', err);
+    alert('An error occurred while updating the user');
+  }
+}
+
+async function deleteUser(userId, username) {
+  if (!confirm(`Are you sure you want to delete user '${username}'?\n\nThis action cannot be undone.`)) {
+    return;
+  }
+  
+  try {
+    const resp = await fetch('/api/users/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId })
+    });
+    
+    const data = await resp.json();
+    if (data.success) {
+      alert(data.message);
+      loadUsers();
+    } else {
+      alert('Error: ' + (data.message || 'Failed to delete user'));
+    }
+  } catch (err) {
+    console.error('Failed to delete user:', err);
+    alert('An error occurred while deleting the user');
+  }
 }
 
 // Create user form handler
@@ -15212,6 +15392,70 @@ form.addEventListener('submit', async (e) => {
             self._send_json({"success": success, "message": message}, status=status)
             return
         
+        if self.path == "/api/users/edit":
+            admin = self._require_admin()
+            if not admin:
+                return
+            
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_json({"success": False, "message": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            user_id = payload.get("user_id")
+            if not user_id:
+                self._send_json({"success": False, "message": "User ID is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            try:
+                user_id = int(user_id)
+            except (ValueError, TypeError):
+                self._send_json({"success": False, "message": "Invalid user ID"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            username = payload.get("username", "").strip() or None
+            password = payload.get("password", "").strip() or None
+            is_admin = payload.get("is_admin") if "is_admin" in payload else None
+            
+            success, message = update_user(user_id, username=username, password=password, is_admin=is_admin)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
+        if self.path == "/api/users/delete":
+            admin = self._require_admin()
+            if not admin:
+                return
+            
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_json({"success": False, "message": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            user_id = payload.get("user_id")
+            if not user_id:
+                self._send_json({"success": False, "message": "User ID is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            try:
+                user_id = int(user_id)
+            except (ValueError, TypeError):
+                self._send_json({"success": False, "message": "Invalid user ID"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            success, message = delete_user(user_id)
+            status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+            self._send_json({"success": success, "message": message}, status=status)
+            return
+        
         allowed = {
             "/api/run",
             "/api/settings",
@@ -15553,7 +15797,48 @@ def prompt_admin_creation() -> bool:
             return False
 
 
-def run_server(host: str, port: int, interval: int) -> None:
+def generate_self_signed_cert(cert_file: Path, key_file: Path) -> bool:
+    """
+    Generate a self-signed SSL certificate for HTTPS.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        log("Generating self-signed SSL certificate...")
+        
+        # Use OpenSSL to generate a self-signed certificate
+        # Valid for 365 days with 2048-bit RSA key
+        cmd = [
+            "openssl", "req", "-new", "-newkey", "rsa:2048", "-days", "365",
+            "-nodes", "-x509",
+            "-subj", "/C=US/ST=State/L=City/O=Organization/CN=localhost",
+            "-keyout", str(key_file),
+            "-out", str(cert_file)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            log(f"✓ Self-signed certificate generated:")
+            log(f"  Certificate: {cert_file}")
+            log(f"  Private key: {key_file}")
+            log("  Note: Browsers will show a security warning for self-signed certificates.")
+            log("  For production use, obtain a certificate from a trusted CA (e.g., Let's Encrypt).")
+            return True
+        else:
+            log(f"ERROR: Failed to generate certificate: {result.stderr}")
+            return False
+    except FileNotFoundError:
+        log("ERROR: OpenSSL not found. Please install OpenSSL to use HTTPS with auto-generated certificates.")
+        log("  Ubuntu/Debian: sudo apt-get install openssl")
+        log("  macOS: brew install openssl")
+        log("  Or provide your own certificate with --cert and --key arguments.")
+        return False
+    except Exception as e:
+        log(f"ERROR: Failed to generate certificate: {e}")
+        return False
+
+
+def run_server(host: str, port: int, interval: int, use_https: bool = False, cert_file: Optional[str] = None, key_file: Optional[str] = None) -> None:
     global HTML_REFRESH_SECONDS, COMPLETED_JOBS
     config = get_config()
     refresh = interval or config.get("default_interval", DEFAULT_INTERVAL)
@@ -15572,7 +15857,42 @@ def run_server(host: str, port: int, interval: int) -> None:
     start_session_cleanup_worker()  # Start session cleanup
     generate_html_dashboard()
     server = ThreadingHTTPServer((host, port), CommandCenterHandler)
-    log(f"Recon Command Center available at http://{host}:{port}")
+    
+    # Configure HTTPS if requested
+    if use_https:
+        # Determine certificate and key paths
+        if cert_file and key_file:
+            cert_path = Path(cert_file)
+            key_path = Path(key_file)
+            
+            if not cert_path.exists():
+                log(f"ERROR: Certificate file not found: {cert_file}")
+                return
+            if not key_path.exists():
+                log(f"ERROR: Key file not found: {key_file}")
+                return
+        else:
+            # Generate self-signed certificate
+            cert_path = DATA_DIR / "server.crt"
+            key_path = DATA_DIR / "server.key"
+            
+            # Only generate if they don't exist
+            if not cert_path.exists() or not key_path.exists():
+                if not generate_self_signed_cert(cert_path, key_path):
+                    log("ERROR: Failed to set up HTTPS. Starting HTTP server instead...")
+                    use_https = False
+        
+        if use_https:
+            # Wrap the socket with SSL
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(str(cert_path), str(key_path))
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            log(f"🔒 Recon Command Center available at https://{host}:{port}")
+            log(f"   Using certificate: {cert_path}")
+    
+    if not use_https:
+        log(f"Recon Command Center available at http://{host}:{port}")
+    
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -15619,6 +15939,19 @@ def main():
         "--skip-setup",
         action="store_true",
         help="Skip the first-run setup wizard (not recommended for first run)."
+    )
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="Enable HTTPS with a self-signed certificate (auto-generated if cert/key not provided)."
+    )
+    parser.add_argument(
+        "--cert",
+        help="Path to SSL certificate file (for HTTPS). If not provided with --https, a self-signed cert will be generated."
+    )
+    parser.add_argument(
+        "--key",
+        help="Path to SSL private key file (for HTTPS). If not provided with --https, a self-signed key will be generated."
     )
 
     args = parser.parse_args()
@@ -15683,7 +16016,7 @@ def main():
         log("ERROR: Cannot start web server without an admin account.")
         return
     
-    run_server(args.host, args.port, args.interval)
+    run_server(args.host, args.port, args.interval, use_https=args.https, cert_file=args.cert, key_file=args.key)
 
 
 if __name__ == "__main__":
