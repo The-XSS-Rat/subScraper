@@ -1970,6 +1970,310 @@ class TestWildcardSubdomainFiltering:
         assert '*.wildcard.openai.com' not in filtered
 
 
+class TestSubdomainExport:
+    """Tests for subdomain export functionality with filters"""
+    
+    def test_filter_domains_by_criteria_no_filters(self):
+        """Test filtering with no filters applied (all domains should pass)"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "pending": False,
+                    "subdomains": {
+                        "www.example.com": {},
+                        "api.example.com": {}
+                    }
+                },
+                "test.com": {
+                    "pending": True,
+                    "subdomains": {
+                        "mail.test.com": {}
+                    }
+                }
+            }
+        }
+        
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 2
+        assert "example.com" in result
+        assert "test.com" in result
+    
+    def test_filter_domains_by_domain_search(self):
+        """Test filtering by domain search string"""
+        state = {
+            "targets": {
+                "example.com": {"subdomains": {}},
+                "test.com": {"subdomains": {}},
+                "example.net": {"subdomains": {}}
+            }
+        }
+        
+        filters = {
+            "domainSearch": "example",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 2
+        assert "example.com" in result
+        assert "example.net" in result
+        assert "test.com" not in result
+    
+    def test_filter_domains_by_status(self):
+        """Test filtering by pending/complete status"""
+        state = {
+            "targets": {
+                "pending.com": {"pending": True, "subdomains": {}},
+                "complete.com": {"pending": False, "subdomains": {}},
+                "also-complete.com": {"subdomains": {}}
+            }
+        }
+        
+        # Test pending filter
+        filters = {
+            "domainSearch": "",
+            "status": "pending",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 1
+        assert "pending.com" in result
+        
+        # Test complete filter
+        filters["status"] = "complete"
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 2
+        assert "complete.com" in result
+        assert "also-complete.com" in result
+    
+    def test_filter_domains_by_severity(self):
+        """Test filtering by maximum severity"""
+        state = {
+            "targets": {
+                "critical.com": {
+                    "subdomains": {
+                        "www.critical.com": {
+                            "nuclei": [{"severity": "CRITICAL"}]
+                        }
+                    }
+                },
+                "low.com": {
+                    "subdomains": {
+                        "www.low.com": {
+                            "nuclei": [{"severity": "LOW"}]
+                        }
+                    }
+                },
+                "none.com": {
+                    "subdomains": {
+                        "www.none.com": {}
+                    }
+                }
+            }
+        }
+        
+        # Filter for HIGH or higher
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "HIGH",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 1
+        assert "critical.com" in result
+    
+    def test_filter_domains_by_findings(self):
+        """Test filtering by presence of security findings"""
+        state = {
+            "targets": {
+                "with-findings.com": {
+                    "subdomains": {
+                        "www.with-findings.com": {
+                            "nuclei": [{"severity": "LOW"}]
+                        }
+                    }
+                },
+                "no-findings.com": {
+                    "subdomains": {
+                        "www.no-findings.com": {}
+                    }
+                }
+            }
+        }
+        
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": True,
+            "hasScreenshots": False
+        }
+        
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 1
+        assert "with-findings.com" in result
+    
+    def test_filter_domains_by_screenshots(self):
+        """Test filtering by presence of screenshots"""
+        state = {
+            "targets": {
+                "with-screenshot.com": {
+                    "subdomains": {
+                        "www.with-screenshot.com": {
+                            "screenshot": {"path": "screenshot.png"}
+                        }
+                    }
+                },
+                "no-screenshot.com": {
+                    "subdomains": {
+                        "www.no-screenshot.com": {}
+                    }
+                }
+            }
+        }
+        
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": True
+        }
+        
+        result = main.filter_domains_by_criteria(state, filters)
+        assert len(result) == 1
+        assert "with-screenshot.com" in result
+    
+    def test_export_subdomains_txt(self):
+        """Test TXT export format"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {},
+                        "api.example.com": {}
+                    }
+                },
+                "test.com": {
+                    "subdomains": {
+                        "mail.test.com": {}
+                    }
+                }
+            }
+        }
+        
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        
+        result = main.export_subdomains_txt(state, filters)
+        lines = result.decode("utf-8").strip().split("\n")
+        
+        assert len(lines) == 3
+        assert "api.example.com" in lines
+        assert "mail.test.com" in lines
+        assert "www.example.com" in lines
+    
+    def test_export_subdomains_csv(self):
+        """Test CSV export format"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {
+                            "httpx": {
+                                "status_code": 200,
+                                "title": "Example Domain",
+                                "webserver": "nginx"
+                            },
+                            "nuclei": [{"severity": "LOW"}],
+                            "nikto": [],
+                            "sources": ["amass", "subfinder"]
+                        }
+                    }
+                }
+            }
+        }
+        
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        
+        result = main.export_subdomains_csv(state, filters)
+        lines = result.decode("utf-8").strip().split("\n")
+        
+        # Check header
+        assert "subdomain" in lines[0]
+        assert "parent_domain" in lines[0]
+        assert "status_code" in lines[0]
+        
+        # Check data row
+        assert len(lines) == 2  # Header + 1 data row
+        assert "www.example.com" in lines[1]
+        assert "example.com" in lines[1]
+        assert "200" in lines[1]
+        assert "Example Domain" in lines[1]
+    
+    def test_export_with_filters_applied(self):
+        """Test export respects filters (domain search)"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {},
+                        "api.example.com": {}
+                    }
+                },
+                "test.com": {
+                    "subdomains": {
+                        "mail.test.com": {}
+                    }
+                }
+            }
+        }
+        
+        # Filter to only include "example" domains
+        filters = {
+            "domainSearch": "example",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+        
+        result = main.export_subdomains_txt(state, filters)
+        lines = result.decode("utf-8").strip().split("\n")
+        
+        # Should only have subdomains from example.com
+        assert len(lines) == 2
+        assert "api.example.com" in lines
+        assert "www.example.com" in lines
+        assert "mail.test.com" not in "\n".join(lines)
+
+
 if __name__ == '__main__':
     # Run tests with pytest
     pytest.main([__file__, '-v', '--tb=short'])

@@ -85,6 +85,9 @@ MAX_JOB_LOG_LINE_LENGTH = 500
 AMASS_PROVIDERS = ["shodan", "virustotal", "securitytrails", "censys", "passivetotal", "binaryedge", "bevigil"]
 SUBFINDER_PROVIDERS = ["shodan", "censys", "virustotal", "binaryedge", "securitytrails", "passivetotal", "github"]
 
+# Severity levels for security findings
+SEVERITY_LEVELS = ['NONE', 'INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+
 # Tool names (can be adjusted per OS if needed)
 TOOLS = {
     "amass": "amass",
@@ -10257,6 +10260,20 @@ function getReportFilters() {
   }
 }
 
+function buildExportURLWithFilters(baseUrl) {
+  const filters = getReportFilters();
+  const params = new URLSearchParams();
+  
+  if (filters.domainSearch) params.set('domainSearch', filters.domainSearch);
+  if (filters.status !== 'all') params.set('status', filters.status);
+  if (filters.maxSeverity !== 'all') params.set('maxSeverity', filters.maxSeverity);
+  if (filters.hasFindings) params.set('hasFindings', 'true');
+  if (filters.hasScreenshots) params.set('hasScreenshots', 'true');
+  
+  const queryString = params.toString();
+  return queryString ? `${baseUrl}?${queryString}` : baseUrl;
+}
+
 function saveReportFiltersToStorage() {
   try {
     const domainSearch = document.getElementById('report-domain-search')?.value || '';
@@ -10560,6 +10577,8 @@ function renderReports(targets) {
     <div class="export-actions">
       <a class="btn" href="/api/export/state" target="_blank">Download JSON</a>
       <a class="btn secondary" href="/api/export/csv" target="_blank">Download CSV</a>
+      <button class="btn" id="export-subdomains-txt">Export Subdomains (TXT)</button>
+      <button class="btn secondary" id="export-subdomains-csv">Export Subdomains (CSV)</button>
     </div>
     ${filterControls}
     <div class="reports-layout">
@@ -10570,6 +10589,24 @@ function renderReports(targets) {
   
   // Attach filter event listeners
   attachReportFilterListeners();
+  
+  // Attach export subdomain button handlers
+  const exportTxtBtn = document.getElementById('export-subdomains-txt');
+  const exportCsvBtn = document.getElementById('export-subdomains-csv');
+  
+  if (exportTxtBtn) {
+    exportTxtBtn.addEventListener('click', () => {
+      const url = buildExportURLWithFilters('/api/export/subdomains/txt');
+      window.open(url, '_blank');
+    });
+  }
+  
+  if (exportCsvBtn) {
+    exportCsvBtn.addEventListener('click', () => {
+      const url = buildExportURLWithFilters('/api/export/subdomains/csv');
+      window.open(url, '_blank');
+    });
+  }
   
   renderReportDetail(selectedReportDomain);
 }
@@ -12662,6 +12699,132 @@ def build_targets_csv(state: Dict[str, Any]) -> bytes:
         nikto_count = sum(len(data.get("nikto") or []) for data in subs.values())
         screenshot_count = sum(1 for data in subs.values() if data.get("screenshot"))
         writer.writerow([domain, len(sub_keys), http_count, nuclei_count, nikto_count, screenshot_count])
+    return output.getvalue().encode("utf-8")
+
+
+def extract_finding_severity(finding: Dict[str, Any], is_nikto: bool = False) -> str:
+    """Extract and normalize severity from a finding (nuclei or nikto)."""
+    if is_nikto:
+        # Nikto findings may use 'severity' or 'risk' field
+        severity = (finding.get("severity") or finding.get("risk") or "INFO").upper()
+    else:
+        # Nuclei findings use 'severity' field
+        severity = (finding.get("severity") or "INFO").upper()
+    
+    # Validate and return
+    return severity if severity in SEVERITY_LEVELS else "INFO"
+
+
+def get_max_severity(info: Dict[str, Any]) -> str:
+    """Calculate the maximum severity for a domain based on nuclei and nikto findings."""
+    max_severity = 'NONE'
+    
+    subs = info.get("subdomains", {})
+    for sub_data in subs.values():
+        # Check nuclei findings
+        for finding in sub_data.get("nuclei", []):
+            severity = extract_finding_severity(finding, is_nikto=False)
+            if SEVERITY_LEVELS.index(severity) > SEVERITY_LEVELS.index(max_severity):
+                max_severity = severity
+        
+        # Check nikto findings
+        for finding in sub_data.get("nikto", []):
+            severity = extract_finding_severity(finding, is_nikto=True)
+            if SEVERITY_LEVELS.index(severity) > SEVERITY_LEVELS.index(max_severity):
+                max_severity = severity
+    
+    return max_severity
+
+
+def filter_domains_by_criteria(state: Dict[str, Any], filters: Dict[str, Any]) -> List[str]:
+    """Filter domains based on report filter criteria."""
+    targets = state.get("targets", {})
+    filtered_domains = []
+    
+    for domain, info in targets.items():
+        # Domain search filter
+        if filters.get("domainSearch"):
+            if filters["domainSearch"].lower() not in domain.lower():
+                continue
+        
+        # Status filter (pending/complete)
+        if filters.get("status", "all") != "all":
+            is_pending = info.get("pending", False)
+            if filters["status"] == "pending" and not is_pending:
+                continue
+            if filters["status"] == "complete" and is_pending:
+                continue
+        
+        # Severity filter
+        if filters.get("maxSeverity", "all") != "all":
+            domain_severity = get_max_severity(info)
+            filter_index = SEVERITY_LEVELS.index(filters["maxSeverity"])
+            domain_index = SEVERITY_LEVELS.index(domain_severity)
+            if domain_index < filter_index:
+                continue
+        
+        # Has findings filter
+        if filters.get("hasFindings", False):
+            subs = info.get("subdomains", {})
+            nuclei_count = sum(len(data.get("nuclei", [])) for data in subs.values())
+            nikto_count = sum(len(data.get("nikto", [])) for data in subs.values())
+            if nuclei_count == 0 and nikto_count == 0:
+                continue
+        
+        # Has screenshots filter
+        if filters.get("hasScreenshots", False):
+            subs = info.get("subdomains", {})
+            screenshot_count = sum(1 for data in subs.values() if data.get("screenshot"))
+            if screenshot_count == 0:
+                continue
+        
+        filtered_domains.append(domain)
+    
+    return filtered_domains
+
+
+def export_subdomains_txt(state: Dict[str, Any], filters: Dict[str, Any]) -> bytes:
+    """Export subdomains as plain text, one per line, respecting filters."""
+    filtered_domains = filter_domains_by_criteria(state, filters)
+    targets = state.get("targets", {})
+    
+    subdomains = []
+    for domain in filtered_domains:
+        info = targets.get(domain, {})
+        subs = info.get("subdomains", {})
+        subdomains.extend(sorted(subs.keys()))
+    
+    # Remove duplicates and sort
+    unique_subdomains = sorted(set(subdomains))
+    return "\n".join(unique_subdomains).encode("utf-8")
+
+
+def export_subdomains_csv(state: Dict[str, Any], filters: Dict[str, Any]) -> bytes:
+    """Export subdomains as CSV with details, respecting filters."""
+    filtered_domains = filter_domains_by_criteria(state, filters)
+    targets = state.get("targets", {})
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["subdomain", "parent_domain", "status_code", "title", "server", "has_screenshot", "nuclei_findings", "nikto_findings", "sources"])
+    
+    for domain in sorted(filtered_domains):
+        info = targets.get(domain, {})
+        subs = info.get("subdomains", {})
+        
+        for subdomain in sorted(subs.keys()):
+            sub_data = subs[subdomain]
+            httpx = sub_data.get("httpx", {})
+            status_code = httpx.get("status_code", "")
+            title = httpx.get("title", "")
+            server = httpx.get("webserver", "")
+            has_screenshot = "Yes" if sub_data.get("screenshot") else "No"
+            nuclei_count = len(sub_data.get("nuclei", []))
+            nikto_count = len(sub_data.get("nikto", []))
+            sources = ", ".join(sub_data.get("sources", []))
+            
+            writer.writerow([subdomain, domain, status_code, title, server, has_screenshot, nuclei_count, nikto_count, sources])
+    
     return output.getvalue().encode("utf-8")
 
 
@@ -15311,6 +15474,40 @@ form.addEventListener('submit', async (e) => {
             self.send_header("Content-Type", "text/csv")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Content-Disposition", 'attachment; filename="targets.csv"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/api/export/subdomains"):
+            # Parse query string for filters
+            parsed = urlparse(self.path)
+            query_params = parse_qs(parsed.query)
+            
+            # Extract filter parameters
+            filters = {
+                "domainSearch": query_params.get("domainSearch", [""])[0],
+                "status": query_params.get("status", ["all"])[0],
+                "maxSeverity": query_params.get("maxSeverity", ["all"])[0],
+                "hasFindings": query_params.get("hasFindings", ["false"])[0].lower() == "true",
+                "hasScreenshots": query_params.get("hasScreenshots", ["false"])[0].lower() == "true",
+            }
+            
+            # Determine format from path
+            if self.path.startswith("/api/export/subdomains/txt"):
+                data = export_subdomains_txt(load_state(), filters)
+                content_type = "text/plain"
+                filename = "subdomains.txt"
+            elif self.path.startswith("/api/export/subdomains/csv"):
+                data = export_subdomains_csv(load_state(), filters)
+                content_type = "text/csv"
+                filename = "subdomains.csv"
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
             self.wfile.write(data)
             return
