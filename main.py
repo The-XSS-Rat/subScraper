@@ -85,6 +85,9 @@ MAX_JOB_LOG_LINE_LENGTH = 500
 AMASS_PROVIDERS = ["shodan", "virustotal", "securitytrails", "censys", "passivetotal", "binaryedge", "bevigil"]
 SUBFINDER_PROVIDERS = ["shodan", "censys", "virustotal", "binaryedge", "securitytrails", "passivetotal", "github"]
 
+# Severity levels for security findings
+SEVERITY_LEVELS = ['NONE', 'INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+
 # Tool names (can be adjusted per OS if needed)
 TOOLS = {
     "amass": "amass",
@@ -12699,26 +12702,36 @@ def build_targets_csv(state: Dict[str, Any]) -> bytes:
     return output.getvalue().encode("utf-8")
 
 
+def extract_finding_severity(finding: Dict[str, Any], is_nikto: bool = False) -> str:
+    """Extract and normalize severity from a finding (nuclei or nikto)."""
+    if is_nikto:
+        # Nikto findings may use 'severity' or 'risk' field
+        severity = (finding.get("severity") or finding.get("risk") or "INFO").upper()
+    else:
+        # Nuclei findings use 'severity' field
+        severity = (finding.get("severity") or "INFO").upper()
+    
+    # Validate and return
+    return severity if severity in SEVERITY_LEVELS else "INFO"
+
+
 def get_max_severity(info: Dict[str, Any]) -> str:
     """Calculate the maximum severity for a domain based on nuclei and nikto findings."""
-    severity_levels = ['NONE', 'INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
     max_severity = 'NONE'
     
     subs = info.get("subdomains", {})
     for sub_data in subs.values():
         # Check nuclei findings
         for finding in sub_data.get("nuclei", []):
-            severity = (finding.get("severity") or "INFO").upper()
-            if severity in severity_levels:
-                if severity_levels.index(severity) > severity_levels.index(max_severity):
-                    max_severity = severity
+            severity = extract_finding_severity(finding, is_nikto=False)
+            if SEVERITY_LEVELS.index(severity) > SEVERITY_LEVELS.index(max_severity):
+                max_severity = severity
         
         # Check nikto findings
         for finding in sub_data.get("nikto", []):
-            severity = (finding.get("severity") or finding.get("risk") or "INFO").upper()
-            if severity in severity_levels:
-                if severity_levels.index(severity) > severity_levels.index(max_severity):
-                    max_severity = severity
+            severity = extract_finding_severity(finding, is_nikto=True)
+            if SEVERITY_LEVELS.index(severity) > SEVERITY_LEVELS.index(max_severity):
+                max_severity = severity
     
     return max_severity
 
@@ -12744,10 +12757,9 @@ def filter_domains_by_criteria(state: Dict[str, Any], filters: Dict[str, Any]) -
         
         # Severity filter
         if filters.get("maxSeverity", "all") != "all":
-            severity_levels = ['NONE', 'INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
             domain_severity = get_max_severity(info)
-            filter_index = severity_levels.index(filters["maxSeverity"])
-            domain_index = severity_levels.index(domain_severity)
+            filter_index = SEVERITY_LEVELS.index(filters["maxSeverity"])
+            domain_index = SEVERITY_LEVELS.index(domain_severity)
             if domain_index < filter_index:
                 continue
         
