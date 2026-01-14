@@ -284,7 +284,7 @@ RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 COMPLETED_JOBS: Dict[str, Dict[str, Any]] = {}  # Store completed job reports
 MAX_COMPLETED_JOBS_PER_DOMAIN = 10  # Keep last N completed jobs per domain
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
 
 # Global rate limiter
 RATE_LIMIT_LOCK = threading.Lock()
@@ -9576,20 +9576,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 4: URL Discovery</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool url-discovery">Waybackurls</span>
-        <span class="workflow-tool url-discovery">GAU</span>
-      </div>
-      <div class="workflow-description">Discover historical URLs and endpoints from web archives and other sources</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 5: Visual Capture</div>
+      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
       <div class="workflow-tools">
         <span class="workflow-tool capture">Gowitness</span>
       </div>
@@ -9601,12 +9588,21 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 5: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
       </div>
       <div class="workflow-description">Automated vulnerability scanning and security checks on discovered targets</div>
+    </div>
+    
+    <div style="margin-top:24px; padding:16px; background:#0b152c; border-radius:12px; border:1px solid #1f2937;">
+      <div style="color:#fbbf24; font-weight:600; margin-bottom:8px;">📋 Manual Content Discovery</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool url-discovery">Waybackurls</span>
+        <span class="workflow-tool url-discovery">GAU</span>
+      </div>
+      <div class="workflow-description">URL discovery tools can be triggered manually from subdomain detail pages</div>
     </div>
   `;
   
@@ -11126,6 +11122,7 @@ async function renderReportDetail(domain) {
         ${badge}
       </div>
       <div class="report-actions">
+        <a href="/domain/${encodeURIComponent(domain)}" class="btn small" target="_blank">View Domain Details</a>
         ${stats.screenshots > 0 ? `<a href="/gallery/${encodeURIComponent(domain)}" class="btn secondary small" target="_blank">View Screenshots Gallery</a>` : ''}
         ${resumeButton}
         ${resumeNotice}
@@ -14278,13 +14275,19 @@ function renderSubdomainDetail(info, history) {{
   // Marking and action buttons
   html += `
     <div class="section">
-      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+      <h2>Actions</h2>
+      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
         <button class="btn" onclick="markSubdomain(true)" style="background: #10b981;">Mark as Interesting</button>
         <button class="btn" onclick="markSubdomain(false)" style="background: #ef4444;">Mark as Not Interesting</button>
         <button class="btn secondary" onclick="markSubdomain(null)">Clear Mark</button>
         ${{interesting === true ? '<span class="badge" style="background: #10b981; color: white; margin-left: 8px;">⭐ Interesting</span>' : ''}}
         ${{interesting === false ? '<span class="badge" style="background: #ef4444; color: white; margin-left: 8px;">🚫 Not Interesting</span>' : ''}}
       </div>
+      <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+        <button class="btn" onclick="runContentDiscovery('waybackurls')" style="background: #ec4899;">🔍 Run Waybackurls</button>
+        <button class="btn" onclick="runContentDiscovery('gau')" style="background: #8b5cf6;">🔍 Run GAU</button>
+      </div>
+      <div id="content-discovery-status" style="margin-top: 12px; padding: 8px; border-radius: 6px; display: none;"></div>
     </div>
   `;
   
@@ -14487,6 +14490,39 @@ async function deleteComment(commentId) {{
     }}
   }} catch (err) {{
     alert('Error deleting comment: ' + err.message);
+  }}
+}}
+
+async function runContentDiscovery(tool) {{
+  const statusDiv = document.getElementById('content-discovery-status');
+  statusDiv.style.display = 'block';
+  statusDiv.style.background = '#1e40af';
+  statusDiv.style.color = '#bfdbfe';
+  statusDiv.textContent = `Running ${{tool}} for ${{subdomain}}...`;
+  
+  try {{
+    const resp = await fetch('/api/subdomain/run-tool', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ domain, subdomain, tool }})
+    }});
+    const result = await resp.json();
+    if (result.success) {{
+      statusDiv.style.background = '#065f46';
+      statusDiv.style.color = '#a7f3d0';
+      statusDiv.textContent = result.message || `${{tool}} completed successfully`;
+      setTimeout(() => {{
+        loadSubdomainDetail(); // Reload to show updated data
+      }}, 2000);
+    }} else {{
+      statusDiv.style.background = '#7f1d1d';
+      statusDiv.style.color = '#fca5a5';
+      statusDiv.textContent = 'Error: ' + result.message;
+    }}
+  }} catch (err) {{
+    statusDiv.style.background = '#7f1d1d';
+    statusDiv.style.color = '#fca5a5';
+    statusDiv.textContent = 'Error running ${{tool}}: ' + err.message;
   }}
 }}
 
@@ -15671,6 +15707,7 @@ form.addEventListener('submit', async (e) => {
             "/api/cleanup/run",
             "/api/subdomain/mark",
             "/api/subdomain/comment",
+            "/api/subdomain/run-tool",
             "/api/target/comment",
         }
         if self.path not in allowed:
@@ -15889,6 +15926,68 @@ form.addEventListener('submit', async (e) => {
                 self._send_json({"success": True, "message": "Comment deleted"})
             else:
                 self._send_json({"success": False, "message": "Invalid action"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if self.path == "/api/subdomain/run-tool":
+            domain = payload.get("domain", "").strip().lower()
+            subdomain = payload.get("subdomain", "").strip().lower()
+            tool = payload.get("tool", "").strip().lower()
+            
+            if not domain or not subdomain or not tool:
+                self._send_json({"success": False, "message": "Domain, subdomain, and tool are required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            if tool not in ["waybackurls", "gau"]:
+                self._send_json({"success": False, "message": "Invalid tool. Allowed: waybackurls, gau"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            state = load_state()
+            target = state.get("targets", {}).get(domain)
+            if not target or subdomain not in target.get("subdomains", {}):
+                self._send_json({"success": False, "message": "Subdomain not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            
+            # Run the tool in a background thread to avoid blocking the UI
+            def run_tool_async():
+                try:
+                    if tool == "waybackurls":
+                        urls = waybackurls_enum(domain)
+                        log(f"waybackurls found {len(urls)} URLs for {domain}")
+                        # Store endpoints in state
+                        state = load_state()
+                        tgt = state.get("targets", {}).get(domain)
+                        if tgt:
+                            existing_endpoints = set(tgt.get("endpoints", []))
+                            for url in urls:
+                                if url and url not in existing_endpoints:
+                                    if "endpoints" not in tgt:
+                                        tgt["endpoints"] = []
+                                    tgt["endpoints"].append(url)
+                            tgt["flags"]["waybackurls_done"] = True
+                            save_state(state)
+                    elif tool == "gau":
+                        urls = gau_enum(domain)
+                        log(f"gau found {len(urls)} URLs for {domain}")
+                        # Store endpoints in state
+                        state = load_state()
+                        tgt = state.get("targets", {}).get(domain)
+                        if tgt:
+                            existing_endpoints = set(tgt.get("endpoints", []))
+                            for url in urls:
+                                if url and url not in existing_endpoints:
+                                    if "endpoints" not in tgt:
+                                        tgt["endpoints"] = []
+                                    tgt["endpoints"].append(url)
+                            tgt["flags"]["gau_done"] = True
+                            save_state(state)
+                except Exception as e:
+                    log(f"Error running {tool} for {subdomain}: {e}")
+            
+            # Start the tool in a background thread
+            thread = threading.Thread(target=run_tool_async, daemon=True)
+            thread.start()
+            
+            self._send_json({"success": True, "message": f"{tool} started for {subdomain}. Results will appear shortly."})
             return
 
         if self.path == "/api/target/comment":
