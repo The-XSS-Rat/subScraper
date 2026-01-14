@@ -284,7 +284,7 @@ RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 COMPLETED_JOBS: Dict[str, Dict[str, Any]] = {}  # Store completed job reports
 MAX_COMPLETED_JOBS_PER_DOMAIN = 10  # Keep last N completed jobs per domain
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "waybackurls", "gau", "screenshots", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
 
 # Global rate limiter
 RATE_LIMIT_LOCK = threading.Lock()
@@ -5494,59 +5494,10 @@ def run_downstream_pipeline(
             save_state(state)
             job_log_append(job_domain, f"httpx scanned {len(new_hosts)} hosts.", "httpx")
     
-    # ---------- waybackurls (URL discovery) ----------
-    if not flags.get("waybackurls_done") and config.get("enable_waybackurls", True):
-        log(f"=== waybackurls URL discovery for {domain} ===")
-        update_step("waybackurls", status="running", message="Discovering URLs from archive.org", progress=50)
-        if job_domain:
-            job_log_append(job_domain, "Waiting for waybackurls slot...", "scheduler")
-        with TOOL_GATES["waybackurls"]:
-            if job_domain:
-                job_log_append(job_domain, "waybackurls slot acquired.", "scheduler")
-            urls = waybackurls_enum(domain, job_domain=job_domain)
-        log(f"waybackurls found {len(urls)} URLs.")
-        # Store endpoints in state
-        tgt = ensure_target_state(state, domain)
-        existing_endpoints = set(tgt.get("endpoints", []))
-        for url in urls:
-            if url and url not in existing_endpoints:
-                tgt["endpoints"].append(url)
-        flags["waybackurls_done"] = True
-        save_state(state)
-        update_step("waybackurls", status="completed", message=f"waybackurls found {len(urls)} URLs.", progress=100)
-    elif not config.get("enable_waybackurls", True):
-        update_step("waybackurls", status="skipped", message="waybackurls disabled in settings.", progress=0)
-        flags["waybackurls_done"] = True
-        save_state(state)
-    else:
-        update_step("waybackurls", status="skipped", message="waybackurls already completed for this target.", progress=0)
-    
-    # ---------- gau (Get All URLs) ----------
-    if not flags.get("gau_done") and config.get("enable_gau", True):
-        log(f"=== gau URL discovery for {domain} ===")
-        update_step("gau", status="running", message="Discovering URLs from multiple sources", progress=50)
-        if job_domain:
-            job_log_append(job_domain, "Waiting for gau slot...", "scheduler")
-        with TOOL_GATES["gau"]:
-            if job_domain:
-                job_log_append(job_domain, "gau slot acquired.", "scheduler")
-            urls = gau_enum(domain, job_domain=job_domain)
-        log(f"gau found {len(urls)} URLs.")
-        # Store endpoints in state
-        tgt = ensure_target_state(state, domain)
-        existing_endpoints = set(tgt.get("endpoints", []))
-        for url in urls:
-            if url and url not in existing_endpoints:
-                tgt["endpoints"].append(url)
-        flags["gau_done"] = True
-        save_state(state)
-        update_step("gau", status="completed", message=f"gau found {len(urls)} URLs.", progress=100)
-    elif not config.get("enable_gau", True):
-        update_step("gau", status="skipped", message="gau disabled in settings.", progress=0)
-        flags["gau_done"] = True
-        save_state(state)
-    else:
-        update_step("gau", status="skipped", message="gau already completed for this target.", progress=0)
+    # ---------- waybackurls and gau (URL discovery) ----------
+    # NOTE: waybackurls and gau have been moved to manual execution from subdomain detail pages
+    # They are no longer part of the automatic workflow
+    # No need to mark them as they should remain unset for manual triggering
 
     # ---------- screenshots ----------
     if not config.get("enable_screenshots", True):
@@ -9576,20 +9527,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 4: URL Discovery</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool url-discovery">Waybackurls</span>
-        <span class="workflow-tool url-discovery">GAU</span>
-      </div>
-      <div class="workflow-description">Discover historical URLs and endpoints from web archives and other sources</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 5: Visual Capture</div>
+      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
       <div class="workflow-tools">
         <span class="workflow-tool capture">Gowitness</span>
       </div>
@@ -9601,12 +9539,21 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 6: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 5: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
         <span class="workflow-tool scanning">Nikto</span>
       </div>
       <div class="workflow-description">Automated vulnerability scanning and security checks on discovered targets</div>
+    </div>
+    
+    <div style="margin-top:24px; padding:16px; background:#0b152c; border-radius:12px; border:1px solid #1f2937;">
+      <div style="color:#fbbf24; font-weight:600; margin-bottom:8px;">📋 Manual Content Discovery</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool url-discovery">Waybackurls</span>
+        <span class="workflow-tool url-discovery">GAU</span>
+      </div>
+      <div class="workflow-description">URL discovery tools can be triggered manually from subdomain detail pages</div>
     </div>
   `;
   
@@ -11126,6 +11073,7 @@ async function renderReportDetail(domain) {
         ${badge}
       </div>
       <div class="report-actions">
+        <a href="/domain/${encodeURIComponent(domain)}" class="btn small" target="_blank">View Domain Details</a>
         ${stats.screenshots > 0 ? `<a href="/gallery/${encodeURIComponent(domain)}" class="btn secondary small" target="_blank">View Screenshots Gallery</a>` : ''}
         ${resumeButton}
         ${resumeNotice}
@@ -14258,13 +14206,13 @@ async function loadSubdomainDetail() {{
     if (!data.success) throw new Error(data.message || 'Failed to load data');
     
     document.getElementById('subdomain-title').textContent = subdomain;
-    renderSubdomainDetail(data.data, data.history);
+    renderSubdomainDetail(data.data, data.history, data.endpoints, data.flags);
   }} catch (err) {{
     document.getElementById('content').innerHTML = `<div class="section"><p class="muted">Error: ${{escapeHtml(err.message)}}</p></div>`;
   }}
 }}
 
-function renderSubdomainDetail(info, history) {{
+function renderSubdomainDetail(info, history, endpoints, flags) {{
   const sources = info.sources || [];
   const httpx = info.httpx || {{}};
   const screenshot = info.screenshot || {{}};
@@ -14273,18 +14221,32 @@ function renderSubdomainDetail(info, history) {{
   const interesting = info.interesting;
   const comments = info.comments || [];
   
+  // Check if content discovery has been run
+  const waybackurlsDone = flags?.waybackurls_done || false;
+  const gauDone = flags?.gau_done || false;
+  
   let html = '';
   
   // Marking and action buttons
   html += `
     <div class="section">
-      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px;">
+      <h2>Actions</h2>
+      <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
         <button class="btn" onclick="markSubdomain(true)" style="background: #10b981;">Mark as Interesting</button>
         <button class="btn" onclick="markSubdomain(false)" style="background: #ef4444;">Mark as Not Interesting</button>
         <button class="btn secondary" onclick="markSubdomain(null)">Clear Mark</button>
         ${{interesting === true ? '<span class="badge" style="background: #10b981; color: white; margin-left: 8px;">⭐ Interesting</span>' : ''}}
         ${{interesting === false ? '<span class="badge" style="background: #ef4444; color: white; margin-left: 8px;">🚫 Not Interesting</span>' : ''}}
       </div>
+      <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+        <button class="btn" onclick="runContentDiscovery('waybackurls')" style="background: #ec4899;">
+          🔍 Run Waybackurls ${{waybackurlsDone ? '✓' : ''}}
+        </button>
+        <button class="btn" onclick="runContentDiscovery('gau')" style="background: #8b5cf6;">
+          🔍 Run GAU ${{gauDone ? '✓' : ''}}
+        </button>
+      </div>
+      <div id="content-discovery-status" style="margin-top: 12px; padding: 8px; border-radius: 6px; display: none;"></div>
     </div>
   `;
   
@@ -14404,6 +14366,22 @@ function renderSubdomainDetail(info, history) {{
   }}
   html += '</div>';
   
+  // Discovered URLs/Endpoints section
+  html += `
+    <div class="section">
+      <h2>Discovered URLs (${{endpoints?.length || 0}})</h2>
+      ${{endpoints && endpoints.length ? `
+        <div style="max-height: 300px; overflow-y: auto; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px;">
+          ${{endpoints.map(url => `
+            <div style="padding: 4px 0; border-bottom: 1px solid #1f2937;">
+              <a href="${{escapeHtml(url)}}" target="_blank" rel="noopener noreferrer" style="color: #60a5fa; text-decoration: none; font-size: 0.9rem; word-break: break-all;">${{escapeHtml(url)}}</a>
+            </div>
+          `).join('')}}
+        </div>
+      ` : `<p class="muted">No URLs discovered yet. Run Waybackurls or GAU to find URLs for this domain.</p>`}}
+    </div>
+  `;
+  
   // Comments section
   html += `
     <div class="section">
@@ -14487,6 +14465,39 @@ async function deleteComment(commentId) {{
     }}
   }} catch (err) {{
     alert('Error deleting comment: ' + err.message);
+  }}
+}}
+
+async function runContentDiscovery(tool) {{
+  const statusDiv = document.getElementById('content-discovery-status');
+  statusDiv.style.display = 'block';
+  statusDiv.style.background = '#1e40af';
+  statusDiv.style.color = '#bfdbfe';
+  statusDiv.textContent = `Running ${{tool}} for ${{subdomain}}...`;
+  
+  try {{
+    const resp = await fetch('/api/subdomain/run-tool', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ domain, subdomain, tool }})
+    }});
+    const result = await resp.json();
+    if (result.success) {{
+      statusDiv.style.background = '#065f46';
+      statusDiv.style.color = '#a7f3d0';
+      statusDiv.textContent = result.message || `${{tool}} completed successfully`;
+      setTimeout(() => {{
+        loadSubdomainDetail(); // Reload to show updated data
+      }}, 2000);
+    }} else {{
+      statusDiv.style.background = '#7f1d1d';
+      statusDiv.style.color = '#fca5a5';
+      statusDiv.textContent = 'Error: ' + result.message;
+    }}
+  }} catch (err) {{
+    statusDiv.style.background = '#7f1d1d';
+    statusDiv.style.color = '#fca5a5';
+    statusDiv.textContent = 'Error running ${{tool}}: ' + err.message;
   }}
 }}
 
@@ -15170,6 +15181,10 @@ form.addEventListener('submit', async (e) => {
                     self._send_json({"success": False, "message": "Subdomain not found"}, status=HTTPStatus.NOT_FOUND)
                     return
                 sub_data = target["subdomains"][subdomain]
+                # Include domain-level endpoints that might be relevant to this subdomain
+                domain_endpoints = target.get("endpoints", [])
+                # Filter endpoints that contain this subdomain
+                relevant_endpoints = [url for url in domain_endpoints if subdomain in url]
                 try:
                     # OPTIMIZATION: Load only recent history for subdomain detail page (limit for performance)
                     # Reduced to 500 entries for better performance with large datasets
@@ -15181,6 +15196,8 @@ form.addEventListener('submit', async (e) => {
                     "domain": domain,
                     "subdomain": subdomain,
                     "data": sub_data,
+                    "endpoints": relevant_endpoints,
+                    "flags": target.get("flags", {}),
                     "history": history
                 })
                 return
@@ -15671,6 +15688,7 @@ form.addEventListener('submit', async (e) => {
             "/api/cleanup/run",
             "/api/subdomain/mark",
             "/api/subdomain/comment",
+            "/api/subdomain/run-tool",
             "/api/target/comment",
         }
         if self.path not in allowed:
@@ -15889,6 +15907,71 @@ form.addEventListener('submit', async (e) => {
                 self._send_json({"success": True, "message": "Comment deleted"})
             else:
                 self._send_json({"success": False, "message": "Invalid action"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if self.path == "/api/subdomain/run-tool":
+            domain = payload.get("domain", "").strip().lower()
+            subdomain = payload.get("subdomain", "").strip().lower()
+            tool = payload.get("tool", "").strip().lower()
+            
+            if not domain or not subdomain or not tool:
+                self._send_json({"success": False, "message": "Domain, subdomain, and tool are required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            if tool not in ["waybackurls", "gau"]:
+                self._send_json({"success": False, "message": "Invalid tool. Allowed: waybackurls, gau"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            state = load_state()
+            target = state.get("targets", {}).get(domain)
+            if not target or subdomain not in target.get("subdomains", {}):
+                self._send_json({"success": False, "message": "Subdomain not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            
+            # Run the tool in a background thread to avoid blocking the UI
+            def run_tool_async():
+                try:
+                    # Execute the tool
+                    if tool == "waybackurls":
+                        urls = waybackurls_enum(domain, job_domain=None)
+                        log(f"waybackurls found {len(urls)} URLs for {domain}")
+                    elif tool == "gau":
+                        urls = gau_enum(domain, job_domain=None)
+                        log(f"gau found {len(urls)} URLs for {domain}")
+                    else:
+                        return
+                    
+                    # Store endpoints in state
+                    state = load_state()
+                    tgt = ensure_target_state(state, domain)
+                    
+                    # Initialize endpoints list if it doesn't exist
+                    if "endpoints" not in tgt:
+                        tgt["endpoints"] = []
+                    
+                    # Add new URLs to endpoints
+                    existing_endpoints = set(tgt.get("endpoints", []))
+                    for url in urls:
+                        if url and url not in existing_endpoints:
+                            tgt["endpoints"].append(url)
+                    
+                    # Mark tool as done
+                    if "flags" not in tgt:
+                        tgt["flags"] = {}
+                    if tool == "waybackurls":
+                        tgt["flags"]["waybackurls_done"] = True
+                    elif tool == "gau":
+                        tgt["flags"]["gau_done"] = True
+                    
+                    save_state(state)
+                except Exception as e:
+                    log(f"Error running {tool} for {domain}/{subdomain}: {e}")
+            
+            # Start the tool in a background thread
+            thread = threading.Thread(target=run_tool_async, daemon=True)
+            thread.start()
+            
+            self._send_json({"success": True, "message": f"{tool} started for {subdomain}. Results will appear shortly."})
             return
 
         if self.path == "/api/target/comment":
