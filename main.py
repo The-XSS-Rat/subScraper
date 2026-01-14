@@ -5497,14 +5497,7 @@ def run_downstream_pipeline(
     # ---------- waybackurls and gau (URL discovery) ----------
     # NOTE: waybackurls and gau have been moved to manual execution from subdomain detail pages
     # They are no longer part of the automatic workflow
-    # Mark as skipped if not already done
-    state = load_state()
-    flags = ensure_target_state(state, domain)["flags"]
-    if not flags.get("waybackurls_done"):
-        flags["waybackurls_done"] = False  # Keep as not done so they can be triggered manually
-    if not flags.get("gau_done"):
-        flags["gau_done"] = False  # Keep as not done so they can be triggered manually
-    save_state(state)
+    # No need to mark them as they should remain unset for manual triggering
 
     # ---------- screenshots ----------
     if not config.get("enable_screenshots", True):
@@ -15938,38 +15931,41 @@ form.addEventListener('submit', async (e) => {
             # Run the tool in a background thread to avoid blocking the UI
             def run_tool_async():
                 try:
+                    # Execute the tool
                     if tool == "waybackurls":
-                        urls = waybackurls_enum(domain)
+                        urls = waybackurls_enum(domain, job_domain=None)
                         log(f"waybackurls found {len(urls)} URLs for {domain}")
-                        # Store endpoints in state
-                        state = load_state()
-                        tgt = state.get("targets", {}).get(domain)
-                        if tgt:
-                            existing_endpoints = set(tgt.get("endpoints", []))
-                            for url in urls:
-                                if url and url not in existing_endpoints:
-                                    if "endpoints" not in tgt:
-                                        tgt["endpoints"] = []
-                                    tgt["endpoints"].append(url)
-                            tgt["flags"]["waybackurls_done"] = True
-                            save_state(state)
                     elif tool == "gau":
-                        urls = gau_enum(domain)
+                        urls = gau_enum(domain, job_domain=None)
                         log(f"gau found {len(urls)} URLs for {domain}")
-                        # Store endpoints in state
-                        state = load_state()
-                        tgt = state.get("targets", {}).get(domain)
-                        if tgt:
-                            existing_endpoints = set(tgt.get("endpoints", []))
-                            for url in urls:
-                                if url and url not in existing_endpoints:
-                                    if "endpoints" not in tgt:
-                                        tgt["endpoints"] = []
-                                    tgt["endpoints"].append(url)
-                            tgt["flags"]["gau_done"] = True
-                            save_state(state)
+                    else:
+                        return
+                    
+                    # Store endpoints in state
+                    state = load_state()
+                    tgt = ensure_target_state(state, domain)
+                    
+                    # Initialize endpoints list if it doesn't exist
+                    if "endpoints" not in tgt:
+                        tgt["endpoints"] = []
+                    
+                    # Add new URLs to endpoints
+                    existing_endpoints = set(tgt.get("endpoints", []))
+                    for url in urls:
+                        if url and url not in existing_endpoints:
+                            tgt["endpoints"].append(url)
+                    
+                    # Mark tool as done
+                    if "flags" not in tgt:
+                        tgt["flags"] = {}
+                    if tool == "waybackurls":
+                        tgt["flags"]["waybackurls_done"] = True
+                    elif tool == "gau":
+                        tgt["flags"]["gau_done"] = True
+                    
+                    save_state(state)
                 except Exception as e:
-                    log(f"Error running {tool} for {subdomain}: {e}")
+                    log(f"Error running {tool} for {domain}/{subdomain}: {e}")
             
             # Start the tool in a background thread
             thread = threading.Thread(target=run_tool_async, daemon=True)
