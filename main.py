@@ -5422,11 +5422,8 @@ def run_downstream_pipeline(
     # ---------- ffuf ----------
     # Note: ffuf has been removed from the automated pipeline.
     # It can now be run manually from the subdomain detail pages.
-    if not flags.get("ffuf_done"):
-        log("ffuf is now manual-only; skipping automated ffuf execution.")
-        update_step("ffuf", status="skipped", message="ffuf is manual-only (run from subdomain pages).", progress=0)
-    else:
-        update_step("ffuf", status="skipped", message="ffuf is manual-only (run from subdomain pages).", progress=0)
+    log("ffuf is now manual-only; skipping automated ffuf execution.")
+    update_step("ffuf", status="skipped", message="ffuf is manual-only (run from subdomain pages).", progress=0)
 
     # ---------- httpx ----------
     httpx_processed: set = set()
@@ -15947,18 +15944,12 @@ form.addEventListener('submit', async (e) => {
                         subs_ffuf = ffuf_bruteforce(subdomain, wordlist, config=config, job_domain=None)
                         log(f"ffuf found {len(subs_ffuf)} vhost subdomains for {subdomain}")
                         
-                        # Store the new subdomains found by ffuf
+                        # Store the new subdomains found by ffuf using the standard function
                         state = load_state()
+                        add_subdomains_to_state(state, domain, subs_ffuf, "ffuf")
+                        
+                        # Mark ffuf as run for this domain
                         tgt = ensure_target_state(state, domain)
-                        
-                        # Add subdomains found by ffuf
-                        for sub in subs_ffuf:
-                            if sub not in tgt.get("subdomains", {}):
-                                if "subdomains" not in tgt:
-                                    tgt["subdomains"] = {}
-                                tgt["subdomains"][sub] = {"sources": ["ffuf"]}
-                        
-                        # Mark ffuf as done for this subdomain
                         if "flags" not in tgt:
                             tgt["flags"] = {}
                         tgt["flags"]["ffuf_done"] = True
