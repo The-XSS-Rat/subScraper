@@ -284,7 +284,7 @@ RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 COMPLETED_JOBS: Dict[str, Dict[str, Any]] = {}  # Store completed job reports
 MAX_COMPLETED_JOBS_PER_DOMAIN = 10  # Keep last N completed jobs per domain
 JOB_LOCK = threading.Lock()
-PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "ffuf", "httpx", "screenshots", "nuclei", "nikto"]
+PIPELINE_STEPS = ["amass", "subfinder", "assetfinder", "findomain", "sublist3r", "crtsh", "github-subdomains", "dnsx", "httpx", "screenshots", "nuclei", "nikto"]
 
 # Global rate limiter
 RATE_LIMIT_LOCK = threading.Lock()
@@ -5420,26 +5420,10 @@ def run_downstream_pipeline(
         update_step("dnsx", status="skipped", message="dnsx already completed for this target.", progress=0)
 
     # ---------- ffuf ----------
-    if not flags.get("ffuf_done"):
-        if not wordlist or (wordlist and not Path(wordlist).exists()):
-            log("ffuf wordlist not provided or not found; skipping ffuf brute-force.")
-            update_step("ffuf", status="skipped", message="Wordlist missing; ffuf skipped.", progress=0)
-        else:
-            log(f"=== ffuf brute-force for {domain} using {wordlist} ===")
-            update_step("ffuf", status="running", message=f"ffuf running with {wordlist}", progress=50)
-            if job_domain:
-                job_log_append(job_domain, "Waiting for ffuf slot...", "scheduler")
-            with TOOL_GATES["ffuf"]:
-                if job_domain:
-                    job_log_append(job_domain, "ffuf slot acquired.", "scheduler")
-                subs_ffuf = ffuf_bruteforce(domain, wordlist, config=config, job_domain=job_domain)
-            log(f"ffuf found {len(subs_ffuf)} vhost subdomains.")
-            add_subdomains_to_state(state, domain, subs_ffuf, "ffuf")
-            flags["ffuf_done"] = True
-            save_state(state)
-            update_step("ffuf", status="completed", message=f"ffuf found {len(subs_ffuf)} subdomains.", progress=100)
-    else:
-        update_step("ffuf", status="skipped", message="ffuf already completed for this target.", progress=0)
+    # Note: ffuf has been removed from the automated pipeline.
+    # It can now be run manually from the subdomain detail pages.
+    log("ffuf is now manual-only; skipping automated ffuf execution.")
+    update_step("ffuf", status="skipped", message="ffuf is manual-only (run from subdomain pages).", progress=0)
 
     # ---------- httpx ----------
     httpx_processed: set = set()
@@ -9154,8 +9138,10 @@ function renderTargets(targets) {
       const nucleiBits = nuclei.map(n => `<span class="badge">${escapeHtml((n.severity || '').toUpperCase())}: ${escapeHtml(n.template_id || '')}</span>`).join(' ');
       const nikto = Array.isArray(entry.nikto) ? entry.nikto : [];
       const niktoText = nikto.length ? `${nikto.length} findings` : '';
+      const interesting = entry.interesting;
+      const borderStyle = interesting === true ? 'border-left: 4px solid #10b981;' : '';
       return `
-        <tr>
+        <tr style="${borderStyle}">
           <td>${idx + 1}</td>
           <td><a href="/subdomain/${encodeURIComponent(domain)}/${encodeURIComponent(sub)}" class="link-btn">${escapeHtml(sub)}</a></td>
           <td>${escapeHtml(sources)}</td>
@@ -14005,8 +13991,10 @@ function renderDomainDetail(info) {{
       interestingBadge = '<span class="badge" style="background: #ef4444; color: white;">🚫 Not Interesting</span>';
     }}
     
+    const borderStyle = interesting === true ? 'border-left: 4px solid #10b981;' : '';
+    
     html += `
-      <tr>
+      <tr style="${{borderStyle}}">
         <td>${{idx + 1}}</td>
         <td><a href="/subdomain/${{encodeURIComponent(domain)}}/${{encodeURIComponent(sub)}}" class="link">${{escapeHtml(sub)}}</a></td>
         <td>${{interestingBadge}}</td>
@@ -14224,6 +14212,7 @@ function renderSubdomainDetail(info, history, endpoints, flags) {{
   // Check if content discovery has been run
   const waybackurlsDone = flags?.waybackurls_done || false;
   const gauDone = flags?.gau_done || false;
+  const ffufDone = flags?.ffuf_done || false;
   
   let html = '';
   
@@ -14244,6 +14233,9 @@ function renderSubdomainDetail(info, history, endpoints, flags) {{
         </button>
         <button class="btn" onclick="runContentDiscovery('gau')" style="background: #8b5cf6;">
           🔍 Run GAU ${{gauDone ? '✓' : ''}}
+        </button>
+        <button class="btn" onclick="runContentDiscovery('ffuf')" style="background: #f59e0b;">
+          🔨 Run ffuf Brute-force ${{ffufDone ? '✓' : ''}}
         </button>
       </div>
       <div id="content-discovery-status" style="margin-top: 12px; padding: 8px; border-radius: 6px; display: none;"></div>
@@ -15918,8 +15910,8 @@ form.addEventListener('submit', async (e) => {
                 self._send_json({"success": False, "message": "Domain, subdomain, and tool are required"}, status=HTTPStatus.BAD_REQUEST)
                 return
             
-            if tool not in ["waybackurls", "gau"]:
-                self._send_json({"success": False, "message": "Invalid tool. Allowed: waybackurls, gau"}, status=HTTPStatus.BAD_REQUEST)
+            if tool not in ["waybackurls", "gau", "ffuf"]:
+                self._send_json({"success": False, "message": "Invalid tool. Allowed: waybackurls, gau, ffuf"}, status=HTTPStatus.BAD_REQUEST)
                 return
             
             state = load_state()
@@ -15938,10 +15930,36 @@ form.addEventListener('submit', async (e) => {
                     elif tool == "gau":
                         urls = gau_enum(domain, job_domain=None)
                         log(f"gau found {len(urls)} URLs for {domain}")
+                    elif tool == "ffuf":
+                        # Get config for wordlist
+                        config = load_config()
+                        wordlist = config.get("wordlist", "")
+                        
+                        if not wordlist or not Path(wordlist).exists():
+                            log(f"ffuf wordlist not configured or not found for {subdomain}")
+                            return
+                        
+                        # Run ffuf for the subdomain
+                        log(f"Running ffuf brute-force for {subdomain} using {wordlist}")
+                        subs_ffuf = ffuf_bruteforce(subdomain, wordlist, config=config, job_domain=None)
+                        log(f"ffuf found {len(subs_ffuf)} vhost subdomains for {subdomain}")
+                        
+                        # Store the new subdomains found by ffuf using the standard function
+                        state = load_state()
+                        add_subdomains_to_state(state, domain, subs_ffuf, "ffuf")
+                        
+                        # Mark ffuf as run for this domain
+                        tgt = ensure_target_state(state, domain)
+                        if "flags" not in tgt:
+                            tgt["flags"] = {}
+                        tgt["flags"]["ffuf_done"] = True
+                        
+                        save_state(state)
+                        return
                     else:
                         return
                     
-                    # Store endpoints in state
+                    # Store endpoints in state (for waybackurls and gau)
                     state = load_state()
                     tgt = ensure_target_state(state, domain)
                     
