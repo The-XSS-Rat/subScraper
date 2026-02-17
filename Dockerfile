@@ -1,14 +1,14 @@
 # Multi-platform Dockerfile for subScraper reconnaissance tool
 # Supports linux/amd64, linux/arm64, linux/arm/v7
 
-FROM --platform=$BUILDPLATFORM python:3.11-slim AS base
+FROM python:3.11-slim AS base
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    GO_VERSION=1.21.5
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies and Go from Debian repository
+# This ensures compatibility across all platforms and avoids download issues
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
@@ -16,22 +16,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
     ca-certificates \
+    golang \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go (required for many recon tools)
-ARG TARGETARCH
-RUN case ${TARGETARCH} in \
-        "amd64") GO_ARCH="amd64" ;; \
-        "arm64") GO_ARCH="arm64" ;; \
-        "arm") GO_ARCH="armv6l" ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz && \
-    tar -C /usr/local -xzf go${GO_VERSION}.linux-${GO_ARCH}.tar.gz && \
-    rm go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
-
-ENV PATH="/usr/local/go/bin:${PATH}" \
-    GOPATH="/root/go" \
+# Set Go environment variables
+ENV GOPATH="/root/go" \
     GOBIN="/root/go/bin"
 
 ENV PATH="${GOBIN}:${PATH}"
@@ -53,8 +43,10 @@ RUN go install -v github.com/ffuf/ffuf/v2@latest
 # Install gowitness for screenshots
 RUN go install -v github.com/sensepost/gowitness@latest
 
-# Install findomain (binary release)
-RUN case ${TARGETARCH} in \
+# Install findomain (binary release) - optional, architecture-specific
+# Declare TARGETARCH for architecture detection
+ARG TARGETARCH
+RUN case ${TARGETARCH:-amd64} in \
         "amd64") FINDOMAIN_ARCH="x86_64" ;; \
         "arm64") FINDOMAIN_ARCH="aarch64" ;; \
         "arm") FINDOMAIN_ARCH="armv7" ;; \
@@ -64,13 +56,22 @@ RUN case ${TARGETARCH} in \
     unzip -q findomain.zip && \
     chmod +x findomain && \
     mv findomain /usr/local/bin/ && \
-    rm findomain.zip || echo "Findomain installation skipped for ${TARGETARCH}"
+    rm findomain.zip || echo "Findomain installation skipped for ${TARGETARCH:-amd64}"
 
 # Install Python-based tools
-RUN pip install --no-cache-dir sublist3r nikto-parser
+RUN pip install --no-cache-dir sublist3r
 
-# Install nikto (Perl-based)
-RUN apt-get update && apt-get install -y nikto && rm -rf /var/lib/apt/lists/*
+# Install nikto (Perl-based) from GitHub
+# First install Perl and dependencies
+RUN apt-get update && apt-get install -y \
+    perl \
+    libnet-ssleay-perl \
+    libjson-perl \
+    libxml-writer-perl \
+    && rm -rf /var/lib/apt/lists/* && \
+    git clone https://github.com/sullo/nikto /opt/nikto && \
+    ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto && \
+    chmod +x /opt/nikto/program/nikto.pl
 
 # Install nmap
 RUN apt-get update && apt-get install -y nmap && rm -rf /var/lib/apt/lists/*
