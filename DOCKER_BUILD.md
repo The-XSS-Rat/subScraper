@@ -77,7 +77,36 @@ docker buildx build --platform linux/arm/v7 \
 
 ## Running the Container
 
+### First-Time Setup (Required)
+
+On the first run, you need to create an admin account. Run the container in interactive mode:
+
+```bash
+# Create recon_data directory first (if it doesn't exist)
+mkdir -p recon_data
+
+# Run in interactive mode to create admin account
+docker run -it \
+  --name subscraper \
+  -p 8342:8342 \
+  -v $(pwd)/recon_data:/app/recon_data \
+  subscraper:latest
+
+# Follow the prompts to:
+# 1. Create an admin account (username and password)
+# 2. Configure basic settings (or skip and configure later via web UI)
+```
+
+After the admin account is created and the server starts, you can:
+- Press `Ctrl+C` to stop the server
+- Remove the container: `docker rm subscraper`
+- Run in detached mode (see "Basic Run" below)
+
+**Important**: The admin account and all configuration is stored in the `recon_data` volume, so you only need to do this once.
+
 ### Basic Run
+
+After initial setup, run in detached mode:
 
 ```bash
 docker run -d \
@@ -212,7 +241,9 @@ All completed job reports, scan results, and configuration will be preserved.
 
 ## Docker Compose (Optional)
 
-Create a `docker-compose.yml` file for easier management:
+### First-Time Setup with Docker Compose
+
+Create a `docker-compose.yml` file:
 
 ```yaml
 version: '3.8'
@@ -239,10 +270,16 @@ services:
       start_period: 5s
 ```
 
-Then run:
+**First Run**: Create admin account in interactive mode:
 
 ```bash
-# Start the service
+# Build and run in interactive mode for first-time setup
+docker-compose run --rm subscraper
+
+# Follow the prompts to create admin account
+# After setup, stop with Ctrl+C
+
+# Then start normally in detached mode
 docker-compose up -d
 
 # View logs
@@ -259,6 +296,24 @@ docker-compose down
 - ✅ Backup files are accessible
 
 ## Troubleshooting
+
+### Issue: "ERROR: No admin account exists"
+
+If the container exits immediately with this error, you need to create an admin account first:
+
+```bash
+# Run in interactive mode to create admin account
+docker run -it \
+  --name subscraper \
+  -p 8342:8342 \
+  -v $(pwd)/recon_data:/app/recon_data \
+  subscraper:latest
+
+# Or with docker-compose:
+docker-compose run --rm subscraper
+```
+
+Follow the prompts to create an admin account. The account is saved in `recon_data/users.json` and persists across container restarts.
 
 ### Issue: "no matching manifest"
 
