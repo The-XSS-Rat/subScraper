@@ -274,7 +274,8 @@ services:
 
 ```bash
 # Build and run in interactive mode for first-time setup
-docker-compose run --rm subscraper
+# Use --service-ports to expose port 8342 during setup
+docker-compose run --rm --service-ports subscraper
 
 # Follow the prompts to create admin account
 # After setup, stop with Ctrl+C

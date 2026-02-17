@@ -44,7 +44,8 @@ RUN go install -v github.com/ffuf/ffuf/v2@latest
 RUN go install -v github.com/sensepost/gowitness@latest
 
 # Install findomain (binary release) - optional, architecture-specific
-# Declare TARGETARCH for architecture detection
+# Declare TARGETARCH for architecture detection (defaults to amd64 if not set by buildx)
+# Note: When building without buildx, TARGETARCH will default to amd64
 ARG TARGETARCH
 RUN case ${TARGETARCH:-amd64} in \
         "amd64") FINDOMAIN_ARCH="x86_64" ;; \
@@ -58,7 +59,8 @@ RUN case ${TARGETARCH:-amd64} in \
     mv findomain /usr/local/bin/ && \
     rm findomain.zip || echo "Findomain installation skipped for ${TARGETARCH:-amd64}"
 
-# Install Python-based tools
+# Install Python-based tool (sublist3r)
+# Note: nikto-parser was removed as it doesn't exist in PyPI
 RUN pip install --no-cache-dir sublist3r
 
 # Install nikto (Perl-based) from GitHub
