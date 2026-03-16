@@ -1,5 +1,7 @@
 # Recon Command Center
 
+https://deepwiki.com/The-XSS-Rat/subScraper/7.1-testing-infrastructure
+
 Recon Command Center is a single-file orchestrator for common reconnaissance pipelines. It runs traditional subdomain enumeration tools, probes discovered hosts, and executes vulnerability scanning workflows while presenting live progress in a rich web UI.
 
 ## Highlights
