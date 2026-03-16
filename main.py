@@ -7227,6 +7227,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="monitors" href="#monitors">Monitors</a>
       <a class="nav-link" data-view="targets" href="#targets">Targets</a>
       <a class="nav-link" data-view="settings" href="#settings">Settings</a>
+      <a class="nav-link" data-view="database" href="#database">Database</a>
       <a class="nav-link" data-view="guide" href="#guide">User Guide</a>
     </nav>
     <div class="sidebar-footer">
@@ -7991,6 +7992,50 @@ button:hover { background:#1d4ed8; }
       </div>
     </section>
 
+    <section class="module" data-view="database">
+      <div class="module-header">
+        <h2>Database Viewer</h2>
+        <p class="muted">Browse and search every table in the local SQLite database</p>
+      </div>
+      <div class="module-body">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;">
+            <label style="flex: 0 0 auto; min-width: 180px;">
+              Table
+              <select id="db-table-select">
+                <option value="">— select a table —</option>
+              </select>
+            </label>
+            <label style="flex: 1; min-width: 200px;">
+              Search (all columns)
+              <input type="search" id="db-search" placeholder="Search rows…" />
+            </label>
+            <label style="flex: 0 0 auto; min-width: 120px;">
+              Rows per page
+              <select id="db-page-size">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
+                <option value="500">500</option>
+              </select>
+            </label>
+            <button id="db-refresh-btn" class="btn small">Refresh</button>
+          </div>
+        </div>
+        <div id="db-status" class="muted" style="margin-bottom: 12px;"></div>
+        <div class="table-wrapper" style="overflow-x: auto;">
+          <table class="targets-table" id="db-table">
+            <thead id="db-thead"><tr><th>Select a table above</th></tr></thead>
+            <tbody id="db-tbody">
+              <tr><td class="muted">No table selected.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-pagination" id="db-pagination" style="margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;"></div>
+      </div>
+    </section>
+
     <section class="module" data-view="guide">
       <div class="module-header"><h2>User Guide</h2></div>
       <div class="module-body">
@@ -8096,6 +8141,10 @@ function setView(target) {
   // Update logs when switching to logs view
   if (next === 'logs') {
     updateLogsView();
+  }
+  // Update database viewer when switching to database view
+  if (next === 'database' && typeof loadDatabaseView === 'function') {
+    loadDatabaseView();
   }
 }
 navLinks.forEach(link => {
@@ -12500,6 +12549,183 @@ window.addEventListener('hashchange', () => {
     fetchState();
   }
 });
+
+// ================== DATABASE VIEWER ==================
+(function () {
+  let dbCurrentTable = '';
+  let dbCurrentPage = 1;
+  let dbPageSize = 50;
+  let dbSortCol = '';
+  let dbSortDir = 'asc';
+  let dbSearchTerm = '';
+  let dbTotalPages = 1;
+  let dbTotal = 0;
+  let dbColumns = [];
+
+  const dbTableSelect = document.getElementById('db-table-select');
+  const dbSearch = document.getElementById('db-search');
+  const dbPageSizeSelect = document.getElementById('db-page-size');
+  const dbRefreshBtn = document.getElementById('db-refresh-btn');
+  const dbStatus = document.getElementById('db-status');
+  const dbThead = document.getElementById('db-thead');
+  const dbTbody = document.getElementById('db-tbody');
+  const dbPagination = document.getElementById('db-pagination');
+
+  async function loadDbTables() {
+    try {
+      const resp = await fetch('/api/db/tables');
+      const data = await resp.json();
+      if (!data.success) { dbStatus.textContent = data.message || 'Failed to load tables.'; return; }
+      const prevVal = dbTableSelect ? dbTableSelect.value : '';
+      dbTableSelect.innerHTML = '<option value="">— select a table —</option>' +
+        data.tables.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)} (${t.row_count})</option>`).join('');
+      // Restore previous selection if it still exists
+      if (prevVal && dbTableSelect.querySelector(`option[value="${escapeHtml(prevVal)}"]`)) {
+        dbTableSelect.value = prevVal;
+      }
+    } catch (err) {
+      dbStatus.textContent = 'Error loading tables: ' + err.message;
+    }
+  }
+
+  async function loadDbTable() {
+    if (!dbCurrentTable) {
+      dbThead.innerHTML = '<tr><th>Select a table above</th></tr>';
+      dbTbody.innerHTML = '<tr><td class="muted">No table selected.</td></tr>';
+      dbPagination.innerHTML = '';
+      dbStatus.textContent = '';
+      return;
+    }
+    dbStatus.textContent = 'Loading\u2026';
+    try {
+      const params = new URLSearchParams({
+        page: dbCurrentPage,
+        page_size: dbPageSize,
+        search: dbSearchTerm,
+        sort_col: dbSortCol,
+        sort_dir: dbSortDir,
+      });
+      const resp = await fetch(`/api/db/table/${encodeURIComponent(dbCurrentTable)}?${params}`);
+      const data = await resp.json();
+      if (!data.success) { dbStatus.textContent = data.message || 'Failed to load table data.'; return; }
+      dbColumns = data.columns || [];
+      dbTotalPages = data.total_pages || 1;
+      dbTotal = data.total || 0;
+      renderDbTable(data.rows || []);
+      renderDbPagination();
+      dbStatus.textContent = `${dbTotal} row${dbTotal !== 1 ? 's' : ''} total \u2014 page ${dbCurrentPage} of ${dbTotalPages}`;
+    } catch (err) {
+      dbStatus.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  function renderDbTable(rows) {
+    if (!dbThead || !dbTbody) return;
+    if (dbColumns.length === 0) {
+      dbThead.innerHTML = '<tr><th>No columns</th></tr>';
+      dbTbody.innerHTML = '<tr><td class="muted">Empty table.</td></tr>';
+      return;
+    }
+    const headerCells = dbColumns.map(col => {
+      const isActive = dbSortCol === col;
+      const arrow = isActive ? (dbSortDir === 'asc' ? ' \u25b2' : ' \u25bc') : '';
+      return `<th style="cursor:pointer;white-space:nowrap;" data-sort-col="${escapeHtml(col)}">${escapeHtml(col)}${arrow}</th>`;
+    }).join('');
+    dbThead.innerHTML = `<tr>${headerCells}</tr>`;
+    dbThead.querySelectorAll('th[data-sort-col]').forEach(th => {
+      th.addEventListener('click', () => {
+        const col = th.getAttribute('data-sort-col');
+        if (dbSortCol === col) {
+          dbSortDir = dbSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          dbSortCol = col;
+          dbSortDir = 'asc';
+        }
+        dbCurrentPage = 1;
+        loadDbTable();
+      });
+    });
+    if (rows.length === 0) {
+      dbTbody.innerHTML = `<tr><td colspan="${dbColumns.length}" class="muted">No rows match your search.</td></tr>`;
+      return;
+    }
+    dbTbody.innerHTML = rows.map(row => {
+      const cells = row.map(cell => {
+        const text = cell === null ? '<span class="muted">NULL</span>' : escapeHtml(String(cell));
+        const title = cell === null ? '' : escapeHtml(String(cell));
+        return `<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${title}">${text}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+  }
+
+  function renderDbPagination() {
+    if (!dbPagination) return;
+    if (dbTotalPages <= 1) { dbPagination.innerHTML = ''; return; }
+    dbPagination.innerHTML = `
+      <button ${dbCurrentPage === 1 ? 'disabled' : ''} id="db-pg-first">&laquo; First</button>
+      <button ${dbCurrentPage === 1 ? 'disabled' : ''} id="db-pg-prev">&lsaquo; Prev</button>
+      <span>Page <strong>${dbCurrentPage}</strong> / ${dbTotalPages}</span>
+      <button ${dbCurrentPage === dbTotalPages ? 'disabled' : ''} id="db-pg-next">Next &rsaquo;</button>
+      <button ${dbCurrentPage === dbTotalPages ? 'disabled' : ''} id="db-pg-last">Last &raquo;</button>
+    `;
+    dbPagination.querySelector('#db-pg-first')?.addEventListener('click', () => { dbCurrentPage = 1; loadDbTable(); });
+    dbPagination.querySelector('#db-pg-prev')?.addEventListener('click', () => { dbCurrentPage = Math.max(1, dbCurrentPage - 1); loadDbTable(); });
+    dbPagination.querySelector('#db-pg-next')?.addEventListener('click', () => { dbCurrentPage = Math.min(dbTotalPages, dbCurrentPage + 1); loadDbTable(); });
+    dbPagination.querySelector('#db-pg-last')?.addEventListener('click', () => { dbCurrentPage = dbTotalPages; loadDbTable(); });
+  }
+
+  if (dbTableSelect) {
+    dbTableSelect.addEventListener('change', () => {
+      dbCurrentTable = dbTableSelect.value;
+      dbCurrentPage = 1;
+      dbSortCol = '';
+      dbSortDir = 'asc';
+      dbSearchTerm = dbSearch ? dbSearch.value.trim() : '';
+      loadDbTable();
+    });
+  }
+
+  let dbSearchTimer = null;
+  if (dbSearch) {
+    dbSearch.addEventListener('input', () => {
+      clearTimeout(dbSearchTimer);
+      dbSearchTimer = setTimeout(() => {
+        dbSearchTerm = dbSearch.value.trim();
+        dbCurrentPage = 1;
+        loadDbTable();
+      }, 350);
+    });
+  }
+
+  if (dbPageSizeSelect) {
+    dbPageSizeSelect.addEventListener('change', () => {
+      dbPageSize = parseInt(dbPageSizeSelect.value, 10) || 50;
+      dbCurrentPage = 1;
+      loadDbTable();
+    });
+  }
+
+  if (dbRefreshBtn) {
+    dbRefreshBtn.addEventListener('click', () => {
+      loadDbTables();
+      loadDbTable();
+    });
+  }
+
+  // Expose function so setView() can trigger it
+  window.loadDatabaseView = function () {
+    loadDbTables();
+    if (dbCurrentTable) loadDbTable();
+  };
+
+  // Also load immediately if hash is already #database on page load
+  if (getCurrentView() === 'database') {
+    loadDbTables();
+  }
+})();
+// ================== END DATABASE VIEWER ==================
+
 </script>
 </body>
 </html>
@@ -15520,6 +15746,107 @@ form.addEventListener('submit', async (e) => {
             self.end_headers()
             self.wfile.write(data)
             return
+        # Database viewer: list all tables with row counts
+        if self.path == "/api/db/tables":
+            try:
+                db = get_db()
+                with DB_LOCK:
+                    cursor = db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    )
+                    tables = [row[0] for row in cursor.fetchall()]
+                    result = []
+                    for tbl in tables:
+                        # SQLite does not support parameterized table names.
+                        # The regex below ensures only safe identifiers (letters, digits,
+                        # underscore, starting with a letter or underscore) are used in
+                        # the f-string, preventing SQL injection.
+                        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', tbl):
+                            count_row = db.execute(f"SELECT COUNT(*) FROM \"{tbl}\"").fetchone()
+                            result.append({"name": tbl, "row_count": count_row[0]})
+                self._send_json({"success": True, "tables": result})
+            except Exception as exc:
+                self._send_json({"success": False, "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        # Database viewer: fetch rows from a specific table
+        if self.path.startswith("/api/db/table/"):
+            parsed = urlparse(self.path)
+            table_name = unquote(parsed.path[len("/api/db/table/"):]).strip()
+            # Validate table name: only allow safe identifiers (letters, digits, underscore).
+            # SQLite does not support parameterized table/column names, so all f-string
+            # interpolations below rely on this check to prevent SQL injection.
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', table_name):
+                self._send_json({"success": False, "message": "Invalid table name"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            query_params = parse_qs(parsed.query)
+            try:
+                page = max(1, int(query_params.get("page", ["1"])[0]))
+            except (ValueError, TypeError):
+                page = 1
+            _allowed_page_sizes = (25, 50, 100, 250, 500)
+            try:
+                _ps = int(query_params.get("page_size", ["50"])[0])
+                page_size = _ps if _ps in _allowed_page_sizes else 50
+            except (ValueError, TypeError):
+                page_size = 50
+            search = query_params.get("search", [""])[0].strip()
+            sort_col = query_params.get("sort_col", [""])[0].strip()
+            sort_dir = query_params.get("sort_dir", ["asc"])[0].strip().lower()
+            # Whitelist sort direction to prevent injection via ORDER BY clause
+            if sort_dir not in ("asc", "desc"):
+                sort_dir = "asc"
+            try:
+                db = get_db()
+                with DB_LOCK:
+                    # Verify table exists using a parameterized query
+                    exists = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+                    ).fetchone()
+                    if not exists:
+                        self._send_json({"success": False, "message": "Table not found"}, status=HTTPStatus.NOT_FOUND)
+                        return
+                    # Get column names — table_name is safe per regex check above;
+                    # PRAGMA does not support parameterized identifiers.
+                    col_cursor = db.execute(f"PRAGMA table_info(\"{table_name}\")")
+                    columns = [row[1] for row in col_cursor.fetchall()]
+                    if not columns:
+                        self._send_json({"success": True, "columns": [], "rows": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0})
+                        return
+                    # Validate sort column against the actual column list to prevent injection.
+                    # sort_dir is already whitelisted to "asc"/"desc" above.
+                    if sort_col and sort_col in columns:
+                        order_clause = f" ORDER BY \"{sort_col}\" {sort_dir.upper()}"
+                    else:
+                        order_clause = ""
+                    # Build search filter across all columns using parameterized LIKE queries
+                    where_clause = ""
+                    params: List[Any] = []
+                    if search:
+                        conditions = [f"CAST(\"{col}\" AS TEXT) LIKE ?" for col in columns]
+                        where_clause = " WHERE " + " OR ".join(conditions)
+                        params = [f"%{search}%"] * len(columns)
+                    count_sql = f"SELECT COUNT(*) FROM \"{table_name}\"{where_clause}"
+                    total = db.execute(count_sql, params).fetchone()[0]
+                    total_pages = max(1, (total + page_size - 1) // page_size)
+                    offset = (page - 1) * page_size
+                    data_sql = f"SELECT * FROM \"{table_name}\"{where_clause}{order_clause} LIMIT ? OFFSET ?"
+                    rows_cursor = db.execute(data_sql, params + [page_size, offset])
+                    rows = [list(row) for row in rows_cursor.fetchall()]
+                self._send_json({
+                    "success": True,
+                    "table": table_name,
+                    "columns": columns,
+                    "rows": rows,
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                })
+            except Exception as exc:
+                self._send_json({"success": False, "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
     def do_POST(self):
