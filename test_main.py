@@ -2273,6 +2273,83 @@ class TestSubdomainExport:
         assert "www.example.com" in lines
         assert "mail.test.com" not in "\n".join(lines)
 
+    def test_export_individual_domain_txt(self):
+        """Test TXT export for a single domain excludes other domains"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {},
+                        "api.example.com": {}
+                    }
+                },
+                "other.com": {
+                    "subdomains": {
+                        "mail.other.com": {}
+                    }
+                }
+            }
+        }
+
+        single_domain_state = {"targets": {"example.com": state["targets"]["example.com"]}}
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+
+        result = main.export_subdomains_txt(single_domain_state, filters)
+        lines = result.decode("utf-8").strip().split("\n")
+
+        assert len(lines) == 2
+        assert "api.example.com" in lines
+        assert "www.example.com" in lines
+        assert "mail.other.com" not in lines
+
+    def test_export_individual_domain_csv(self):
+        """Test CSV export for a single domain excludes other domains"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {
+                            "httpx": {
+                                "status_code": 200,
+                                "title": "Example",
+                                "webserver": "nginx"
+                            },
+                            "nuclei": [],
+                            "nikto": [],
+                            "sources": ["amass"]
+                        }
+                    }
+                },
+                "other.com": {
+                    "subdomains": {
+                        "mail.other.com": {}
+                    }
+                }
+            }
+        }
+
+        single_domain_state = {"targets": {"example.com": state["targets"]["example.com"]}}
+        filters = {
+            "domainSearch": "",
+            "status": "all",
+            "maxSeverity": "all",
+            "hasFindings": False,
+            "hasScreenshots": False
+        }
+
+        result = main.export_subdomains_csv(single_domain_state, filters)
+        content = result.decode("utf-8")
+
+        assert "www.example.com" in content
+        assert "example.com" in content
+        assert "mail.other.com" not in content
+
 
 if __name__ == '__main__':
     # Run tests with pytest
