@@ -1692,6 +1692,8 @@ def default_config() -> Dict[str, Any]:
         "cleanup_temp_files_hours": 24,
         "cleanup_interval": 3600,
         "screenshots_per_page": 20,
+        "screenshot_service_url": "https://image.thum.io/get/",
+        "screenshot_delay": 2,
         "setup_completed": False,
     }
 
@@ -3388,6 +3390,22 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             if cfg.get("tool_binary_paths", {}) != validated_paths:
                 cfg["tool_binary_paths"] = validated_paths
                 changed = True
+
+    # Handle external screenshot service settings
+    if "screenshot_service_url" in values:
+        new_url = str(values.get("screenshot_service_url") or "").strip()
+        if cfg.get("screenshot_service_url", "") != new_url:
+            cfg["screenshot_service_url"] = new_url
+            changed = True
+
+    if "screenshot_delay" in values:
+        try:
+            new_delay = max(0, int(values.get("screenshot_delay")))
+        except (TypeError, ValueError):
+            return False, "Screenshot delay must be an integer >= 0.", cfg
+        if cfg.get("screenshot_delay", 2) != new_delay:
+            cfg["screenshot_delay"] = new_delay
+            changed = True
 
     if changed:
         save_config(cfg)
@@ -5791,6 +5809,80 @@ def gather_screenshot_targets(state: Dict[str, Any], domain: str) -> List[Tuple[
     return targets
 
 
+def capture_screenshots_external(
+    targets: List[Tuple[str, str]],
+    domain: str,
+    service_url: str,
+    delay: int = 2,
+    job_domain: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Capture screenshots using an external HTTP screenshot service.
+
+    For each target URL the service endpoint is called as:
+        <service_url><target_url>
+    The resulting image is saved locally and a mapping is returned.
+
+    ``delay`` (seconds) is applied between consecutive requests so that the
+    external service is not overwhelmed.
+    """
+    if not targets:
+        return {}
+
+    dest_dir = SCREENSHOTS_DIR / domain
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping: Dict[str, Dict[str, Any]] = {}
+    captured_ts = datetime.now(timezone.utc).isoformat()
+
+    for idx, (host, url) in enumerate(targets):
+        if idx > 0 and delay > 0:
+            time.sleep(delay)
+
+        request_url = service_url.rstrip("/") + "/" + url.lstrip("/")
+        if job_domain:
+            job_log_append(job_domain, f"Fetching screenshot for {url} via {service_url}", "screenshots")
+        try:
+            req = Request(request_url, headers={"User-Agent": "subScraper/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "png" in content_type:
+                    ext = ".png"
+                elif "jpeg" in content_type or "jpg" in content_type:
+                    ext = ".jpg"
+                else:
+                    ext = ".png"
+                url_hash = hashlib.sha1(url.encode()).hexdigest()[:8]
+                safe_name = re.sub(r"[^\w\-.]", "_", url.replace("://", "_").replace("/", "_"))[:80]
+                filename = f"{safe_name}_{url_hash}{ext}"
+                save_path = dest_dir / filename
+                image_data = resp.read()
+        except Exception as exc:
+            log(f"External screenshot failed for {url}: {exc}")
+            if job_domain:
+                job_log_append(job_domain, f"Screenshot failed for {url}: {exc}", "screenshots")
+            continue
+
+        try:
+            with open(save_path, "wb") as f:
+                f.write(image_data)
+        except Exception as exc:
+            log(f"Failed saving screenshot for {url}: {exc}")
+            continue
+
+        try:
+            rel_path = save_path.relative_to(SCREENSHOTS_DIR)
+        except ValueError:
+            rel_path = save_path
+
+        mapping[host] = {
+            "path": str(rel_path).replace("\\", "/"),
+            "url": url,
+            "captured_at": captured_ts,
+        }
+
+    return mapping
+
+
 def capture_screenshots(
     targets: List[Tuple[str, str]],
     domain: str,
@@ -5799,6 +5891,15 @@ def capture_screenshots(
 ) -> Dict[str, Dict[str, Any]]:
     if not targets:
         return {}
+
+    # Use external screenshot service if configured
+    service_url = (config or {}).get("screenshot_service_url", "").strip()
+    if service_url:
+        delay = int((config or {}).get("screenshot_delay", 2))
+        return capture_screenshots_external(
+            targets, domain, service_url, delay=delay, job_domain=job_domain
+        )
+
     if not ensure_tool_installed("gowitness"):
         return {}
 
@@ -7512,6 +7613,12 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-enable-screenshots" type="checkbox" name="enable_screenshots" />
                 Enable screenshots
               </label>
+              <label>External screenshot service URL
+                <input id="settings-screenshot-service-url" type="text" name="screenshot_service_url" placeholder="https://image.thum.io/get/" />
+              </label>
+              <label>Delay between screenshot requests (seconds)
+                <input id="settings-screenshot-delay" type="number" name="screenshot_delay" min="0" />
+              </label>
               <label class="checkbox">
                 <input id="settings-enable-amass" type="checkbox" name="enable_amass" />
                 Enable Amass
@@ -8197,6 +8304,8 @@ const settingsInterval = document.getElementById('settings-interval');
 const settingsWildcardTlds = document.getElementById('settings-wildcard-tlds');
 const settingsSkipNikto = document.getElementById('settings-skip-nikto');
 const settingsEnableScreenshots = document.getElementById('settings-enable-screenshots');
+const settingsScreenshotServiceUrl = document.getElementById('settings-screenshot-service-url');
+const settingsScreenshotDelay = document.getElementById('settings-screenshot-delay');
 const settingsEnableAmass = document.getElementById('settings-enable-amass');
 const settingsAmassTimeout = document.getElementById('settings-amass-timeout');
 const settingsEnableSubfinder = document.getElementById('settings-enable-subfinder');
@@ -11578,6 +11687,8 @@ function renderSettings(config, tools) {
     settingsWildcardTlds.value = (config.wildcard_tlds || []).join(', ');
     settingsSkipNikto.checked = !!config.skip_nikto_by_default;
     settingsEnableScreenshots.checked = config.enable_screenshots !== false;
+    if (settingsScreenshotServiceUrl) settingsScreenshotServiceUrl.value = config.screenshot_service_url || '';
+    if (settingsScreenshotDelay) settingsScreenshotDelay.value = config.screenshot_delay !== undefined ? config.screenshot_delay : 2;
     settingsEnableAmass.checked = config.enable_amass !== false;
     settingsAmassTimeout.value = config.amass_timeout || 600;
     settingsEnableSubfinder.checked = config.enable_subfinder !== false;
@@ -11768,6 +11879,8 @@ if (settingsForm) {
         wildcard_tlds: settingsWildcardTlds ? settingsWildcardTlds.value : '',
         skip_nikto_by_default: settingsSkipNikto ? settingsSkipNikto.checked : false,
         enable_screenshots: settingsEnableScreenshots ? settingsEnableScreenshots.checked : true,
+        screenshot_service_url: settingsScreenshotServiceUrl ? settingsScreenshotServiceUrl.value : '',
+        screenshot_delay: settingsScreenshotDelay ? settingsScreenshotDelay.value : 2,
         enable_amass: settingsEnableAmass ? settingsEnableAmass.checked : true,
         amass_timeout: settingsAmassTimeout ? settingsAmassTimeout.value : '',
         enable_subfinder: settingsEnableSubfinder ? settingsEnableSubfinder.checked : true,
