@@ -12993,7 +12993,8 @@ def _subdomain_matches_filters(subdomain: str, sub_data: Dict[str, Any], filters
     if status_codes and status_codes != "all":
         allowed = set(c.strip() for c in status_codes.split(",") if c.strip())
         httpx = sub_data.get("httpx", {})
-        code = str(httpx.get("status_code", "")) if httpx.get("status_code") else "none"
+        raw_code = httpx.get("status_code")
+        code = str(raw_code) if raw_code else "none"
         if allowed and code not in allowed:
             return False
     
