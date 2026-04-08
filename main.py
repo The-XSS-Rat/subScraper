@@ -14201,6 +14201,8 @@ function renderDomainDetail(info) {{
     <div class="actions">
       <a href="/gallery/${{encodeURIComponent(domain)}}" class="btn">View Screenshots Gallery</a>
       <a href="/#reports" class="btn secondary" onclick="window.parent.postMessage({{type:'selectReport',domain:domain}}, '*')">View Full Report</a>
+      <a href="/api/export/domain/${{encodeURIComponent(domain)}}/txt" class="btn secondary" download>Export Subdomains (TXT)</a>
+      <a href="/api/export/domain/${{encodeURIComponent(domain)}}/csv" class="btn secondary" download>Export Subdomains (CSV)</a>
     </div>
     
     <div class="section">
@@ -15804,6 +15806,51 @@ form.addEventListener('submit', async (e) => {
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/api/export/domain/"):
+            remainder = self.path[len("/api/export/domain/"):]
+            # Expect <domain>/txt or <domain>/csv
+            if remainder.endswith("/txt"):
+                domain = unquote(remainder[:-len("/txt")]).strip().lower()
+                fmt = "txt"
+            elif remainder.endswith("/csv"):
+                domain = unquote(remainder[:-len("/csv")]).strip().lower()
+                fmt = "csv"
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            if not domain:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Domain required")
+                return
+            state = load_state()
+            if domain not in state.get("targets", {}):
+                self._send_json({"success": False, "message": "Domain not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            # Build a state subset containing only this domain
+            single_domain_state = {"targets": {domain: state["targets"][domain]}}
+            filters = {
+                "domainSearch": "",
+                "status": "all",
+                "maxSeverity": "all",
+                "hasFindings": False,
+                "hasScreenshots": False,
+            }
+            if fmt == "txt":
+                data = export_subdomains_txt(single_domain_state, filters)
+                content_type = "text/plain"
+                safe_domain = re.sub(r'[^a-z0-9.\-]', '_', domain)
+                filename = f"{safe_domain}_subdomains.txt"
+            else:
+                data = export_subdomains_csv(single_domain_state, filters)
+                content_type = "text/csv"
+                safe_domain = re.sub(r'[^a-z0-9.\-]', '_', domain)
+                filename = f"{safe_domain}_subdomains.csv"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
