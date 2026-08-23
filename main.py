@@ -680,6 +680,45 @@ def init_database() -> None:
         ON users(username)
     """)
     
+    # Scoped API keys for the bug bounty agent API
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_id TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            programs TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            last_used_at TEXT,
+            revoked INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_api_keys_key_id 
+        ON agent_api_keys(key_id)
+    """)
+    
+    # Bug bounty programs - full scope definitions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS programs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            platform TEXT,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_programs_updated_at 
+        ON programs(updated_at DESC)
+    """)
+    
     db.commit()
     log("Database schema initialized successfully.")
 
@@ -3518,8 +3557,8 @@ def load_state() -> Dict[str, Any]:
     
     # OPTIMIZATION: Single query with JOIN instead of N+1 queries
     cursor.execute("""
-        SELECT 
-            t.domain, t.flags, t.options, t.comments,
+        SELECT
+            t.domain, t.flags, t.options, t.comments, t.data,
             s.subdomain, s.data, s.interesting, s.comments as sub_comments
         FROM targets t
         LEFT JOIN subdomains s ON t.domain = s.domain
@@ -3547,24 +3586,34 @@ def load_state() -> Dict[str, Any]:
             flags = json.loads(row[1]) if row[1] else {}
             options = json.loads(row[2]) if row[2] else {}
             target_comments = json.loads(row[3]) if row[3] else []
+            # Extra target payload (endpoints, js_scan, ...) lives in targets.data
+            try:
+                extra = json.loads(row[4]) if row[4] else {}
+            except json.JSONDecodeError:
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
             
             current_target = {
                 "flags": flags,
                 "options": options,
                 "comments": target_comments,
             }
+            for key, value in extra.items():
+                if key not in ("flags", "options", "comments", "subdomains"):
+                    current_target[key] = value
             subdomains = {}
         
         # Process subdomain if present (LEFT JOIN may have NULL subdomain)
-        subdomain = row[4]
+        subdomain = row[5]
         if subdomain is not None:
             try:
-                sub_data = json.loads(row[5])
+                sub_data = json.loads(row[6])
                 # Add interesting and comments to subdomain data
-                if row[6] is not None:
-                    sub_data["interesting"] = bool(row[6])
-                if row[7]:
-                    sub_data["comments"] = json.loads(row[7])
+                if row[7] is not None:
+                    sub_data["interesting"] = bool(row[7])
+                if row[8]:
+                    sub_data["comments"] = json.loads(row[8])
                 subdomains[subdomain] = sub_data
             except json.JSONDecodeError:
                 subdomains[subdomain] = {}
@@ -3603,6 +3652,10 @@ def save_state(state: Dict[str, Any]) -> None:
             flags = target_data.get("flags", {})
             options = target_data.get("options", {})
             target_comments = target_data.get("comments", [])
+            # Everything else on the target (endpoints, js_scan, ...) goes to targets.data
+            # so it survives the round-trip through the database.
+            extra = {key: value for key, value in target_data.items()
+                     if key not in ("subdomains", "flags", "options", "comments")}
             
             # Insert or update target
             cursor.execute(
@@ -3614,7 +3667,8 @@ def save_state(state: Dict[str, Any]) -> None:
                    options = excluded.options,
                    comments = excluded.comments,
                    updated_at = excluded.updated_at""",
-                (domain, "{}", json.dumps(flags), json.dumps(options), json.dumps(target_comments), now, now)
+                (domain, json.dumps(extra), json.dumps(flags), json.dumps(options),
+                 json.dumps(target_comments), now, now)
             )
             
             # Delete old subdomains not in current state
@@ -16067,6 +16121,1009 @@ loadGallery();
 """
 
 
+# ---------------------------------------------------------------------------
+# Bug bounty agent API: scoped API keys, programs, scope evaluation, findings
+# ---------------------------------------------------------------------------
+
+AGENT_API_SCOPES: List[str] = [
+    "programs:read",    # list/read programs and their scope
+    "programs:write",   # create/update/delete programs
+    "scan:run",         # dispatch recon jobs for a program
+    "assets:read",      # read discovered hosts/endpoints
+    "findings:read",    # read nuclei/nikto/JS findings
+    "keys:manage",      # create/revoke API keys
+]
+
+# Scopes a non-admin UI session implicitly carries (admins get everything).
+AGENT_SESSION_SCOPES: List[str] = [
+    "programs:read", "programs:write", "scan:run", "assets:read", "findings:read",
+]
+
+AGENT_KEY_PREFIX = "rcc"
+SEVERITY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
+SEVERITY_WEIGHT = {"critical": 40, "high": 25, "medium": 12, "low": 5, "info": 1, "unknown": 1}
+
+# Hostname fragments that usually mean "interesting" for a bug bounty agent.
+INTERESTING_HOST_KEYWORDS = [
+    "admin", "api", "auth", "sso", "oauth", "login", "internal", "intranet", "corp",
+    "dev", "test", "qa", "uat", "stage", "staging", "beta", "demo", "sandbox", "preprod",
+    "jenkins", "gitlab", "git", "jira", "confluence", "grafana", "kibana", "prometheus",
+    "vpn", "mail", "ftp", "backup", "old", "legacy", "deprecated", "portal", "payment",
+    "billing", "upload", "files", "s3", "storage", "gateway", "graphql", "gql", "ws",
+]
+INTERESTING_TECH_KEYWORDS = [
+    "jenkins", "wordpress", "drupal", "joomla", "tomcat", "jboss", "weblogic", "struts",
+    "grafana", "kibana", "elasticsearch", "phpmyadmin", "gitlab", "jira", "confluence",
+    "springboot", "django", "laravel", "rails", "nginx-proxy",
+]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hash_api_secret(secret: str) -> str:
+    """API key secrets are high-entropy random tokens, so a fast digest is enough."""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def normalize_agent_scopes(scopes: Any) -> Tuple[List[str], List[str]]:
+    """Normalize a requested scope list. Returns (valid_scopes, unknown_scopes)."""
+    if isinstance(scopes, str):
+        raw = [part for part in re.split(r"[,\s]+", scopes) if part]
+    elif isinstance(scopes, (list, tuple, set)):
+        raw = [str(part).strip() for part in scopes if str(part).strip()]
+    else:
+        raw = []
+    valid: List[str] = []
+    unknown: List[str] = []
+    for item in raw:
+        item = item.strip().lower()
+        if item == "*":
+            valid = list(AGENT_API_SCOPES)
+            continue
+        if item in AGENT_API_SCOPES:
+            if item not in valid:
+                valid.append(item)
+        else:
+            unknown.append(item)
+    return valid, unknown
+
+
+def create_agent_api_key(name: str, scopes: Any, programs: Optional[List[str]] = None,
+                         expires_days: Optional[int] = None,
+                         created_by: Optional[str] = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Create a scoped API key. The plaintext key is returned exactly once; only a
+    SHA-256 digest of the secret half is stored.
+    """
+    name = (name or "").strip()
+    if not name:
+        return False, "Key name is required.", None
+    if len(name) > 100:
+        return False, "Key name must be 100 characters or fewer.", None
+
+    valid_scopes, unknown = normalize_agent_scopes(scopes)
+    if unknown:
+        return False, f"Unknown scope(s): {', '.join(unknown)}. Valid scopes: {', '.join(AGENT_API_SCOPES)}", None
+    if not valid_scopes:
+        return False, f"At least one scope is required. Valid scopes: {', '.join(AGENT_API_SCOPES)}", None
+
+    program_ids: List[str] = []
+    if programs:
+        if isinstance(programs, str):
+            programs = [programs]
+        for pid in programs:
+            pid = str(pid).strip()
+            if not pid:
+                continue
+            if not get_program(pid):
+                return False, f"Unknown program id: {pid}", None
+            if pid not in program_ids:
+                program_ids.append(pid)
+
+    expires_at = None
+    if expires_days not in (None, ""):
+        try:
+            days = int(expires_days)
+        except (TypeError, ValueError):
+            return False, "expires_days must be an integer.", None
+        if days <= 0:
+            return False, "expires_days must be positive.", None
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+    key_id = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    api_key = f"{AGENT_KEY_PREFIX}_{key_id}_{secret}"
+    now = _now_iso()
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        """
+        INSERT INTO agent_api_keys
+            (key_id, name, key_hash, scopes, programs, created_by, created_at, expires_at, revoked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (key_id, name, _hash_api_secret(secret), json.dumps(valid_scopes),
+         json.dumps(program_ids), created_by or "", now, expires_at),
+    )
+    db.commit()
+    log(f"Created agent API key '{name}' ({key_id}) with scopes {valid_scopes}")
+
+    return True, "API key created. Store it now - it will not be shown again.", {
+        "key_id": key_id,
+        "api_key": api_key,
+        "name": name,
+        "scopes": valid_scopes,
+        "programs": program_ids,
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+
+
+def _row_to_agent_key(row: Any, include_hash: bool = False) -> Dict[str, Any]:
+    try:
+        scopes = json.loads(row["scopes"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        scopes = []
+    try:
+        programs = json.loads(row["programs"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        programs = []
+    data = {
+        "key_id": row["key_id"],
+        "name": row["name"],
+        "scopes": scopes,
+        "programs": programs,
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "last_used_at": row["last_used_at"],
+        "revoked": bool(row["revoked"]),
+    }
+    if include_hash:
+        data["key_hash"] = row["key_hash"]
+    return data
+
+
+def list_agent_api_keys() -> List[Dict[str, Any]]:
+    """List API keys without any secret material."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM agent_api_keys ORDER BY created_at DESC")
+    return [_row_to_agent_key(row) for row in cursor.fetchall()]
+
+
+def revoke_agent_api_key(key_id: str) -> Tuple[bool, str]:
+    key_id = (key_id or "").strip()
+    if not key_id:
+        return False, "key_id is required."
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("UPDATE agent_api_keys SET revoked = 1 WHERE key_id = ?", (key_id,))
+    db.commit()
+    if cursor.rowcount == 0:
+        return False, "API key not found."
+    log(f"Revoked agent API key {key_id}")
+    return True, "API key revoked."
+
+
+def delete_agent_api_key(key_id: str) -> Tuple[bool, str]:
+    key_id = (key_id or "").strip()
+    if not key_id:
+        return False, "key_id is required."
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM agent_api_keys WHERE key_id = ?", (key_id,))
+    db.commit()
+    if cursor.rowcount == 0:
+        return False, "API key not found."
+    log(f"Deleted agent API key {key_id}")
+    return True, "API key deleted."
+
+
+def validate_agent_api_key(raw_key: str) -> Optional[Dict[str, Any]]:
+    """Validate a presented API key. Returns the key record or None."""
+    raw_key = (raw_key or "").strip()
+    if not raw_key:
+        return None
+    parts = raw_key.split("_", 2)
+    if len(parts) != 3 or parts[0] != AGENT_KEY_PREFIX:
+        return None
+    _, key_id, secret = parts
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM agent_api_keys WHERE key_id = ?", (key_id,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    record = _row_to_agent_key(row, include_hash=True)
+    if not hmac.compare_digest(record.pop("key_hash", ""), _hash_api_secret(secret)):
+        return None
+    if record["revoked"]:
+        return None
+    if record["expires_at"]:
+        try:
+            if datetime.fromisoformat(record["expires_at"]) <= datetime.now(timezone.utc):
+                return None
+        except ValueError:
+            pass
+
+    cursor.execute("UPDATE agent_api_keys SET last_used_at = ? WHERE key_id = ?", (_now_iso(), key_id))
+    db.commit()
+    return record
+
+
+# --- Program scope model ----------------------------------------------------
+
+def _scope_pattern_host(entry: str) -> Optional[str]:
+    """Extract a host pattern from a scope entry (bare domain, wildcard or URL)."""
+    value = (entry or "").strip().lower()
+    if not value:
+        return None
+    if "://" in value:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return None
+        host = (parsed.netloc or "").split("@")[-1]
+    else:
+        host = value.split("/")[0]
+    host = host.split(":")[0].strip().strip(".")
+    if not host:
+        return None
+    # Only treat it as a host pattern if it looks like a hostname/wildcard.
+    if not re.fullmatch(r"[a-z0-9\*\.\-_]+", host):
+        return None
+    return host
+
+
+def parse_scope_entry(entry: str) -> Dict[str, Any]:
+    """Normalize one scope line into {raw, host, wildcard, kind}."""
+    raw = (entry or "").strip()
+    host = _scope_pattern_host(raw)
+    if not host:
+        return {"raw": raw, "host": None, "wildcard": False, "kind": "other"}
+    return {
+        "raw": raw,
+        "host": host,
+        "wildcard": "*" in host,
+        "kind": "url" if "://" in raw.lower() else "domain",
+    }
+
+
+def host_matches_scope_pattern(host: str, pattern: str) -> bool:
+    """
+    Match a hostname against a scope pattern.
+
+    `*.example.com` matches example.com and any subdomain of it (the usual bug
+    bounty reading of a wildcard root). Other `*` placements are glob-matched.
+    """
+    host = (host or "").strip().lower().strip(".")
+    pattern = (pattern or "").strip().lower().strip(".")
+    if not host or not pattern:
+        return False
+    if pattern == host:
+        return True
+    if pattern.startswith("*."):
+        suffix = pattern[2:]
+        return bool(suffix) and (host == suffix or host.endswith("." + suffix))
+    if "*" in pattern:
+        regex = "^" + "".join(".*" if ch == "*" else re.escape(ch) for ch in pattern) + "$"
+        return re.match(regex, host) is not None
+    return False
+
+
+def evaluate_asset_scope(asset: str, in_scope: List[str], out_of_scope: List[str]) -> Dict[str, Any]:
+    """
+    Decide whether one asset is in scope. Out-of-scope always wins so an agent
+    never gets told to touch an excluded host.
+    """
+    raw_asset = (asset or "").strip()
+    host = _scope_pattern_host(raw_asset)
+    result: Dict[str, Any] = {
+        "asset": raw_asset,
+        "host": host,
+        "in_scope": False,
+        "matched": None,
+        "reason": "",
+    }
+    if not raw_asset:
+        result["reason"] = "Empty asset."
+        return result
+
+    for pattern in out_of_scope or []:
+        parsed = parse_scope_entry(pattern)
+        if parsed["host"] and host and host_matches_scope_pattern(host, parsed["host"]):
+            result["matched"] = parsed["raw"]
+            result["reason"] = f"Excluded by out-of-scope rule '{parsed['raw']}'."
+            return result
+        if parsed["raw"].lower() == raw_asset.lower():
+            result["matched"] = parsed["raw"]
+            result["reason"] = f"Excluded by out-of-scope rule '{parsed['raw']}'."
+            return result
+
+    for pattern in in_scope or []:
+        parsed = parse_scope_entry(pattern)
+        if parsed["host"] and host and host_matches_scope_pattern(host, parsed["host"]):
+            result["in_scope"] = True
+            result["matched"] = parsed["raw"]
+            result["reason"] = f"Matched in-scope rule '{parsed['raw']}'."
+            return result
+        if parsed["raw"].lower() == raw_asset.lower():
+            result["in_scope"] = True
+            result["matched"] = parsed["raw"]
+            result["reason"] = f"Matched in-scope rule '{parsed['raw']}'."
+            return result
+
+    result["reason"] = "No in-scope rule matched."
+    return result
+
+
+def program_root_targets(program: Dict[str, Any]) -> List[str]:
+    """Root domains that should be enumerated for a program, out-of-scope removed."""
+    scope = program.get("scope", {})
+    in_scope = scope.get("in_scope", []) or []
+    out_of_scope = scope.get("out_of_scope", []) or []
+    roots: List[str] = []
+    for entry in in_scope:
+        parsed = parse_scope_entry(entry)
+        host = parsed["host"]
+        if not host:
+            continue
+        while host.startswith("*."):
+            host = host[2:]
+        if "*" in host:
+            continue
+        host = host.strip(".")
+        if not host or host in roots:
+            continue
+        verdict = evaluate_asset_scope(host, in_scope, out_of_scope)
+        if not verdict["in_scope"]:
+            continue
+        roots.append(host)
+    return roots
+
+
+# --- Program CRUD -----------------------------------------------------------
+
+def _row_to_program(row: Any) -> Dict[str, Any]:
+    try:
+        data = json.loads(row["data"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    scope = data.get("scope", {}) or {}
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "platform": row["platform"] or "",
+        "handle": data.get("handle", ""),
+        "url": data.get("url", ""),
+        "notes": data.get("notes", ""),
+        "tags": data.get("tags", []),
+        "scope": {
+            "in_scope": scope.get("in_scope", []),
+            "out_of_scope": scope.get("out_of_scope", []),
+        },
+        "last_investigated_at": data.get("last_investigated_at"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _clean_scope_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        items = [part for part in re.split(r"[,\n\r]+", value)]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(part) for part in value]
+    else:
+        items = []
+    cleaned: List[str] = []
+    for item in items:
+        item = item.strip()
+        if not item or item in cleaned:
+            continue
+        cleaned.append(item)
+    return cleaned[:5000]
+
+
+def create_program(payload: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Create a program from a full scope definition."""
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return False, "Program name is required.", None
+
+    in_scope = _clean_scope_list(payload.get("in_scope") or (payload.get("scope") or {}).get("in_scope"))
+    out_of_scope = _clean_scope_list(payload.get("out_of_scope") or (payload.get("scope") or {}).get("out_of_scope"))
+    if not in_scope:
+        return False, "At least one in-scope entry is required.", None
+
+    program_id = str(payload.get("id") or "").strip().lower()
+    if program_id and not re.fullmatch(r"[a-z0-9][a-z0-9._\-]{0,63}", program_id):
+        return False, ("Program id must be 1-64 chars of letters, digits, '.', '_' or '-' "
+                       "and start with a letter or digit."), None
+    if not program_id:
+        program_id = re.sub(r"[^a-z0-9\-]+", "-", name.lower()).strip("-")[:48]
+    if not program_id:
+        program_id = uuid.uuid4().hex[:12]
+    if get_program(program_id):
+        return False, f"Program '{program_id}' already exists. Use the update endpoint.", None
+
+    now = _now_iso()
+    data = {
+        "handle": str(payload.get("handle") or "").strip(),
+        "url": str(payload.get("url") or "").strip(),
+        "notes": str(payload.get("notes") or "").strip(),
+        "tags": _clean_scope_list(payload.get("tags")),
+        "scope": {"in_scope": in_scope, "out_of_scope": out_of_scope},
+    }
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "INSERT INTO programs (id, name, platform, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (program_id, name, str(payload.get("platform") or "").strip(), json.dumps(data), now, now),
+    )
+    db.commit()
+    log(f"Created program '{program_id}' with {len(in_scope)} in-scope and {len(out_of_scope)} out-of-scope entries")
+    return True, f"Program '{program_id}' created.", get_program(program_id)
+
+
+def update_program(program_id: str, payload: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Patch a program. Only provided fields change."""
+    program = get_program(program_id)
+    if not program:
+        return False, "Program not found.", None
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT data FROM programs WHERE id = ?", (program_id,))
+    row = cursor.fetchone()
+    try:
+        data = json.loads(row["data"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    scope = data.setdefault("scope", {})
+
+    name = program["name"]
+    if "name" in payload:
+        candidate = str(payload.get("name") or "").strip()
+        if not candidate:
+            return False, "Program name cannot be empty.", None
+        name = candidate
+    platform = str(payload.get("platform", program["platform"]) or "").strip()
+
+    scope_payload = payload.get("scope") or {}
+    if "in_scope" in payload or "in_scope" in scope_payload:
+        in_scope = _clean_scope_list(payload.get("in_scope", scope_payload.get("in_scope")))
+        if not in_scope:
+            return False, "At least one in-scope entry is required.", None
+        scope["in_scope"] = in_scope
+    if "out_of_scope" in payload or "out_of_scope" in scope_payload:
+        scope["out_of_scope"] = _clean_scope_list(payload.get("out_of_scope", scope_payload.get("out_of_scope")))
+    for field in ("handle", "url", "notes"):
+        if field in payload:
+            data[field] = str(payload.get(field) or "").strip()
+    if "tags" in payload:
+        data["tags"] = _clean_scope_list(payload.get("tags"))
+
+    cursor.execute(
+        "UPDATE programs SET name = ?, platform = ?, data = ?, updated_at = ? WHERE id = ?",
+        (name, platform, json.dumps(data), _now_iso(), program_id),
+    )
+    db.commit()
+    return True, f"Program '{program_id}' updated.", get_program(program_id)
+
+
+def get_program(program_id: str) -> Optional[Dict[str, Any]]:
+    program_id = (program_id or "").strip()
+    if not program_id:
+        return None
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
+    row = cursor.fetchone()
+    return _row_to_program(row) if row else None
+
+
+def list_programs() -> List[Dict[str, Any]]:
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM programs ORDER BY updated_at DESC")
+    return [_row_to_program(row) for row in cursor.fetchall()]
+
+
+def delete_program(program_id: str) -> Tuple[bool, str]:
+    program_id = (program_id or "").strip()
+    if not program_id:
+        return False, "Program id is required."
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM programs WHERE id = ?", (program_id,))
+    db.commit()
+    if cursor.rowcount == 0:
+        return False, "Program not found."
+    return True, f"Program '{program_id}' deleted. Recon data for its domains was kept."
+
+
+def _touch_program_investigated(program_id: str) -> None:
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT data FROM programs WHERE id = ?", (program_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    try:
+        data = json.loads(row["data"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    data["last_investigated_at"] = _now_iso()
+    cursor.execute("UPDATE programs SET data = ?, updated_at = ? WHERE id = ?",
+                   (json.dumps(data), _now_iso(), program_id))
+    db.commit()
+
+
+# --- Investigation ----------------------------------------------------------
+
+def investigate_program(program: Dict[str, Any], options: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Dispatch the recon pipeline for every in-scope root of a program.
+    Targets outside the program scope are refused, not silently dropped.
+    """
+    scope = program.get("scope", {})
+    roots = program_root_targets(program)
+    requested = options.get("targets")
+    refused: List[Dict[str, str]] = []
+
+    if requested:
+        if isinstance(requested, str):
+            requested = _clean_scope_list(requested)
+        selected: List[str] = []
+        for target in requested:
+            host = _scope_pattern_host(str(target))
+            if not host:
+                refused.append({"target": str(target), "reason": "Not a valid hostname."})
+                continue
+            while host.startswith("*."):
+                host = host[2:]
+            verdict = evaluate_asset_scope(host, scope.get("in_scope", []), scope.get("out_of_scope", []))
+            if not verdict["in_scope"]:
+                refused.append({"target": host, "reason": verdict["reason"]})
+                continue
+            if host not in selected:
+                selected.append(host)
+        roots = selected
+
+    if not roots:
+        return False, "No in-scope targets to investigate.", {"dispatched": [], "refused": refused}
+
+    cfg = get_config()
+    skip_nikto = bool_from_value(options.get("skip_nikto"), cfg.get("skip_nikto_by_default", False))
+    wordlist = options.get("wordlist")
+    interval = options.get("interval")
+    interval_int: Optional[int] = None
+    if interval not in (None, ""):
+        try:
+            interval_int = int(interval)
+        except (TypeError, ValueError):
+            interval_int = None
+
+    dispatched: List[Dict[str, Any]] = []
+    for root in roots:
+        success, message = start_pipeline_job(root, wordlist, skip_nikto, interval_int)
+        dispatched.append({"target": root, "success": success, "message": message})
+
+    _touch_program_investigated(program["id"])
+    started = [item["target"] for item in dispatched if item["success"]]
+    message = f"Dispatched {len(started)}/{len(roots)} target(s) for program '{program['id']}'."
+    if refused:
+        message += f" Refused {len(refused)} out-of-scope target(s)."
+    return bool(started), message, {"dispatched": dispatched, "refused": refused}
+
+
+def _job_snapshot(domain: str) -> Optional[Dict[str, Any]]:
+    with JOB_LOCK:
+        job = RUNNING_JOBS.get(domain)
+        if job:
+            return {
+                "status": job.get("status"),
+                "message": job.get("message"),
+                "progress": job.get("progress", 0),
+                "queued_at": job.get("queued_at"),
+                "started": job.get("started"),
+                "last_update": job.get("last_update"),
+                "steps": {name: {"status": step.get("status"), "progress": step.get("progress", 0),
+                                 "message": step.get("message", "")}
+                          for name, step in (job.get("steps") or {}).items()},
+            }
+    completed = COMPLETED_JOBS.get(domain)
+    if completed:
+        return {
+            "status": completed.get("status", "completed"),
+            "message": completed.get("message", ""),
+            "progress": completed.get("progress", 100),
+            "completed_at": completed.get("completed_at"),
+            "steps": {name: {"status": step.get("status"), "progress": step.get("progress", 0),
+                             "message": step.get("message", "")}
+                      for name, step in (completed.get("steps") or {}).items()},
+        }
+    return None
+
+
+def _normalize_severity(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in SEVERITY_ORDER:
+        return text
+    if text in ("informational", "information"):
+        return "info"
+    return "unknown"
+
+
+def _severity_counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {sev: 0 for sev in SEVERITY_ORDER}
+    for item in items:
+        counts[_normalize_severity(item.get("severity"))] += 1
+    return counts
+
+
+def _program_targets_from_state(program: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Recon state entries that belong to this program's roots."""
+    roots = program_root_targets(program)
+    targets = state.get("targets", {}) or {}
+    return {root: targets[root] for root in roots if root in targets}
+
+
+def program_status(program: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-root pipeline progress plus aggregate coverage for the whole program."""
+    state = load_state()
+    roots = program_root_targets(program)
+    targets = state.get("targets", {}) or {}
+    scope = program.get("scope", {})
+
+    per_target: List[Dict[str, Any]] = []
+    totals = {"subdomains": 0, "live_hosts": 0, "endpoints": 0, "findings": 0}
+    severity_totals = {sev: 0 for sev in SEVERITY_ORDER}
+
+    for root in roots:
+        target = targets.get(root)
+        job = _job_snapshot(root)
+        if not target:
+            per_target.append({
+                "target": root,
+                "scanned": False,
+                "job": job,
+                "flags": {},
+                "counts": {"subdomains": 0, "live_hosts": 0, "endpoints": 0, "findings": 0},
+            })
+            continue
+
+        subs = target.get("subdomains", {}) or {}
+        live = sum(1 for entry in subs.values() if isinstance(entry, dict) and entry.get("httpx"))
+        findings = 0
+        for entry in subs.values():
+            if not isinstance(entry, dict):
+                continue
+            for finding in (entry.get("nuclei") or []):
+                severity_totals[_normalize_severity(finding.get("severity"))] += 1
+                findings += 1
+            for finding in (entry.get("nikto") or []):
+                severity_totals[_normalize_severity(finding.get("severity"))] += 1
+                findings += 1
+        js_secrets = len(((target.get("js_scan") or {}).get("secrets") or []))
+        endpoints = len(target.get("endpoints", []) or [])
+
+        totals["subdomains"] += len(subs)
+        totals["live_hosts"] += live
+        totals["endpoints"] += endpoints
+        totals["findings"] += findings + js_secrets
+
+        per_target.append({
+            "target": root,
+            "scanned": True,
+            "job": job,
+            "flags": target.get("flags", {}),
+            "pending_work": target_has_pending_work(target),
+            "counts": {
+                "subdomains": len(subs),
+                "live_hosts": live,
+                "endpoints": endpoints,
+                "findings": findings,
+                "js_secrets": js_secrets,
+            },
+        })
+
+    active = [item["target"] for item in per_target
+              if item.get("job") and item["job"].get("status") in ("queued", "running", "paused")]
+    return {
+        "program": {"id": program["id"], "name": program["name"], "platform": program["platform"]},
+        "scope_summary": {
+            "in_scope_entries": len(scope.get("in_scope", [])),
+            "out_of_scope_entries": len(scope.get("out_of_scope", [])),
+            "root_targets": len(roots),
+        },
+        "targets": per_target,
+        "active_targets": active,
+        "investigation_state": "running" if active else ("complete" if roots and all(
+            item["scanned"] and not item.get("pending_work") for item in per_target) else "idle"),
+        "totals": totals,
+        "severity_totals": severity_totals,
+        "last_investigated_at": program.get("last_investigated_at"),
+    }
+
+
+def _paginate(items: List[Any], page: int, per_page: int) -> Tuple[List[Any], Dict[str, Any]]:
+    total = len(items)
+    per_page = max(1, min(1000, per_page))
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    start = (page - 1) * per_page
+    return items[start:start + per_page], {
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages,
+        "has_next": page < pages,
+    }
+
+
+def collect_program_assets(program: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Flatten every discovered host for a program into agent-friendly records.
+    Out-of-scope hosts are excluded unless explicitly requested.
+    """
+    state = load_state()
+    scope = program.get("scope", {})
+    in_scope = scope.get("in_scope", []) or []
+    out_of_scope = scope.get("out_of_scope", []) or []
+    include_out = bool_from_value(filters.get("include_out_of_scope"), False)
+    live_only = bool_from_value(filters.get("live_only"), False)
+    interesting_only = bool_from_value(filters.get("interesting_only"), False)
+    with_findings = bool_from_value(filters.get("with_findings"), False)
+    search = str(filters.get("search") or "").strip().lower()
+    status_filter = str(filters.get("status_code") or "").strip()
+
+    assets: List[Dict[str, Any]] = []
+    for root, target in _program_targets_from_state(program, state).items():
+        for host, entry in (target.get("subdomains", {}) or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            verdict = evaluate_asset_scope(host, in_scope, out_of_scope)
+            if not verdict["in_scope"] and not include_out:
+                continue
+            httpx = entry.get("httpx") or {}
+            nuclei = entry.get("nuclei") or []
+            nikto = entry.get("nikto") or []
+            record = {
+                "host": host,
+                "root": root,
+                "in_scope": verdict["in_scope"],
+                "scope_reason": verdict["reason"],
+                "sources": entry.get("sources", []),
+                "live": bool(httpx),
+                "url": httpx.get("url"),
+                "status_code": httpx.get("status_code"),
+                "title": httpx.get("title"),
+                "webserver": httpx.get("webserver"),
+                "tech": httpx.get("tech") or [],
+                "content_length": httpx.get("content_length"),
+                "screenshot": entry.get("screenshot"),
+                "interesting": bool(entry.get("interesting")),
+                "findings": {"nuclei": len(nuclei), "nikto": len(nikto)},
+                "severity_counts": _severity_counts(list(nuclei) + list(nikto)),
+            }
+            if live_only and not record["live"]:
+                continue
+            if interesting_only and not record["interesting"]:
+                continue
+            if with_findings and not (nuclei or nikto):
+                continue
+            if status_filter and str(record["status_code"] or "") != status_filter:
+                continue
+            if search and search not in host:
+                continue
+            assets.append(record)
+
+    assets.sort(key=lambda item: (not item["live"], item["host"]))
+    return assets
+
+
+def program_assets(program: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Paginated view over collect_program_assets()."""
+    assets = collect_program_assets(program, filters)
+    try:
+        page = max(1, int(filters.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(filters.get("per_page") or 100)
+    except (TypeError, ValueError):
+        per_page = 100
+    items, pagination = _paginate(assets, page, per_page)
+    return {"program_id": program["id"], "assets": items, "pagination": pagination}
+
+
+def program_findings(program: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalized findings across nuclei, nikto and JS secret scanning."""
+    state = load_state()
+    scope = program.get("scope", {})
+    in_scope = scope.get("in_scope", []) or []
+    out_of_scope = scope.get("out_of_scope", []) or []
+    include_out = bool_from_value(filters.get("include_out_of_scope"), False)
+    severity_filter = {s.strip().lower() for s in str(filters.get("severity") or "").split(",") if s.strip()}
+    source_filter = {s.strip().lower() for s in str(filters.get("source") or "").split(",") if s.strip()}
+    host_filter = str(filters.get("host") or "").strip().lower()
+
+    findings: List[Dict[str, Any]] = []
+
+    def _add(source: str, host: str, root: str, severity: str, name: str, extra: Dict[str, Any]) -> None:
+        record = {
+            "id": hashlib.sha256(f"{source}|{host}|{name}|{extra.get('matched_at') or ''}".encode("utf-8")).hexdigest()[:16],
+            "source": source,
+            "host": host,
+            "root": root,
+            "severity": _normalize_severity(severity),
+            "name": name,
+        }
+        record.update(extra)
+        findings.append(record)
+
+    for root, target in _program_targets_from_state(program, state).items():
+        for host, entry in (target.get("subdomains", {}) or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if not include_out and not evaluate_asset_scope(host, in_scope, out_of_scope)["in_scope"]:
+                continue
+            for finding in (entry.get("nuclei") or []):
+                _add("nuclei", host, root, finding.get("severity"),
+                     finding.get("name") or finding.get("template_id") or "nuclei finding",
+                     {"template_id": finding.get("template_id"), "matched_at": finding.get("matched_at")})
+            for finding in (entry.get("nikto") or []):
+                _add("nikto", host, root, finding.get("severity"),
+                     finding.get("msg") or "nikto finding",
+                     {"matched_at": finding.get("uri"), "cve": finding.get("cve"), "osvdb": finding.get("osvdb")})
+
+        js_scan = target.get("js_scan") or {}
+        for secret in (js_scan.get("secrets") or []):
+            source_url = secret.get("source") or ""
+            host = _scope_pattern_host(source_url) or root
+            if not include_out and not evaluate_asset_scope(host, in_scope, out_of_scope)["in_scope"]:
+                continue
+            _add("js_secret", host, root, "medium",
+                 f"Possible {secret.get('type', 'secret')} in JS",
+                 {"matched_at": source_url, "match": secret.get("match")})
+
+    if severity_filter:
+        findings = [f for f in findings if f["severity"] in severity_filter]
+    if source_filter:
+        findings = [f for f in findings if f["source"] in source_filter]
+    if host_filter:
+        findings = [f for f in findings if host_filter in f["host"]]
+
+    findings.sort(key=lambda f: (SEVERITY_ORDER.index(f["severity"]), f["host"]))
+    try:
+        page = max(1, int(filters.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(filters.get("per_page") or 100)
+    except (TypeError, ValueError):
+        per_page = 100
+    items, pagination = _paginate(findings, page, per_page)
+    return {
+        "program_id": program["id"],
+        "findings": items,
+        "pagination": pagination,
+        "severity_counts": _severity_counts(findings),
+    }
+
+
+def program_endpoints(program: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Archived and JS-discovered URLs for the program, plus JS-derived parameters."""
+    state = load_state()
+    search = str(filters.get("search") or "").strip().lower()
+    endpoints: List[Dict[str, Any]] = []
+    params: set = set()
+    for root, target in _program_targets_from_state(program, state).items():
+        for url in (target.get("endpoints", []) or []):
+            if search and search not in url.lower():
+                continue
+            endpoints.append({"url": url, "root": root})
+        params.update((target.get("js_scan") or {}).get("params") or [])
+
+    try:
+        page = max(1, int(filters.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(filters.get("per_page") or 200)
+    except (TypeError, ValueError):
+        per_page = 200
+    items, pagination = _paginate(endpoints, page, per_page)
+    return {
+        "program_id": program["id"],
+        "endpoints": items,
+        "params": sorted(params)[:2000],
+        "pagination": pagination,
+    }
+
+
+def program_surface(program: Dict[str, Any], limit: int = 50) -> Dict[str, Any]:
+    """
+    Rank in-scope hosts by how much they look worth an agent's time.
+    Every score carries the reasons that produced it so the agent can explain itself.
+    """
+    assets = collect_program_assets(program, {})
+    ranked: List[Dict[str, Any]] = []
+
+    for asset in assets:
+        score = 0
+        reasons: List[str] = []
+
+        if asset["live"]:
+            score += 5
+            reasons.append("live host")
+        status = asset.get("status_code")
+        if status in (401, 403):
+            score += 12
+            reasons.append(f"auth-gated ({status})")
+        elif status in (500, 502, 503):
+            score += 8
+            reasons.append(f"server error ({status})")
+        elif status == 200:
+            score += 3
+
+        for severity, count in asset["severity_counts"].items():
+            if count:
+                score += SEVERITY_WEIGHT.get(severity, 1) * count
+                reasons.append(f"{count} {severity} finding(s)")
+
+        if asset["interesting"]:
+            score += 20
+            reasons.append("marked interesting")
+
+        host_hits = [kw for kw in INTERESTING_HOST_KEYWORDS if kw in asset["host"].split(".")[0]]
+        if host_hits:
+            score += min(24, 8 * len(host_hits))
+            reasons.append("hostname keywords: " + ", ".join(host_hits[:3]))
+
+        tech_values = asset.get("tech") or []
+        if isinstance(tech_values, str):
+            tech_values = [tech_values]
+        tech_blob = " ".join(str(t).lower() for t in tech_values)
+        tech_hits = [kw for kw in INTERESTING_TECH_KEYWORDS if kw in tech_blob]
+        if tech_hits:
+            score += min(18, 6 * len(tech_hits))
+            reasons.append("tech: " + ", ".join(tech_hits[:3]))
+
+        title = (asset.get("title") or "").lower()
+        if any(word in title for word in ("login", "sign in", "admin", "dashboard", "api", "swagger", "graphql")):
+            score += 6
+            reasons.append("interesting title")
+
+        if score <= 0:
+            continue
+        ranked.append({
+            "host": asset["host"],
+            "root": asset["root"],
+            "url": asset["url"],
+            "status_code": status,
+            "title": asset.get("title"),
+            "tech": tech_values,
+            "score": score,
+            "reasons": reasons,
+            "severity_counts": asset["severity_counts"],
+        })
+
+    ranked.sort(key=lambda item: (-item["score"], item["host"]))
+    try:
+        limit = max(1, min(1000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 50
+    return {"program_id": program["id"], "surface": ranked[:limit], "total_ranked": len(ranked)}
+
+
 class CommandCenterHandler(BaseHTTPRequestHandler):
     server_version = "ReconCommandCenter/1.0"
 
@@ -16284,12 +17341,372 @@ form.addEventListener('submit', async (e) => {
         data = json.dumps(payload).encode("utf-8")
         self._send_bytes(data, status=status, content_type="application/json")
 
+    # ------------------------------------------------------------------
+    # Bug bounty agent API (/api/agent/*)
+    # ------------------------------------------------------------------
+
+    def _agent_read_json(self) -> Tuple[bool, Dict[str, Any]]:
+        """Read a JSON (or form-encoded) request body. Returns (ok, payload)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length > 20 * 1024 * 1024:
+            self._send_json({"success": False, "error": "payload_too_large",
+                             "message": "Request body too large."},
+                            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return False, {}
+        body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+        if not body:
+            return True, {}
+        content_type = self.headers.get("Content-Type", "")
+        try:
+            if "application/x-www-form-urlencoded" in content_type:
+                return True, {k: v[0] for k, v in parse_qs(body).items()}
+            return True, json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            self._send_json({"success": False, "error": "invalid_json",
+                             "message": "Request body must be valid JSON."},
+                            status=HTTPStatus.BAD_REQUEST)
+            return False, {}
+
+    def _agent_principal(self) -> Optional[Dict[str, Any]]:
+        """
+        Resolve the caller: a scoped API key (Authorization: Bearer / X-API-Key)
+        or a logged-in UI session. Returns None when unauthenticated.
+        """
+        raw_key = ""
+        auth_header = self.headers.get("Authorization") or ""
+        if auth_header.lower().startswith("bearer "):
+            raw_key = auth_header[7:].strip()
+        if not raw_key:
+            raw_key = (self.headers.get("X-API-Key") or "").strip()
+
+        if raw_key:
+            record = validate_agent_api_key(raw_key)
+            if not record:
+                return None
+            return {
+                "type": "api_key",
+                "name": record["name"],
+                "key_id": record["key_id"],
+                "scopes": list(record["scopes"]),
+                "programs": list(record["programs"]),
+                "expires_at": record["expires_at"],
+            }
+
+        user = self._get_current_user()
+        if user:
+            scopes = list(AGENT_API_SCOPES) if user.get("is_admin") else list(AGENT_SESSION_SCOPES)
+            return {
+                "type": "session",
+                "name": user.get("username"),
+                "key_id": None,
+                "scopes": scopes,
+                "programs": [],
+                "is_admin": bool(user.get("is_admin")),
+            }
+        return None
+
+    def _agent_authorize(self, required_scope: str, program_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Authenticate and enforce scope plus per-key program restrictions."""
+        principal = self._agent_principal()
+        if not principal:
+            self._send_json({
+                "success": False,
+                "error": "unauthorized",
+                "message": "Provide a scoped API key via 'Authorization: Bearer <key>' or 'X-API-Key'.",
+            }, status=HTTPStatus.UNAUTHORIZED)
+            return None
+
+        if required_scope and required_scope not in principal["scopes"]:
+            self._send_json({
+                "success": False,
+                "error": "insufficient_scope",
+                "message": f"This key lacks the '{required_scope}' scope.",
+                "required_scope": required_scope,
+                "granted_scopes": principal["scopes"],
+            }, status=HTTPStatus.FORBIDDEN)
+            return None
+
+        allowed_programs = principal.get("programs") or []
+        if program_id and allowed_programs and program_id not in allowed_programs:
+            self._send_json({
+                "success": False,
+                "error": "program_forbidden",
+                "message": f"This key is not scoped to program '{program_id}'.",
+                "allowed_programs": allowed_programs,
+            }, status=HTTPStatus.FORBIDDEN)
+            return None
+
+        return principal
+
+    def _agent_program_or_404(self, program_id: str) -> Optional[Dict[str, Any]]:
+        program = get_program(program_id)
+        if not program:
+            self._send_json({"success": False, "error": "not_found",
+                             "message": f"Program '{program_id}' not found."},
+                            status=HTTPStatus.NOT_FOUND)
+            return None
+        return program
+
+    def _agent_not_found(self) -> None:
+        self._send_json({"success": False, "error": "not_found",
+                         "message": "Unknown agent API endpoint. GET /api/agent for the endpoint index."},
+                        status=HTTPStatus.NOT_FOUND)
+
+    @staticmethod
+    def _agent_index() -> Dict[str, Any]:
+        return {
+            "success": True,
+            "service": "recon-command-center agent API",
+            "auth": "Authorization: Bearer <api_key>  (or X-API-Key: <api_key>)",
+            "scopes": AGENT_API_SCOPES,
+            "endpoints": {
+                "GET /api/agent/whoami": "Identity and granted scopes for the presented key",
+                "GET /api/agent/keys": "List API keys (keys:manage)",
+                "POST /api/agent/keys": "Create a scoped API key (keys:manage)",
+                "POST /api/agent/keys/revoke": "Revoke a key by key_id (keys:manage)",
+                "POST /api/agent/keys/delete": "Delete a key by key_id (keys:manage)",
+                "GET /api/agent/programs": "List programs (programs:read)",
+                "POST /api/agent/programs": "Create a program from a full scope (programs:write)",
+                "GET /api/agent/programs/{id}": "Program detail incl. derived root targets (programs:read)",
+                "POST /api/agent/programs/{id}": "Update a program (programs:write)",
+                "POST /api/agent/programs/{id}/delete": "Delete a program (programs:write)",
+                "POST /api/agent/programs/{id}/investigate": "Run recon over the whole scope (scan:run)",
+                "GET /api/agent/programs/{id}/status": "Per-target pipeline progress and coverage (programs:read)",
+                "GET /api/agent/programs/{id}/assets": "Discovered hosts, filterable + paginated (assets:read)",
+                "GET /api/agent/programs/{id}/endpoints": "Archived/JS URLs and parameters (assets:read)",
+                "GET /api/agent/programs/{id}/findings": "Normalized nuclei/nikto/JS findings (findings:read)",
+                "GET /api/agent/programs/{id}/surface": "Ranked attack surface with reasons (findings:read)",
+                "GET /api/agent/programs/{id}/scope": "Resolved scope and root targets (programs:read)",
+                "POST /api/agent/programs/{id}/scope/check": "Check assets against program scope (programs:read)",
+                "POST /api/agent/scope/check": "Check assets against an ad-hoc scope (programs:read)",
+            },
+        }
+
+    def _handle_agent_get(self) -> None:
+        parsed = urlparse(self.path)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        segments = [seg for seg in parsed.path.strip("/").split("/")[2:] if seg]
+
+        if not segments:
+            self._send_json(self._agent_index())
+            return
+
+        if segments == ["whoami"]:
+            principal = self._agent_authorize("")
+            if not principal:
+                return
+            self._send_json({"success": True, "principal": principal})
+            return
+
+        if segments == ["keys"]:
+            if not self._agent_authorize("keys:manage"):
+                return
+            self._send_json({"success": True, "keys": list_agent_api_keys(), "scopes": AGENT_API_SCOPES})
+            return
+
+        if segments == ["programs"]:
+            principal = self._agent_authorize("programs:read")
+            if not principal:
+                return
+            programs = list_programs()
+            allowed = principal.get("programs") or []
+            if allowed:
+                programs = [p for p in programs if p["id"] in allowed]
+            for program in programs:
+                program["root_targets"] = program_root_targets(program)
+            self._send_json({"success": True, "programs": programs, "count": len(programs)})
+            return
+
+        if segments[0] == "programs" and len(segments) >= 2:
+            program_id = unquote(segments[1])
+            sub = segments[2:]
+
+            scope_needed = "programs:read"
+            if sub[:1] == ["assets"] or sub[:1] == ["endpoints"]:
+                scope_needed = "assets:read"
+            elif sub[:1] in (["findings"], ["surface"]):
+                scope_needed = "findings:read"
+
+            if not self._agent_authorize(scope_needed, program_id=program_id):
+                return
+            program = self._agent_program_or_404(program_id)
+            if not program:
+                return
+
+            if not sub:
+                detail = dict(program)
+                detail["root_targets"] = program_root_targets(program)
+                self._send_json({"success": True, "program": detail})
+                return
+            if sub == ["scope"]:
+                self._send_json({
+                    "success": True,
+                    "program_id": program_id,
+                    "scope": program["scope"],
+                    "root_targets": program_root_targets(program),
+                    "wildcard_rule": "'*.example.com' matches example.com and every subdomain; out-of-scope always wins.",
+                })
+                return
+            if sub == ["status"]:
+                self._send_json({"success": True, **program_status(program)})
+                return
+            if sub == ["assets"]:
+                self._send_json({"success": True, **program_assets(program, params)})
+                return
+            if sub == ["endpoints"]:
+                self._send_json({"success": True, **program_endpoints(program, params)})
+                return
+            if sub == ["findings"]:
+                self._send_json({"success": True, **program_findings(program, params)})
+                return
+            if sub == ["surface"]:
+                self._send_json({"success": True, **program_surface(program, params.get("limit", 50))})
+                return
+
+        self._agent_not_found()
+
+    def _handle_agent_post(self) -> None:
+        parsed = urlparse(self.path)
+        segments = [seg for seg in parsed.path.strip("/").split("/")[2:] if seg]
+        if not segments:
+            self._agent_not_found()
+            return
+
+        # --- API key management ---
+        if segments[0] == "keys":
+            principal = self._agent_authorize("keys:manage")
+            if not principal:
+                return
+            ok, payload = self._agent_read_json()
+            if not ok:
+                return
+
+            if segments == ["keys"]:
+                success, message, key = create_agent_api_key(
+                    payload.get("name", ""),
+                    payload.get("scopes", []),
+                    payload.get("programs"),
+                    payload.get("expires_days"),
+                    created_by=principal.get("name"),
+                )
+                self._send_json({"success": success, "message": message, "key": key},
+                                status=HTTPStatus.CREATED if success else HTTPStatus.BAD_REQUEST)
+                return
+            if segments == ["keys", "revoke"]:
+                success, message = revoke_agent_api_key(payload.get("key_id", ""))
+                self._send_json({"success": success, "message": message},
+                                status=HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST)
+                return
+            if segments == ["keys", "delete"]:
+                success, message = delete_agent_api_key(payload.get("key_id", ""))
+                self._send_json({"success": success, "message": message},
+                                status=HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST)
+                return
+            self._agent_not_found()
+            return
+
+        # --- Ad-hoc scope check (no program needed) ---
+        if segments == ["scope", "check"]:
+            if not self._agent_authorize("programs:read"):
+                return
+            ok, payload = self._agent_read_json()
+            if not ok:
+                return
+            in_scope = _clean_scope_list(payload.get("in_scope"))
+            out_of_scope = _clean_scope_list(payload.get("out_of_scope"))
+            assets = _clean_scope_list(payload.get("assets") or payload.get("asset"))
+            if not assets:
+                self._send_json({"success": False, "error": "missing_assets",
+                                 "message": "Provide 'assets' (list) or 'asset' (string)."},
+                                status=HTTPStatus.BAD_REQUEST)
+                return
+            results = [evaluate_asset_scope(asset, in_scope, out_of_scope) for asset in assets]
+            self._send_json({"success": True, "results": results,
+                             "in_scope_count": sum(1 for r in results if r["in_scope"])})
+            return
+
+        # --- Program create ---
+        if segments == ["programs"]:
+            if not self._agent_authorize("programs:write"):
+                return
+            ok, payload = self._agent_read_json()
+            if not ok:
+                return
+            success, message, program = create_program(payload)
+            if success and program:
+                program["root_targets"] = program_root_targets(program)
+            self._send_json({"success": success, "message": message, "program": program},
+                            status=HTTPStatus.CREATED if success else HTTPStatus.BAD_REQUEST)
+            return
+
+        if segments[0] == "programs" and len(segments) >= 2:
+            program_id = unquote(segments[1])
+            sub = segments[2:]
+
+            scope_needed = "programs:write"
+            if sub[:1] == ["investigate"]:
+                scope_needed = "scan:run"
+            elif sub[:1] == ["scope"]:
+                scope_needed = "programs:read"
+
+            if not self._agent_authorize(scope_needed, program_id=program_id):
+                return
+            ok, payload = self._agent_read_json()
+            if not ok:
+                return
+            program = self._agent_program_or_404(program_id)
+            if not program:
+                return
+
+            if not sub:
+                success, message, updated = update_program(program_id, payload)
+                if success and updated:
+                    updated["root_targets"] = program_root_targets(updated)
+                self._send_json({"success": success, "message": message, "program": updated},
+                                status=HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST)
+                return
+            if sub == ["delete"]:
+                success, message = delete_program(program_id)
+                self._send_json({"success": success, "message": message},
+                                status=HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST)
+                return
+            if sub == ["investigate"]:
+                success, message, info = investigate_program(program, payload)
+                self._send_json({"success": success, "message": message, **info,
+                                 "status_url": f"/api/agent/programs/{program_id}/status"},
+                                status=HTTPStatus.ACCEPTED if success else HTTPStatus.BAD_REQUEST)
+                return
+            if sub == ["scope", "check"]:
+                assets = _clean_scope_list(payload.get("assets") or payload.get("asset"))
+                if not assets:
+                    self._send_json({"success": False, "error": "missing_assets",
+                                     "message": "Provide 'assets' (list) or 'asset' (string)."},
+                                    status=HTTPStatus.BAD_REQUEST)
+                    return
+                results = [evaluate_asset_scope(asset, program["scope"].get("in_scope", []),
+                                                program["scope"].get("out_of_scope", []))
+                           for asset in assets]
+                self._send_json({"success": True, "program_id": program_id, "results": results,
+                                 "in_scope_count": sum(1 for r in results if r["in_scope"])})
+                return
+
+        self._agent_not_found()
+
+
     def do_GET(self):
         # Public endpoints (no auth required)
         if self.path == "/login":
             self._send_login_page()
             return
         
+        # Bug bounty agent API - authenticates via scoped API key or session
+        if self.path == "/api/agent" or self.path.startswith("/api/agent/") or self.path.startswith("/api/agent?"):
+            self._handle_agent_get()
+            return
+
         # All other endpoints require authentication
         user = self._require_auth()
         if not user:
@@ -16865,6 +18282,11 @@ form.addEventListener('submit', async (e) => {
             self.wfile.write(response)
             return
         
+        # Bug bounty agent API - authenticates via scoped API key or session
+        if self.path == "/api/agent" or self.path.startswith("/api/agent/") or self.path.startswith("/api/agent?"):
+            self._handle_agent_post()
+            return
+
         # All other endpoints require authentication
         user = self._require_auth()
         if not user:

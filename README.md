@@ -22,6 +22,7 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 - **Concurrency controls** – Configure max running jobs and per-tool worker caps so scans behave on your box.
 - **Auto-install helpers** – Best-effort installers kick in when a required tool is missing.
 - **Docker support** – Multi-platform Docker container with all tools pre-installed. Works on Linux (amd64, arm64, armv7).
+- **Bug bounty agent API** – Load a program's full scope, launch recon across it, and read back assets, findings and a ranked attack surface over `/api/agent/*`, authenticated with scoped, revocable API keys. See [AGENT_API.md](AGENT_API.md).
 
 1. Dynamic queue management to fit YOUR pc: <img width="1055" height="976" alt="image" src="https://github.com/user-attachments/assets/c59393dd-2036-411e-b082-13c7f21241a4" />
 2. Auto backup + backup and restore: <img width="1881" height="973" alt="image" src="https://github.com/user-attachments/assets/8fc07597-c205-48de-b4d7-d6399a2a70da" />
