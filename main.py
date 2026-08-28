@@ -24,6 +24,7 @@ import io
 import json
 import mimetypes
 import os
+import platform
 import re
 import secrets
 import shlex
@@ -67,6 +68,10 @@ MONITORS_FILE = DATA_DIR / "monitors.json"
 BACKUPS_DIR = DATA_DIR / "backups"
 COMPLETED_JOBS_FILE = DATA_DIR / "completed_jobs.json"
 ACTIVE_JOBS_FILE = DATA_DIR / "active_jobs.json"
+
+# Nuclei templates shipped with this repo: CVEs that have no template in the
+# official projectdiscovery/nuclei-templates repo. Run alongside the defaults.
+BUNDLED_NUCLEI_TEMPLATES_DIR = Path(__file__).resolve().parent / "nuclei-templates"
 
 # Authentication & Session Management
 SESSION_TIMEOUT_HOURS = 24
@@ -1697,6 +1702,7 @@ def default_config() -> Dict[str, Any]:
         "enable_waybackurls": True,
         "enable_gau": True,
         "enable_js_scan": True,
+        "use_bundled_nuclei_templates": True,
         "js_scan_max_files": 300,
         "js_scan_max_html_hosts": 60,
         "js_scan_workers": 8,
@@ -3295,7 +3301,8 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             cfg["enable_amass"] = new_amass
             changed = True
 
-    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots", "enable_crtsh", "enable_github_subdomains", "enable_dnsx", "enable_waybackurls", "enable_gau", "enable_js_scan"]:
+    for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots", "enable_crtsh", "enable_github_subdomains", "enable_dnsx", "enable_waybackurls", "enable_gau", "enable_js_scan",
+                "use_bundled_nuclei_templates"]:
         if key in values:
             new_value = bool_from_value(values.get(key), cfg.get(key, True))
             if cfg.get(key, True) != new_value:
@@ -3797,6 +3804,11 @@ def add_completed_job(domain: str, job_data: Dict[str, Any]) -> None:
     save_completed_jobs()
 
 
+def _running_on_windows() -> bool:
+    """Single place to ask "is this Windows?" so tests can simulate it."""
+    return os.name == "nt"
+
+
 def _candidate_tool_paths(exe: str) -> List[str]:
     """
     Return a de-duplicated list of candidate paths for a tool, checking PATH and common Go bin dirs.
@@ -3809,13 +3821,31 @@ def _candidate_tool_paths(exe: str) -> List[str]:
         found = shutil.which(exe)
         if found:
             candidates.append(found)
+    # On Windows the binary carries an extension; shutil.which() knows about
+    # PATHEXT but the Go bin directories below have to be checked explicitly.
+    windows = _running_on_windows()
+    names = [exe]
+    if windows and not exe.lower().endswith((".exe", ".bat", ".cmd")):
+        names = [exe + ".exe", exe + ".bat", exe + ".cmd", exe]
+    bin_dirs: List[Path] = []
     gobin = os.environ.get("GOBIN")
     if gobin:
-        candidates.append(str(Path(gobin) / exe))
+        bin_dirs.append(Path(gobin))
     gopath = os.environ.get("GOPATH")
     if gopath:
-        candidates.append(str(Path(gopath) / "bin" / exe))
-    candidates.append(str(Path.home() / "go" / "bin" / exe))
+        bin_dirs.append(Path(gopath) / "bin")
+    bin_dirs.append(Path.home() / "go" / "bin")
+    if windows:
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            bin_dirs.append(Path(local_app) / "Microsoft" / "WinGet" / "Links")
+        bin_dirs.append(Path.home() / "scoop" / "shims")
+    else:
+        bin_dirs.extend([Path("/usr/local/bin"), Path("/opt/homebrew/bin"), Path("/snap/bin"),
+                         Path.home() / ".local" / "bin", Path.home() / ".cargo" / "bin"])
+    for bin_dir in bin_dirs:
+        for name in names:
+            candidates.append(str(bin_dir / name))
     seen = set()
     ordered: List[str] = []
     for cand in candidates:
@@ -3896,374 +3926,525 @@ def _resolve_tool_path(tool: str) -> Optional[str]:
     return None
 
 
+# ================== PLATFORM DETECTION & TOOL INSTALLATION ==================
+
+# Package name per tool, per package manager. A tool only gets an install
+# method here when that manager genuinely ships it - a wrong package name is
+# worse than no suggestion, because it sends people down a dead end.
+#
+# Deliberate omissions:
+#   - httpx via apt/pip installs the *Python* httpx CLI, not ProjectDiscovery's.
+#   - nikto/github-subdomains have no trustworthy Windows package.
+TOOL_PACKAGES: Dict[str, Dict[str, str]] = {
+    "amass": {"apt": "amass", "snap": "amass", "brew": "amass", "pacman": "amass",
+              "go": "github.com/owasp-amass/amass/v3/...@latest"},
+    "subfinder": {"apt": "subfinder", "brew": "subfinder", "pacman": "subfinder",
+                  "go": "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
+    "assetfinder": {"apt": "assetfinder", "brew": "assetfinder",
+                    "go": "github.com/tomnomnom/assetfinder@latest"},
+    "findomain": {"apt": "findomain", "brew": "findomain", "cargo": "findomain"},
+    "sublist3r": {"apt": "sublist3r", "pip": "sublist3r"},
+    "crtsh": {},  # API-only virtual tool
+    "github-subdomains": {"go": "github.com/gwen001/github-subdomains@latest"},
+    "dnsx": {"apt": "dnsx", "brew": "dnsx",
+             "go": "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"},
+    "ffuf": {"apt": "ffuf", "brew": "ffuf", "pacman": "ffuf", "dnf": "ffuf",
+             "go": "github.com/ffuf/ffuf/v2@latest"},
+    "httpx": {"brew": "httpx",
+              "go": "github.com/projectdiscovery/httpx/cmd/httpx@latest"},
+    "waybackurls": {"apt": "waybackurls", "brew": "waybackurls",
+                    "go": "github.com/tomnomnom/waybackurls@latest"},
+    "gau": {"apt": "gau", "brew": "gau", "go": "github.com/lc/gau/v2/cmd/gau@latest"},
+    "nuclei": {"apt": "nuclei", "brew": "nuclei", "pacman": "nuclei",
+               "go": "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"},
+    "nikto": {"apt": "nikto", "brew": "nikto", "dnf": "nikto", "pacman": "nikto"},
+    "gowitness": {"apt": "gowitness", "brew": "gowitness",
+                  "go": "github.com/sensepost/gowitness@latest"},
+}
+
+TOOL_DOCS = {
+    "amass": "https://github.com/owasp-amass/amass",
+    "subfinder": "https://github.com/projectdiscovery/subfinder",
+    "assetfinder": "https://github.com/tomnomnom/assetfinder",
+    "findomain": "https://github.com/Findomain/Findomain",
+    "sublist3r": "https://github.com/aboul3la/Sublist3r",
+    "crtsh": "https://crt.sh",
+    "github-subdomains": "https://github.com/gwen001/github-subdomains",
+    "dnsx": "https://github.com/projectdiscovery/dnsx",
+    "ffuf": "https://github.com/ffuf/ffuf",
+    "httpx": "https://github.com/projectdiscovery/httpx",
+    "waybackurls": "https://github.com/tomnomnom/waybackurls",
+    "gau": "https://github.com/lc/gau",
+    "nuclei": "https://github.com/projectdiscovery/nuclei",
+    "nikto": "https://github.com/sullo/nikto",
+    "gowitness": "https://github.com/sensepost/gowitness",
+}
+
+TOOL_NOTES = {
+    "crtsh": "Virtual tool - queries the crt.sh API over HTTPS. Nothing to install.",
+    "nikto": "Needs Perl. On Windows install Strawberry Perl, then run nikto.pl from a clone of the repo.",
+    "gowitness": "Needs Chrome or Chromium installed for screenshots.",
+    "github-subdomains": "Works best with a GitHub API token (Settings -> API keys).",
+    "httpx": "Must be ProjectDiscovery's httpx. The Python package of the same name is a different tool and is rejected on purpose.",
+    "sublist3r": "Python tool - installed with pip, not with a system package manager on most distros.",
+}
+
+# Managers that need root on Unix. brew refuses to run as root by design.
+_ROOT_MANAGERS = {"apt", "dnf", "yum", "zypper", "pacman", "apk", "snap", "port", "choco"}
+
+_PLATFORM_CACHE: Dict[str, Any] = {}
+_PKG_AVAILABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
+_APT_UPDATED = False
+
+
+def _which(name: str) -> Optional[str]:
+    try:
+        return shutil.which(name)
+    except Exception:
+        return None
+
+
+def _read_os_release() -> Dict[str, str]:
+    data: Dict[str, str] = {}
+    for candidate in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(candidate, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    data[key.strip()] = value.strip().strip('"').strip("'")
+            if data:
+                break
+        except Exception:
+            continue
+    return data
+
+
+def _distro_family(os_release: Dict[str, str]) -> str:
+    ident = (os_release.get("ID") or "").lower()
+    like = (os_release.get("ID_LIKE") or "").lower().split()
+    names = [ident] + like
+    for name in names:
+        if name in ("debian", "ubuntu", "kali", "raspbian", "linuxmint", "pop"):
+            return "debian"
+        if name in ("rhel", "fedora", "centos", "rocky", "almalinux", "amzn"):
+            return "rhel"
+        if name in ("arch", "manjaro", "endeavouros"):
+            return "arch"
+        if name in ("suse", "opensuse", "opensuse-leap", "opensuse-tumbleweed", "sles"):
+            return "suse"
+        if name == "alpine":
+            return "alpine"
+    return "unknown"
+
+
+def detect_platform(refresh: bool = False) -> Dict[str, Any]:
+    """
+    Detect OS, distribution and the package managers actually present, so that
+    installs and instructions match the machine instead of assuming Ubuntu.
+    """
+    global _PLATFORM_CACHE
+    if _PLATFORM_CACHE and not refresh:
+        return _PLATFORM_CACHE
+
+    system_raw = platform.system()
+    if system_raw == "Darwin":
+        system = "macos"
+    elif system_raw == "Windows":
+        system = "windows"
+    elif system_raw == "Linux":
+        system = "linux"
+    else:
+        system = system_raw.lower() or "unknown"
+
+    os_release = _read_os_release() if system == "linux" else {}
+    family = _distro_family(os_release) if system == "linux" else system
+
+    if system == "windows":
+        candidates = ["winget", "scoop", "choco", "go", "pip"]
+    elif system == "macos":
+        candidates = ["brew", "port", "go", "pip", "cargo"]
+    else:
+        candidates = ["apt", "dnf", "yum", "pacman", "zypper", "apk", "snap",
+                      "brew", "go", "pip", "cargo"]
+
+    manager_binaries = {
+        "apt": "apt-get", "dnf": "dnf", "yum": "yum", "pacman": "pacman",
+        "zypper": "zypper", "apk": "apk", "snap": "snap", "brew": "brew",
+        "port": "port", "winget": "winget", "scoop": "scoop", "choco": "choco",
+        "go": "go", "cargo": "cargo", "pip": "pip3",
+    }
+    managers: Dict[str, str] = {}
+    for manager in candidates:
+        binary = manager_binaries[manager]
+        found = _which(binary)
+        if not found and manager == "pip":
+            found = _which("pip")
+        if found:
+            managers[manager] = found
+
+    is_root = bool(system != "windows" and hasattr(os, "geteuid") and os.geteuid() == 0)
+    sudo_path = _which("sudo") if system != "windows" else None
+    sudo_mode = "root" if is_root else "unavailable"
+    if not is_root and sudo_path:
+        try:
+            probe = subprocess.run([sudo_path, "-n", "true"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10)
+            sudo_mode = "passwordless" if probe.returncode == 0 else "password-required"
+        except Exception:
+            sudo_mode = "password-required"
+
+    info = {
+        "system": system,
+        "system_label": {"macos": "macOS", "windows": "Windows",
+                         "linux": "Linux"}.get(system, system_raw or "unknown"),
+        "release": platform.release(),
+        "arch": platform.machine(),
+        "distro": os_release.get("PRETTY_NAME") or os_release.get("NAME") or "",
+        "distro_id": (os_release.get("ID") or "").lower(),
+        "distro_family": family,
+        "package_managers": managers,
+        "is_root": is_root,
+        "sudo": sudo_mode,
+        "can_elevate": is_root or sudo_mode == "passwordless",
+        "in_docker": Path("/.dockerenv").exists(),
+        "in_wsl": "microsoft" in platform.release().lower(),
+        "python": platform.python_version(),
+    }
+    _PLATFORM_CACHE = info
+    return info
+
+
+def _sudo_prefix(manager: str) -> Optional[List[str]]:
+    """
+    Command prefix needed to run a package manager. None means "cannot run this
+    without prompting for a password" - we never hang the app on a sudo prompt.
+    """
+    if manager not in _ROOT_MANAGERS:
+        return []
+    info = detect_platform()
+    if info["system"] == "windows":
+        return []  # choco needs an elevated shell; we surface that as an instruction
+    if info["is_root"]:
+        return []
+    if info["sudo"] == "passwordless":
+        return ["sudo", "-n"]
+    return None
+
+
+def _install_command(manager: str, package: str) -> List[str]:
+    """The command that installs `package` with `manager`, without any sudo prefix."""
+    commands = {
+        "apt": ["apt-get", "install", "-y", package],
+        "dnf": ["dnf", "install", "-y", package],
+        "yum": ["yum", "install", "-y", package],
+        "pacman": ["pacman", "-S", "--noconfirm", package],
+        "zypper": ["zypper", "--non-interactive", "install", package],
+        "apk": ["apk", "add", package],
+        "snap": ["snap", "install", package],
+        "brew": ["brew", "install", package],
+        "port": ["port", "install", package],
+        "winget": ["winget", "install", "--id", package, "-e",
+                   "--accept-package-agreements", "--accept-source-agreements"],
+        "scoop": ["scoop", "install", package],
+        "choco": ["choco", "install", package, "-y"],
+        "go": ["go", "install", "-v", package],
+        "cargo": ["cargo", "install", package],
+        "pip": [sys.executable, "-m", "pip", "install", "--user", package],
+    }
+    return commands.get(manager, [])
+
+
+def _package_available(manager: str, package: str) -> bool:
+    """
+    Ask the package manager whether it actually has this package, so we never
+    print an install line that cannot work. Unknown managers are optimistic.
+    """
+    key = (manager, package)
+    if key in _PKG_AVAILABILITY_CACHE:
+        return _PKG_AVAILABILITY_CACHE[key]
+
+    probes = {
+        "apt": ["apt-cache", "policy", package],
+        "dnf": ["dnf", "-q", "info", package],
+        "yum": ["yum", "-q", "info", package],
+        "pacman": ["pacman", "-Si", package],
+        "zypper": ["zypper", "-q", "info", package],
+        "apk": ["apk", "policy", package],
+        "snap": ["snap", "info", package],
+        "brew": ["brew", "info", "--formula", package],
+        "port": ["port", "info", package],
+    }
+    probe = probes.get(manager)
+    if not probe:
+        # go/cargo/pip/winget/scoop/choco: resolved at install time.
+        _PKG_AVAILABILITY_CACHE[key] = True
+        return True
+
+    try:
+        result = subprocess.run(probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=30)
+        output = ((result.stdout or "") + (result.stderr or "")).lower()
+        if manager == "apt":
+            available = "candidate:" in output and "candidate: (none)" not in output
+        elif manager == "apk":
+            available = bool(output.strip()) and "policy" in output
+        else:
+            available = result.returncode == 0 and "not found" not in output
+    except Exception:
+        available = False
+
+    _PKG_AVAILABILITY_CACHE[key] = available
+    return available
+
+
+def _method_label(manager: str) -> str:
+    labels = {
+        "apt": "APT", "dnf": "DNF", "yum": "YUM", "pacman": "pacman", "zypper": "zypper",
+        "apk": "apk", "snap": "Snap", "brew": "Homebrew", "port": "MacPorts",
+        "winget": "winget", "scoop": "Scoop", "choco": "Chocolatey",
+        "go": "go install", "cargo": "cargo install", "pip": "pip",
+    }
+    return labels.get(manager, manager)
+
+
+def _manager_priority(system: str) -> List[str]:
+    if system == "macos":
+        return ["brew", "port", "go", "cargo", "pip"]
+    if system == "windows":
+        return ["scoop", "winget", "choco", "go", "cargo", "pip"]
+    return ["apt", "dnf", "yum", "pacman", "zypper", "apk", "snap", "brew",
+            "go", "cargo", "pip"]
+
+
+def build_install_plan(tool: str, include_unavailable: bool = False) -> List[Dict[str, Any]]:
+    """
+    Ordered install methods for this machine. Each entry says what would run,
+    whether the manager is present, whether the package exists there, and
+    whether it can run unattended.
+    """
+    info = detect_platform()
+    packages = TOOL_PACKAGES.get(tool, {})
+    managers = info["package_managers"]
+    plan: List[Dict[str, Any]] = []
+
+    for manager in _manager_priority(info["system"]):
+        package = packages.get(manager)
+        if not package:
+            continue
+        present = manager in managers
+        if not present and not include_unavailable:
+            continue
+        available = _package_available(manager, package) if present else False
+        prefix = _sudo_prefix(manager) if present else []
+        needs_root = manager in _ROOT_MANAGERS and not info["is_root"] and info["system"] != "windows"
+        command = _install_command(manager, package)
+        display = " ".join((["sudo"] if needs_root else []) + command)
+        plan.append({
+            "manager": manager,
+            "label": _method_label(manager),
+            "package": package,
+            "command": command,
+            "display_command": display,
+            "manager_present": present,
+            "package_available": available,
+            "needs_root": needs_root,
+            "can_run_unattended": bool(present and available and prefix is not None),
+            "blocked_reason": ("sudo would prompt for a password" if present and prefix is None
+                               else ("package not offered by this manager" if present and not available
+                                     else ("" if present else "manager not installed"))),
+            "sudo_prefix": prefix or [],
+        })
+    return plan
+
+
 def get_tool_installation_instructions(tool: str) -> str:
     """
-    Get detailed installation instructions for a specific tool.
-    Returns a formatted string with OS-specific installation commands.
+    Installation instructions for THIS machine: detected OS first, with the
+    commands that actually apply, then the fallbacks.
     """
-    instructions = {
-        "amass": """
-AMASS - OWASP Amass Subdomain Enumeration
-==========================================
+    info = detect_platform()
+    lines: List[str] = []
+    title = f"{tool.upper()} - installation"
+    lines.append(title)
+    lines.append("=" * len(title))
+    detected = info["system_label"]
+    if info["distro"]:
+        detected += f" ({info['distro']})"
+    lines.append(f"Detected system: {detected} on {info['arch']}")
+    if tool in TOOL_NOTES:
+        lines.append(f"Note: {TOOL_NOTES[tool]}")
+    lines.append("")
 
-Ubuntu (Snap - Recommended):
-  sudo snap install amass
+    if tool == "crtsh" or not TOOL_PACKAGES.get(tool):
+        lines.append("Nothing to install for this tool.")
+        docs = TOOL_DOCS.get(tool)
+        if docs:
+            lines.append(f"Docs: {docs}")
+        return "\n".join(lines)
 
-Ubuntu/Debian (APT):
-  sudo apt-get update && sudo apt-get install -y amass
+    plan = build_install_plan(tool, include_unavailable=True)
+    usable = [step for step in plan if step["manager_present"] and step["package_available"]]
+    if usable:
+        lines.append("Run one of these:")
+        for step in usable:
+            lines.append(f"  {step['display_command']}          # {step['label']}")
+            if step["blocked_reason"]:
+                lines.append(f"      ({step['blocked_reason']})")
+    else:
+        lines.append("No package manager on this machine offers it. Options:")
 
-macOS (Homebrew):
-  brew install amass
+    others = [step for step in plan if step not in usable]
+    if others:
+        lines.append("")
+        lines.append("Other options:")
+        for step in others:
+            suffix = f"  # {step['label']}"
+            if not step["manager_present"]:
+                suffix += f" - install {step['label']} first"
+            elif not step["package_available"]:
+                suffix += f" - {step['label']} does not offer this package here"
+            lines.append(f"  {step['display_command']}{suffix}")
 
-From Source (requires Go 1.19+):
-  go install -v github.com/owasp-amass/amass/v3/...@latest
-  # Binary will be in: ~/go/bin/amass or $GOPATH/bin/amass
+    if "go" in TOOL_PACKAGES.get(tool, {}) and "go" not in info["package_managers"]:
+        lines.append("")
+        lines.append("Go is not installed. Get it from https://go.dev/dl/ and make sure")
+        lines.append("its bin directory is on PATH (~/go/bin, or %USERPROFILE%\\go\\bin on Windows).")
 
-Official Releases:
-  https://github.com/OWASP/Amass/releases
-  Download the binary for your platform and add to PATH
-""",
-        "subfinder": """
-SUBFINDER - ProjectDiscovery Subdomain Discovery
-=================================================
+    docs = TOOL_DOCS.get(tool)
+    if docs:
+        lines.append("")
+        lines.append(f"Docs and release binaries: {docs}")
+    if info["system"] == "windows" and not TOOL_PACKAGES.get(tool, {}).get("go"):
+        lines.append("No supported Windows package - download a release binary and put it on PATH.")
+    return "\n".join(lines)
 
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y subfinder
 
-macOS (Homebrew):
-  brew install subfinder
+def _run_install_step(tool: str, step: Dict[str, Any]) -> bool:
+    """Run one install method. Never prompts, never blocks forever."""
+    global _APT_UPDATED
+    command = list(step["sudo_prefix"]) + list(step["command"])
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
 
-From Source (requires Go 1.19+):
-  go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-  # Binary will be in: ~/go/bin/subfinder or $GOPATH/bin/subfinder
+    if step["manager"] == "apt" and not _APT_UPDATED:
+        try:
+            subprocess.run(list(step["sudo_prefix"]) + ["apt-get", "update"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=300, env=env, check=False)
+        except Exception as exc:
+            log(f"apt-get update failed before installing {tool}: {exc}")
+        _APT_UPDATED = True
 
-Official Releases:
-  https://github.com/projectdiscovery/subfinder/releases
-  Download the binary for your platform and add to PATH
-""",
-        "assetfinder": """
-ASSETFINDER - Find domains and subdomains
-==========================================
+    log(f"Installing {tool} via {step['label']}: {' '.join(command)}")
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, timeout=900, env=env, check=False)
+    except subprocess.TimeoutExpired:
+        log(f"{step['label']} install of {tool} timed out.")
+        return False
+    except Exception as exc:
+        log(f"{step['label']} install of {tool} failed: {exc}")
+        return False
 
-From Source (requires Go 1.19+):
-  go install github.com/tomnomnom/assetfinder@latest
-  # Binary will be in: ~/go/bin/assetfinder or $GOPATH/bin/assetfinder
-
-Official Repository:
-  https://github.com/tomnomnom/assetfinder
-""",
-        "findomain": """
-FINDOMAIN - Fast subdomain enumeration
-=======================================
-
-Ubuntu/Debian:
-  # Download latest release
-  wget https://github.com/Findomain/Findomain/releases/latest/download/findomain-linux
-  chmod +x findomain-linux
-  sudo mv findomain-linux /usr/local/bin/findomain
-
-macOS (Homebrew):
-  brew install findomain
-
-Windows:
-  # Download from: https://github.com/Findomain/Findomain/releases
-  # Add to PATH
-
-Official Repository:
-  https://github.com/Findomain/Findomain
-""",
-        "sublist3r": """
-SUBLIST3R - Python subdomain enumeration
-=========================================
-
-Using pip:
-  pip install sublist3r
-  # OR
-  pip3 install sublist3r
-
-From Source:
-  git clone https://github.com/aboul3la/Sublist3r.git
-  cd Sublist3r
-  pip install -r requirements.txt
-  python sublist3r.py --help
-
-Ubuntu/Debian:
-  sudo apt-get install -y sublist3r
-
-Official Repository:
-  https://github.com/aboul3la/Sublist3r
-""",
-        "dnsx": """
-DNSX - Fast and multi-purpose DNS toolkit
-==========================================
-
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y dnsx
-
-macOS (Homebrew):
-  brew install dnsx
-
-From Source (requires Go 1.19+):
-  go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-  # Binary will be in: ~/go/bin/dnsx or $GOPATH/bin/dnsx
-
-Official Releases:
-  https://github.com/projectdiscovery/dnsx/releases
-  Download the binary for your platform and add to PATH
-""",
-        "ffuf": """
-FFUF - Fast web fuzzer
-======================
-
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y ffuf
-
-macOS (Homebrew):
-  brew install ffuf
-
-From Source (requires Go 1.19+):
-  go install github.com/ffuf/ffuf@latest
-  # Binary will be in: ~/go/bin/ffuf or $GOPATH/bin/ffuf
-
-Official Releases:
-  https://github.com/ffuf/ffuf/releases
-  Download the binary for your platform and add to PATH
-""",
-        "httpx": """
-HTTPX - Fast HTTP toolkit from ProjectDiscovery
-================================================
-
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y httpx-toolkit
-
-macOS (Homebrew):
-  brew install httpx
-
-From Source (requires Go 1.19+):
-  go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-  # Binary will be in: ~/go/bin/httpx or $GOPATH/bin/httpx
-
-Official Releases:
-  https://github.com/projectdiscovery/httpx/releases
-  Download the binary for your platform and add to PATH
-
-Note: Make sure you have ProjectDiscovery's httpx, not the Python httpx client!
-""",
-        "waybackurls": """
-WAYBACKURLS - Fetch URLs from the Wayback Machine
-==================================================
-
-From Source (requires Go 1.19+):
-  go install github.com/tomnomnom/waybackurls@latest
-  # Binary will be in: ~/go/bin/waybackurls or $GOPATH/bin/waybackurls
-
-Official Repository:
-  https://github.com/tomnomnom/waybackurls
-""",
-        "gau": """
-GAU - Get All URLs from various sources
-========================================
-
-From Source (requires Go 1.19+):
-  go install github.com/lc/gau/v2/cmd/gau@latest
-  # Binary will be in: ~/go/bin/gau or $GOPATH/bin/gau
-
-Official Releases:
-  https://github.com/lc/gau/releases
-  Download the binary for your platform and add to PATH
-""",
-        "nuclei": """
-NUCLEI - Fast vulnerability scanner from ProjectDiscovery
-==========================================================
-
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y nuclei
-
-macOS (Homebrew):
-  brew install nuclei
-
-From Source (requires Go 1.19+):
-  go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-  # Binary will be in: ~/go/bin/nuclei or $GOPATH/bin/nuclei
-
-Official Releases:
-  https://github.com/projectdiscovery/nuclei/releases
-  Download the binary for your platform and add to PATH
-""",
-        "nikto": """
-NIKTO - Web server scanner
-===========================
-
-Ubuntu/Debian:
-  sudo apt-get update && sudo apt-get install -y nikto
-
-macOS (Homebrew):
-  brew install nikto
-
-From Source:
-  git clone https://github.com/sullo/nikto
-  cd nikto/program
-  perl nikto.pl --help
-
-Official Repository:
-  https://github.com/sullo/nikto
-
-Note: Nikto requires Perl to be installed
-""",
-        "gowitness": """
-GOWITNESS - Web screenshot tool
-================================
-
-macOS (Homebrew):
-  brew install gowitness
-
-From Source (requires Go 1.19+):
-  go install github.com/sensepost/gowitness@latest
-  # Binary will be in: ~/go/bin/gowitness or $GOPATH/bin/gowitness
-
-Official Releases:
-  https://github.com/sensepost/gowitness/releases
-  Download the binary for your platform and add to PATH
-
-Note: gowitness requires Chrome/Chromium to be installed for screenshots
-""",
-        "github-subdomains": """
-GITHUB-SUBDOMAINS - Find subdomains on GitHub
-==============================================
-
-From Source (requires Go 1.19+):
-  go install github.com/gwen001/github-subdomains@latest
-  # Binary will be in: ~/go/bin/github-subdomains or $GOPATH/bin/github-subdomains
-
-Official Repository:
-  https://github.com/gwen001/github-subdomains
-
-Note: Requires GitHub API token for best results
-""",
-        "crtsh": """
-CRT.SH - Certificate Transparency Log Search (API-based)
-=========================================================
-
-This is a virtual tool that uses the crt.sh API.
-No installation required - it works via HTTP requests.
-
-API Endpoint: https://crt.sh/?q=%25.example.com&output=json
-""",
-    }
-    
-    return instructions.get(tool, f"No detailed installation instructions available for {tool}")
+    if result.returncode != 0:
+        tail = (result.stdout or "").strip().splitlines()[-3:]
+        log(f"{step['label']} install of {tool} exited {result.returncode}. {' | '.join(tail)}")
+        return False
+    return True
 
 
 def ensure_tool_installed(tool: str) -> bool:
     """
-    Best-effort install using apt, then brew, then go install (for some tools).
-    Returns True if tool is available after this, False otherwise.
+    Install a tool using a method that fits this OS. Methods that would prompt
+    for a password or that the local package manager cannot satisfy are skipped
+    rather than attempted and failed.
+    Returns True if the tool is usable afterwards.
     """
+    if tool == "crtsh":
+        TOOLS[tool] = "crtsh"  # virtual, API-based
+        return True
+
     resolved = _resolve_tool_path(tool)
     if resolved:
         TOOLS[tool] = resolved
         log(f"{tool} already installed.")
         return True
 
-    exe = TOOLS[tool]
+    info = detect_platform()
+    log(f"{tool} not found. Detected {info['system_label']}"
+        + (f" / {info['distro']}" if info["distro"] else "")
+        + f"; trying automatic install.")
 
-    log(f"{tool} not found. Attempting to install (best effort).")
+    plan = build_install_plan(tool)
+    runnable = [step for step in plan if step["can_run_unattended"]]
+    if not runnable:
+        skipped = [f"{step['label']} ({step['blocked_reason']})" for step in plan if step["blocked_reason"]]
+        if skipped:
+            log(f"No unattended install path for {tool}: {', '.join(skipped)}")
 
-    # Try apt
-    try:
-        if shutil.which("apt-get"):
-            log(f"Trying: sudo apt-get update && sudo apt-get install -y {exe}")
-            subprocess.run(
-                ["sudo", "apt-get", "update"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["sudo", "apt-get", "install", "-y", exe],
-                check=False,
-            )
-            resolved = _resolve_tool_path(tool)
-            if resolved:
-                TOOLS[tool] = resolved
-                log(f"{tool} installed via apt-get.")
-                return True
-    except Exception as e:
-        log(f"apt-get install attempt failed for {tool}: {e}")
+    for step in runnable:
+        if not _run_install_step(tool, step):
+            continue
+        resolved = _resolve_tool_path(tool)
+        if resolved:
+            TOOLS[tool] = resolved
+            log(f"{tool} installed via {step['label']}.")
+            return True
+        log(f"{step['label']} reported success for {tool} but the binary is still not on PATH.")
 
-    # Try snap for amass on Ubuntu
-    if tool == "amass":
-        try:
-            if shutil.which("snap"):
-                log(f"Trying: sudo snap install amass")
-                subprocess.run(
-                    ["sudo", "snap", "install", "amass"],
-                    check=False,
-                )
-                # Snap installs to /snap/bin which should be in PATH
-                resolved = _resolve_tool_path(tool)
-                if resolved:
-                    TOOLS[tool] = resolved
-                    log(f"{tool} installed via snap.")
-                    return True
-        except Exception as e:
-            log(f"snap install attempt failed for {tool}: {e}")
-
-    # Try Homebrew
-    try:
-        if shutil.which("brew"):
-            log(f"Trying: brew install {exe}")
-            subprocess.run(
-                ["brew", "install", exe],
-                check=False,
-            )
-            resolved = _resolve_tool_path(tool)
-            if resolved:
-                TOOLS[tool] = resolved
-                log(f"{tool} installed via brew.")
-                return True
-    except Exception as e:
-        log(f"brew install attempt failed for {tool}: {e}")
-
-    # Try go install for some known tools
-    try:
-        if shutil.which("go") and tool in {"amass", "httpx", "nuclei", "subfinder", "assetfinder", "dnsx", "waybackurls", "gau", "github-subdomains"}:
-            go_pkgs = {
-                "amass": "github.com/owasp-amass/amass/v3/...@latest",
-                "httpx": "github.com/projectdiscovery/httpx/cmd/httpx@latest",
-                "nuclei": "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
-                "subfinder": "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
-                "assetfinder": "github.com/tomnomnom/assetfinder@latest",
-                "dnsx": "github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
-                "waybackurls": "github.com/tomnomnom/waybackurls@latest",
-                "gau": "github.com/lc/gau/v2/cmd/gau@latest",
-                "github-subdomains": "github.com/gwen001/github-subdomains@latest",
-            }
-            pkg = go_pkgs[tool]
-            log(f"Trying: go install {pkg}")
-            subprocess.run(["go", "install", pkg], check=False)
-            resolved = _resolve_tool_path(tool)
-            if resolved:
-                TOOLS[tool] = resolved
-                log(f"{tool} installed via go install.")
-                return True
-    except Exception as e:
-        log(f"go install attempt failed for {tool}: {e}")
-    
-    # Special case: crtsh is API-based, not a binary tool
-    if tool == "crtsh":
-        TOOLS[tool] = "crtsh"  # Virtual tool
-        return True
-
-    # Print detailed installation instructions
-    log(f"Could not auto-install {tool}. Please install it manually.")
-    log(f"Installation instructions for {tool}:")
+    log(f"Could not auto-install {tool}. Instructions for this machine:")
     print("\n" + get_tool_installation_instructions(tool))
     return False
 
 
+def tool_status_snapshot(include_instructions: bool = True) -> Dict[str, Any]:
+    """Per-tool availability plus the install plan that fits this machine."""
+    info = detect_platform()
+    tools: List[Dict[str, Any]] = []
+    for name in TOOLS.keys():
+        path = "crtsh" if name == "crtsh" else (_resolve_tool_path(name) or "")
+        entry: Dict[str, Any] = {
+            "tool": name,
+            "installed": bool(path),
+            "path": path,
+            "virtual": name == "crtsh",
+            "note": TOOL_NOTES.get(name, ""),
+            "docs": TOOL_DOCS.get(name, ""),
+        }
+        if not path:
+            plan = build_install_plan(name, include_unavailable=True)
+            entry["install_plan"] = [
+                {key: step[key] for key in
+                 ("manager", "label", "package", "display_command", "manager_present",
+                  "package_available", "needs_root", "can_run_unattended", "blocked_reason")}
+                for step in plan
+            ]
+            entry["auto_installable"] = any(step["can_run_unattended"] for step in plan)
+            if include_instructions:
+                entry["instructions"] = get_tool_installation_instructions(name)
+        else:
+            entry["install_plan"] = []
+            entry["auto_installable"] = True
+        tools.append(entry)
+
+    return {
+        "platform": {key: value for key, value in info.items() if key != "package_managers"},
+        "package_managers": sorted(info["package_managers"].keys()),
+        "tools": tools,
+        "installed_count": sum(1 for entry in tools if entry["installed"]),
+        "total_count": len(tools),
+    }
+
+
 def ensure_required_tools() -> None:
-    log("Verifying required tooling...")
+    info = detect_platform()
+    log(f"Verifying required tooling on {info['system_label']}"
+        + (f" ({info['distro']})" if info["distro"] else "")
+        + f" - package managers: {', '.join(sorted(info['package_managers'])) or 'none detected'}")
+    if info["system"] != "windows" and not info["can_elevate"]:
+        log("No passwordless sudo: system-package installs are skipped and reported instead.")
     for name in TOOLS.keys():
         ensure_tool_installed(name)
 
@@ -5759,6 +5940,93 @@ def run_js_scan(domain: str, config: Dict[str, Any],
     return js_scan
 
 
+def summarize_js_scan(js_scan: Optional[Dict[str, Any]], max_secrets: int = 5) -> Optional[Dict[str, Any]]:
+    """
+    Lightweight view of a target's JS scan for list/overview payloads: counts,
+    a breakdown by secret type and a few sample hits. Full detail stays on the
+    domain page.
+    """
+    if not isinstance(js_scan, dict):
+        return None
+    secrets = js_scan.get("secrets") or []
+    endpoints = js_scan.get("endpoints") or []
+    params = js_scan.get("params") or []
+    files = js_scan.get("files") or []
+    summary = js_scan.get("summary") or {}
+
+    secret_types: Dict[str, int] = {}
+    for secret in secrets:
+        if isinstance(secret, dict):
+            secret_types[str(secret.get("type") or "unknown")] = \
+                secret_types.get(str(secret.get("type") or "unknown"), 0) + 1
+
+    return {
+        "scanned_at": js_scan.get("scanned_at"),
+        "truncated": bool(js_scan.get("truncated")),
+        "summary": {
+            "files": int(summary.get("files", len(files)) or 0),
+            "files_ok": int(summary.get("files_ok", 0) or 0),
+            "secrets": int(summary.get("secrets", len(secrets)) or 0),
+            "endpoints": int(summary.get("endpoints", len(endpoints)) or 0),
+            "params": int(summary.get("params", len(params)) or 0),
+        },
+        "secret_types": secret_types,
+        "top_secrets": [
+            {"type": secret.get("type"), "match": secret.get("match"), "source": secret.get("source")}
+            for secret in secrets[:max_secrets] if isinstance(secret, dict)
+        ],
+    }
+
+
+def js_findings_overview(limit_targets: int = 10, limit_secrets: int = 10) -> Dict[str, Any]:
+    """
+    Cross-target rollup of JS scan results for the dashboard overview, so JS
+    secrets are visible without opening each domain.
+    """
+    state = load_state()
+    per_target: List[Dict[str, Any]] = []
+    recent_secrets: List[Dict[str, Any]] = []
+    totals = {"secrets": 0, "endpoints": 0, "params": 0, "files": 0, "targets_scanned": 0}
+    secret_types: Dict[str, int] = {}
+
+    for domain, target in (state.get("targets", {}) or {}).items():
+        if not isinstance(target, dict):
+            continue
+        summary = summarize_js_scan(target.get("js_scan"))
+        if not summary:
+            continue
+        totals["targets_scanned"] += 1
+        counts = summary["summary"]
+        for key in ("secrets", "endpoints", "params", "files"):
+            totals[key] += counts.get(key, 0)
+        for secret_type, count in summary["secret_types"].items():
+            secret_types[secret_type] = secret_types.get(secret_type, 0) + count
+        per_target.append({
+            "domain": domain,
+            "scanned_at": summary["scanned_at"],
+            "counts": counts,
+            "secret_types": summary["secret_types"],
+        })
+        for secret in (target.get("js_scan") or {}).get("secrets", [])[:limit_secrets]:
+            if isinstance(secret, dict):
+                recent_secrets.append({
+                    "domain": domain,
+                    "type": secret.get("type"),
+                    "match": secret.get("match"),
+                    "source": secret.get("source"),
+                })
+
+    per_target.sort(key=lambda item: (-item["counts"].get("secrets", 0), item["domain"]))
+    recent_secrets.sort(key=lambda item: (item["domain"], str(item.get("type") or "")))
+    return {
+        "totals": totals,
+        "secret_types": secret_types,
+        "targets": per_target[:limit_targets],
+        "targets_with_findings": sum(1 for item in per_target if item["counts"].get("secrets", 0)),
+        "secrets": recent_secrets[:limit_secrets],
+    }
+
+
 def run_downstream_pipeline(
     domain: str,
     wordlist: Optional[str],
@@ -6407,6 +6675,75 @@ def capture_screenshots(
     return mapping
 
 
+def bundled_nuclei_templates() -> List[Path]:
+    """YAML templates shipped in this repository."""
+    if not BUNDLED_NUCLEI_TEMPLATES_DIR.exists():
+        return []
+    return sorted(BUNDLED_NUCLEI_TEMPLATES_DIR.rglob("*.yaml"))
+
+
+def nuclei_default_templates_dir() -> Optional[Path]:
+    """
+    Where nuclei keeps the official template set. Needed because passing -t
+    switches nuclei to *only* those paths, so the default directory has to be
+    passed explicitly alongside the bundled one.
+    """
+    config_files = [
+        Path.home() / ".config" / "nuclei" / "config.yaml",
+        Path.home() / ".config" / "nuclei" / ".templates-config.json",
+    ]
+    for config_file in config_files:
+        try:
+            if not config_file.exists():
+                continue
+            text = config_file.read_text(encoding="utf-8", errors="replace")
+            match = re.search(r'"?(?:templates-directory|nuclei-templates-directory)"?\s*[:=]\s*"?([^"\n,}]+)',
+                              text)
+            if match:
+                candidate = Path(match.group(1).strip()).expanduser()
+                if candidate.is_dir():
+                    return candidate
+        except Exception:
+            continue
+
+    for candidate in (Path.home() / ".local" / "nuclei-templates",
+                      Path.home() / "nuclei-templates",
+                      Path("/root/nuclei-templates"),
+                      Path("/opt/nuclei-templates")):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def nuclei_template_args(config: Optional[Dict[str, Any]] = None,
+                         job_domain: Optional[str] = None) -> List[str]:
+    """
+    Build the -t arguments so a scan runs the official templates *and* the ones
+    bundled here. If the official directory cannot be found we pass nothing and
+    let nuclei use (and install) its defaults, rather than silently narrowing
+    the scan down to the bundled handful.
+    """
+    cfg = config if config is not None else get_config()
+    if not bool_from_value(cfg.get("use_bundled_nuclei_templates"), True):
+        return []
+    bundled = bundled_nuclei_templates()
+    if not bundled:
+        return []
+    default_dir = nuclei_default_templates_dir()
+    if not default_dir:
+        message = (f"Bundled nuclei templates ({len(bundled)}) skipped this run: the official template "
+                   "directory was not found. Run 'nuclei -update-templates' once and they will be included.")
+        log(message)
+        if job_domain:
+            job_log_append(job_domain, message, "nuclei")
+        return []
+    if job_domain:
+        job_log_append(job_domain,
+                       f"Using {len(bundled)} bundled template(s) from nuclei-templates/ plus the official set.",
+                       "nuclei")
+    return ["-t", str(default_dir), "-t", str(BUNDLED_NUCLEI_TEMPLATES_DIR)]
+
+
 def nuclei_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = None,
                 job_domain: Optional[str] = None) -> Path:
     if not ensure_tool_installed("nuclei"):
@@ -6417,6 +6754,7 @@ def nuclei_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] =
         "-l", str(subs_file),
         "-jsonl",
     ]
+    cmd.extend(nuclei_template_args(config, job_domain))
     context = {
         "DOMAIN": domain,
         "INPUT_FILE": str(subs_file),
@@ -7837,6 +8175,7 @@ button:hover { background:#1d4ed8; }
       <a class="nav-link" data-view="targets" href="#targets">Targets</a>
       <a class="nav-link" data-view="settings" href="#settings">Settings</a>
       <a class="nav-link" data-view="database" href="#database">Database</a>
+      <a class="nav-link" data-view="howto" href="#howto">How to use this tool</a>
       <a class="nav-link" data-view="guide" href="#guide">User Guide</a>
     </nav>
     <div class="sidebar-footer">
@@ -7872,11 +8211,24 @@ button:hover { background:#1d4ed8; }
             <div class="label">Known Subdomains</div>
             <div class="value" id="stat-subdomains">0</div>
           </div>
+          <div class="stat-card">
+            <div class="label">JS Secrets</div>
+            <div class="value" id="stat-js-secrets">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="label">JS Endpoints</div>
+            <div class="value" id="stat-js-endpoints">0</div>
+          </div>
         </div>
         <div class="card" style="margin: 24px 0;">
           <h3>Workflow Pipeline</h3>
           <p class="muted">Visual representation of how data flows through the reconnaissance tools</p>
           <div id="workflow-diagram" style="margin-top: 20px;"></div>
+        </div>
+        <div class="card" style="margin: 24px 0;">
+          <h3>JS Findings</h3>
+          <p class="muted">Secrets, hidden endpoints and parameters pulled out of JavaScript files. Open a domain for the full list.</p>
+          <div id="overview-js-findings"></div>
         </div>
         <div class="card" style="margin: 24px 0;">
           <h3>Recent Targets</h3>
@@ -8230,6 +8582,10 @@ button:hover { background:#1d4ed8; }
               <label class="checkbox">
                 <input id="settings-enable-js-scan" type="checkbox" name="enable_js_scan" />
                 Enable JS Scan (secrets, endpoints, params)
+              </label>
+              <label class="checkbox">
+                <input id="settings-bundled-nuclei-templates" type="checkbox" name="use_bundled_nuclei_templates" />
+                Use bundled nuclei templates (CVEs missing from the official set)
               </label>
             </div>
           </div>
@@ -8667,6 +9023,111 @@ button:hover { background:#1d4ed8; }
       </div>
     </section>
 
+    <section class="module" data-view="howto">
+      <div class="module-header">
+        <h2>How to use this tool</h2>
+        <p class="muted">Start here: what it does, what it needs installed, and the order to do things in.</p>
+      </div>
+      <div class="module-body">
+        <div class="card">
+          <h3>What this is</h3>
+          <p>Recon Command Center runs a subdomain-to-vulnerability pipeline for a domain and keeps the results. You give it a domain, it enumerates subdomains, works out which hosts are alive, crawls URLs, pulls secrets out of JavaScript, screenshots what it finds, and scans for known issues. Everything lands in the Reports and Overview views and stays there between restarts.</p>
+        </div>
+
+        <div class="card">
+          <h3>1 &middot; Check your tools</h3>
+          <p class="muted">The pipeline shells out to real recon tools. Anything missing is skipped, which is why a scan can look "done" with nothing found.</p>
+          <div id="howto-platform" class="muted" style="margin: 8px 0;">Detecting your system&hellip;</div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+            <button class="btn small" id="howto-refresh-tools" type="button">Re-check tools</button>
+            <button class="btn small" id="howto-install-missing" type="button">Install missing tools</button>
+          </div>
+          <div id="howto-install-status" class="muted" style="margin-bottom: 12px;"></div>
+          <div id="howto-tools"></div>
+        </div>
+
+        <div class="card">
+          <h3>2 &middot; Launch a scan</h3>
+          <ul class="tips">
+            <li>Go to <strong>Launch Scan</strong> and enter a domain: <code>example.com</code>.</li>
+            <li><code>*.example.com</code> scans the whole sub-scope. <code>example.*</code> fans out over the TLDs configured in <strong>Settings &rarr; Wildcard TLDs</strong>.</li>
+            <li>Multiple targets at once: one per line, or comma-separated.</li>
+            <li>A wordlist path turns on ffuf vhost brute-forcing. Leave it blank to skip that step.</li>
+            <li>Nikto is slow. Tick <em>skip nikto</em> for a first pass, then re-run the target later without it.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>3 &middot; Watch it run</h3>
+          <ul class="tips">
+            <li><strong>Active Jobs</strong> shows each pipeline step, its progress and its log. Jobs can be paused, resumed, or have a stuck step skipped.</li>
+            <li><strong>Queue</strong> holds targets waiting for a free slot. Slot count is <strong>Settings &rarr; Max running jobs</strong>, or turn on dynamic mode to let the box decide.</li>
+            <li><strong>System Resources</strong> warns before CPU, memory or disk runs out. If scans crawl, lower the job and worker caps there.</li>
+            <li><strong>Logs</strong> is the ground truth for a tool that failed - filter by source to see one tool's output.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>4 &middot; Read the results</h3>
+          <ul class="tips">
+            <li><strong>Overview</strong> is the summary: counts per target, and the <em>JS Findings</em> card with secrets and hidden endpoints found in JavaScript.</li>
+            <li><strong>Reports</strong> drills into one domain: every subdomain, HTTP status, title, tech, nuclei and nikto findings, screenshots and command history. Mark a subdomain interesting or leave a comment and it persists.</li>
+            <li><strong>Gallery</strong> is every screenshot, paginated - the fastest way to spot an admin panel.</li>
+            <li>Export as JSON or CSV from Reports, or grab the subdomain list as plain text.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>5 &middot; JS findings, and why they matter</h3>
+          <p>The JS scan fetches every JavaScript file it can reach for a target and greps it for three things:</p>
+          <ul class="tips">
+            <li><strong>Secrets</strong> - API keys, tokens and credentials left in front-end bundles. Values are redacted in the UI; the source URL tells you where to look.</li>
+            <li><strong>Endpoints</strong> - paths the app calls but nothing links to. These feed straight into manual testing.</li>
+            <li><strong>Parameters</strong> - query and body parameter names worth fuzzing.</li>
+          </ul>
+          <p class="muted">Turn it off or tune the file limit under <strong>Settings &rarr; JS scan</strong>. Re-run it for one domain from that domain's report page.</p>
+        </div>
+
+        <div class="card">
+          <h3>Bundled nuclei templates</h3>
+          <p>This repository ships hand-written nuclei templates for CVEs that have no template in the official <code>projectdiscovery/nuclei-templates</code> repo. They live in <code>nuclei-templates/</code> and run <em>in addition to</em> the official set on every nuclei step.</p>
+          <p class="muted">Turn them off under <strong>Settings &rarr; Use bundled nuclei templates</strong>. They are skipped with a note in the job log if nuclei has not downloaded its official templates yet - run <code>nuclei -update-templates</code> once and they come back.</p>
+        </div>
+
+        <div class="card">
+          <h3>6 &middot; Keep it running</h3>
+          <ul class="tips">
+            <li><strong>Monitors</strong> poll a URL holding a newline-separated target list and launch jobs as new entries appear.</li>
+            <li>Backups run on a schedule and can be restored from <strong>Settings</strong>. Cleanup trims old scan files so the disk survives.</li>
+            <li>Re-running a target resumes it: finished steps are not repeated.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>7 &middot; Drive it from an agent</h3>
+          <p>The <code>/api/agent/*</code> API takes a bug bounty program's full scope, runs recon across it and hands back assets, findings and a ranked attack surface. Authentication is a scoped API key, so an agent can be given read-only access, or access to one program only.</p>
+          <p class="muted">Full reference: <code>AGENT_API.md</code> in the repository. Start with <code>GET /api/agent</code> for the endpoint index.</p>
+        </div>
+
+        <div class="card">
+          <h3>When something looks wrong</h3>
+          <div class="table-wrapper">
+            <table class="monitor-entry-table">
+              <thead><tr><th>Symptom</th><th>What it usually is</th></tr></thead>
+              <tbody>
+                <tr><td>Scan finishes instantly, no subdomains</td><td>No enumeration tool installed. Check the tool list above.</td></tr>
+                <tr><td>A step is permanently "running"</td><td>The tool is waiting on something. Open Logs, then skip the step from Active Jobs.</td></tr>
+                <tr><td>httpx found nothing</td><td>The Python package called <code>httpx</code> is on PATH instead of ProjectDiscovery's. Install the right one; this app refuses the wrong binary on purpose.</td></tr>
+                <tr><td>No screenshots</td><td>gowitness needs Chrome or Chromium installed.</td></tr>
+                <tr><td>Auto-install did nothing</td><td>System package installs need root. Run the command shown above yourself, or start the app as root.</td></tr>
+                <tr><td>Everything is slow</td><td>Too many parallel jobs. Lower them in Settings or enable dynamic mode.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="module" data-view="guide">
       <div class="module-header"><h2>User Guide</h2></div>
       <div class="module-body">
@@ -8777,6 +9238,10 @@ function setView(target) {
   if (next === 'database' && typeof loadDatabaseView === 'function') {
     loadDatabaseView();
   }
+  // Check tool availability the first time the how-to view is opened
+  if (next === 'howto' && typeof loadHowtoTools === 'function') {
+    loadHowtoTools(false);
+  }
 }
 navLinks.forEach(link => {
   link.addEventListener('click', (event) => {
@@ -8786,6 +9251,9 @@ navLinks.forEach(link => {
 });
 const initialView = location.hash ? location.hash.substring(1) : 'overview';
 setView(initialView || 'overview');
+
+// Wire up the "How to use this tool" view (function declarations are hoisted)
+initHowtoView();
 
 // Settings tabs handler
 const settingsTabs = document.querySelectorAll('.settings-tab');
@@ -8845,6 +9313,7 @@ const settingsEnableDnsx = document.getElementById('settings-enable-dnsx');
 const settingsEnableWaybackurls = document.getElementById('settings-enable-waybackurls');
 const settingsEnableGau = document.getElementById('settings-enable-gau');
 const settingsEnableJsScan = document.getElementById('settings-enable-js-scan');
+const settingsBundledNucleiTemplates = document.getElementById('settings-bundled-nuclei-templates');
 const settingsSubfinderThreads = document.getElementById('settings-subfinder-threads');
 const settingsAssetfinderThreads = document.getElementById('settings-assetfinder-threads');
 const settingsFindomainThreads = document.getElementById('settings-findomain-threads');
@@ -9607,6 +10076,241 @@ document.addEventListener('click', (event) => {
   // Re-render queue with new page - latestQueuedJobs is already from API
   renderQueue(latestQueuedJobs);
 });
+
+// ---- Overview: JS findings ------------------------------------------------
+function renderJsFindingsOverview(targets) {
+  const container = document.getElementById('overview-js-findings');
+  const statSecrets = document.getElementById('stat-js-secrets');
+  const statEndpoints = document.getElementById('stat-js-endpoints');
+  const entries = Object.entries(targets || {});
+
+  let totalSecrets = 0;
+  let totalEndpoints = 0;
+  let totalParams = 0;
+  let scannedTargets = 0;
+  const rows = [];
+  const sampleSecrets = [];
+
+  entries.forEach(([domain, info]) => {
+    const js = info && info.js_scan;
+    if (!js) return;
+    const counts = js.summary || {};
+    const secrets = Number(counts.secrets || 0);
+    const endpoints = Number(counts.endpoints || 0);
+    const params = Number(counts.params || 0);
+    scannedTargets += 1;
+    totalSecrets += secrets;
+    totalEndpoints += endpoints;
+    totalParams += params;
+
+    const types = js.secret_types || {};
+    const typeLabel = Object.keys(types).length
+      ? Object.entries(types).sort((a, b) => b[1] - a[1]).slice(0, 3)
+          .map(([name, count]) => `${escapeHtml(name)} &times;${count}`).join(', ')
+      : '<span class="muted">none</span>';
+
+    rows.push({
+      domain,
+      secrets,
+      endpoints,
+      params,
+      files: Number(counts.files || 0),
+      scannedAt: js.scanned_at || '',
+      typeLabel,
+    });
+
+    (js.top_secrets || js.secrets || []).slice(0, 3).forEach(secret => {
+      if (!secret) return;
+      sampleSecrets.push({
+        domain,
+        type: secret.type || 'unknown',
+        match: secret.match || '',
+        source: secret.source || '',
+      });
+    });
+  });
+
+  if (statSecrets) statSecrets.textContent = totalSecrets;
+  if (statEndpoints) statEndpoints.textContent = totalEndpoints;
+  if (!container) return;
+
+  if (!scannedTargets) {
+    container.innerHTML = '<div class="section-placeholder">No JS scan results yet. The JS scan runs as part of the pipeline once hosts are known - enable it under Settings if it is off.</div>';
+    return;
+  }
+
+  rows.sort((a, b) => b.secrets - a.secrets || a.domain.localeCompare(b.domain));
+
+  const summaryLine = `
+    <p class="muted" style="margin-top:0;">
+      ${scannedTargets} target(s) scanned &middot;
+      <strong>${totalSecrets}</strong> secret(s) &middot;
+      <strong>${totalEndpoints}</strong> endpoint(s) &middot;
+      <strong>${totalParams}</strong> parameter(s)
+    </p>
+  `;
+
+  const table = `
+    <div class="table-wrapper">
+      <table class="targets-table" id="overview-js-table">
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Secrets</th>
+            <th>Endpoints</th>
+            <th>Params</th>
+            <th>JS files</th>
+            <th>Top secret types</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr>
+              <td><a href="/domain/${encodeURIComponent(row.domain)}" class="link-btn">${escapeHtml(row.domain)}</a></td>
+              <td>${row.secrets ? `<span class="badge severity-high">${row.secrets}</span>` : '0'}</td>
+              <td>${row.endpoints}</td>
+              <td>${row.params}</td>
+              <td>${row.files}</td>
+              <td>${row.typeLabel}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  const secretsList = sampleSecrets.length ? `
+    <h4 style="margin: 16px 0 8px;">Sample secrets (values redacted)</h4>
+    <div class="table-wrapper">
+      <table class="monitor-entry-table">
+        <thead><tr><th>Domain</th><th>Type</th><th>Value</th><th>Found in</th></tr></thead>
+        <tbody>
+          ${sampleSecrets.slice(0, 10).map(secret => `
+            <tr>
+              <td>${escapeHtml(secret.domain)}</td>
+              <td>${escapeHtml(secret.type)}</td>
+              <td><code>${escapeHtml(secret.match)}</code></td>
+              <td class="muted" style="word-break: break-all;">${escapeHtml(secret.source)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : '';
+
+  container.innerHTML = summaryLine + table + secretsList;
+}
+
+// ---- How to use this tool: live tool status -------------------------------
+let howtoToolsLoaded = false;
+
+function renderHowtoTools(data) {
+  const platformEl = document.getElementById('howto-platform');
+  const toolsEl = document.getElementById('howto-tools');
+  if (!toolsEl) return;
+
+  const platform = (data && data.platform) || {};
+  const managers = (data && data.package_managers) || [];
+  if (platformEl) {
+    const bits = [];
+    bits.push(`<strong>${escapeHtml(platform.system_label || 'unknown')}</strong>`);
+    if (platform.distro) bits.push(escapeHtml(platform.distro));
+    if (platform.arch) bits.push(escapeHtml(platform.arch));
+    bits.push(`package managers: ${managers.length ? managers.map(escapeHtml).join(', ') : 'none detected'}`);
+    if (platform.system !== 'windows') {
+      bits.push(platform.is_root ? 'running as root'
+        : (platform.sudo === 'passwordless' ? 'passwordless sudo available'
+          : 'no passwordless sudo - system packages must be installed manually'));
+    }
+    platformEl.innerHTML = bits.join(' &middot; ');
+  }
+
+  const tools = (data && data.tools) || [];
+  const missing = tools.filter(tool => !tool.installed);
+  const installBtn = document.getElementById('howto-install-missing');
+  if (installBtn) {
+    const autoInstallable = missing.filter(tool => tool.auto_installable);
+    installBtn.disabled = autoInstallable.length === 0;
+    installBtn.textContent = autoInstallable.length
+      ? `Install ${autoInstallable.length} missing tool(s)`
+      : (missing.length ? 'Nothing can be installed unattended' : 'All tools installed');
+  }
+
+  toolsEl.innerHTML = `
+    <p class="muted">${data.installed_count} of ${data.total_count} tools available.</p>
+    <div class="table-wrapper">
+      <table class="monitor-entry-table">
+        <thead><tr><th>Tool</th><th>Status</th><th>Install on this machine</th></tr></thead>
+        <tbody>
+          ${tools.map(tool => {
+            const status = tool.installed
+              ? `<span class="badge complete">ready</span><br><span class="muted" style="word-break: break-all;">${escapeHtml(tool.path || '')}</span>`
+              : '<span class="badge pending">missing</span>';
+            let action = '<span class="muted">-</span>';
+            if (!tool.installed) {
+              const usable = (tool.install_plan || []).filter(step => step.manager_present && step.package_available);
+              const others = (tool.install_plan || []).filter(step => !(step.manager_present && step.package_available));
+              const lines = usable.map(step =>
+                `<div><code>${escapeHtml(step.display_command)}</code>${step.can_run_unattended ? '' : ` <span class="muted">(${escapeHtml(step.blocked_reason)})</span>`}</div>`);
+              if (!lines.length) {
+                lines.push(...others.slice(0, 2).map(step =>
+                  `<div class="muted"><code>${escapeHtml(step.display_command)}</code> &mdash; ${escapeHtml(step.blocked_reason || 'not available here')}</div>`));
+              }
+              if (!lines.length) {
+                lines.push(`<div class="muted">No packaged install for this OS. See <a href="${escapeHtml(tool.docs || '#')}" target="_blank" rel="noopener">docs</a>.</div>`);
+              }
+              action = lines.join('');
+            }
+            const note = tool.note ? `<div class="muted" style="margin-top:4px;">${escapeHtml(tool.note)}</div>` : '';
+            return `<tr><td><strong>${escapeHtml(tool.tool)}</strong>${note}</td><td>${status}</td><td>${action}</td></tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadHowtoTools(force) {
+  const toolsEl = document.getElementById('howto-tools');
+  if (!toolsEl || (howtoToolsLoaded && !force)) return;
+  toolsEl.innerHTML = '<div class="section-placeholder">Checking which tools are installed&hellip;</div>';
+  try {
+    const resp = await fetch('/api/tools' + (force ? '?refresh=true' : ''));
+    const data = await resp.json();
+    howtoToolsLoaded = true;
+    renderHowtoTools(data);
+  } catch (err) {
+    toolsEl.innerHTML = '<div class="section-placeholder">Could not read tool status.</div>';
+  }
+}
+
+function initHowtoView() {
+  const refreshBtn = document.getElementById('howto-refresh-tools');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => loadHowtoTools(true));
+  }
+  const installBtn = document.getElementById('howto-install-missing');
+  const statusEl = document.getElementById('howto-install-status');
+  if (installBtn) {
+    installBtn.addEventListener('click', async () => {
+      installBtn.disabled = true;
+      if (statusEl) statusEl.textContent = 'Starting install...';
+      try {
+        const resp = await fetch('/api/tools/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await resp.json();
+        if (statusEl) statusEl.textContent = data.message || (data.success ? 'Install started.' : 'Install failed.');
+        setTimeout(() => loadHowtoTools(true), 15000);
+      } catch (err) {
+        if (statusEl) statusEl.textContent = 'Could not start the install.';
+        installBtn.disabled = false;
+      }
+    });
+  }
+}
 
 function renderOverviewTargets(targets) {
   const entries = Object.entries(targets || {});
@@ -11048,6 +11752,7 @@ function attachOverviewFilterListeners() {
   const applyFilters = () => {
     saveOverviewFiltersToStorage();
     renderOverviewTargets(latestTargetsData);
+    renderJsFindingsOverview(latestTargetsData);
   };
   
   if (domainSearch) {
@@ -12363,6 +13068,7 @@ function renderSettings(config, tools) {
     settingsEnableWaybackurls.checked = config.enable_waybackurls !== false;
     settingsEnableGau.checked = config.enable_gau !== false;
     if (settingsEnableJsScan) settingsEnableJsScan.checked = config.enable_js_scan !== false;
+    if (settingsBundledNucleiTemplates) settingsBundledNucleiTemplates.checked = config.use_bundled_nuclei_templates !== false;
     settingsSubfinderThreads.value = config.subfinder_threads || 32;
     settingsAssetfinderThreads.value = config.assetfinder_threads || 10;
     settingsFindomainThreads.value = config.findomain_threads || 40;
@@ -12445,6 +13151,7 @@ async function fetchState() {
     renderJobs(data.running_jobs || []);
     renderQueue(data.queued_jobs || []);
     renderOverviewTargets(data.targets || {});
+    renderJsFindingsOverview(data.targets || {});
     renderTargets(data.targets || {});
     renderSettings(data.config || {}, data.tools || {});
     renderWorkers(data.workers || {});
@@ -12601,6 +13308,7 @@ if (settingsForm) {
         enable_waybackurls: settingsEnableWaybackurls ? settingsEnableWaybackurls.checked : true,
         enable_gau: settingsEnableGau ? settingsEnableGau.checked : true,
         enable_js_scan: settingsEnableJsScan ? settingsEnableJsScan.checked : true,
+        use_bundled_nuclei_templates: settingsBundledNucleiTemplates ? settingsBundledNucleiTemplates.checked : true,
         subfinder_threads: settingsSubfinderThreads ? settingsSubfinderThreads.value : '',
         assetfinder_threads: settingsAssetfinderThreads ? settingsAssetfinderThreads.value : '',
         findomain_threads: settingsFindomainThreads ? settingsFindomainThreads.value : '',
@@ -14308,8 +15016,8 @@ def build_state_payload_summary() -> Dict[str, Any]:
     # OPTIMIZATION: Single query with JOIN instead of N+1 queries
     # This is dramatically faster for large datasets (10,000+ subdomains)
     cursor.execute("""
-        SELECT 
-            t.domain, t.flags, t.options, t.comments,
+        SELECT
+            t.domain, t.flags, t.options, t.comments, t.data,
             s.subdomain, s.data, s.interesting, s.comments as sub_comments
         FROM targets t
         LEFT JOIN subdomains s ON t.domain = s.domain
@@ -14347,16 +15055,25 @@ def build_state_payload_summary() -> Dict[str, Any]:
             options = json.loads(row[2]) if row[2] else {}
             target_comments = json.loads(row[3]) if row[3] else []
             
+            try:
+                extra = json.loads(row[4]) if row[4] else {}
+            except json.JSONDecodeError:
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            
             current_target = {
                 "flags": flags,
                 "options": options,
                 "comments": target_comments,
+                "endpoint_count": len(extra.get("endpoints", []) or []),
+                "js_scan": summarize_js_scan(extra.get("js_scan")),
             }
             subdomains = {}
             subdomain_count = 0
         
         # Process subdomain if present (LEFT JOIN may have NULL subdomain)
-        subdomain = row[4]
+        subdomain = row[5]
         if subdomain is not None:
             subdomain_count += 1
             
@@ -14366,7 +15083,7 @@ def build_state_payload_summary() -> Dict[str, Any]:
                 continue
             
             try:
-                full_data = json.loads(row[5])
+                full_data = json.loads(row[6])
                 
                 # Extract only lightweight fields
                 lightweight_data = {
@@ -14399,8 +15116,8 @@ def build_state_payload_summary() -> Dict[str, Any]:
                     }
                 
                 # Add interesting flag
-                if row[6] is not None:
-                    lightweight_data["interesting"] = bool(row[6])
+                if row[7] is not None:
+                    lightweight_data["interesting"] = bool(row[7])
                 
                 subdomains[subdomain] = lightweight_data
                 
@@ -14461,6 +15178,8 @@ def build_state_payload_summary() -> Dict[str, Any]:
                 "completed_at": job_data.get("completed_at"),
                 "pending": False,
                 "from_completed_jobs": True,
+                "endpoint_count": len(state_data.get("endpoints", []) or []),
+                "js_scan": summarize_js_scan(state_data.get("js_scan")),
             }
     
     # Get last updated time
@@ -14468,7 +15187,14 @@ def build_state_payload_summary() -> Dict[str, Any]:
     last_updated_row = cursor.fetchone()
     last_updated = last_updated_row[0] if last_updated_row and last_updated_row[0] else None
     
-    tool_info = {name: shutil.which(cmd) or "" for name, cmd in TOOLS.items()}
+    # Resolve through the same logic the pipeline uses: custom paths, PATH and
+    # Go/Homebrew/Scoop bin dirs. shutil.which() alone under-reports installs.
+    tool_info = {}
+    for name in TOOLS.keys():
+        try:
+            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+        except Exception:
+            tool_info[name] = ""
     return {
         "last_updated": last_updated,
         "targets": targets,
@@ -14527,7 +15253,14 @@ def build_state_payload() -> Dict[str, Any]:
     # This ensures active scans override completed data for same domain
     all_targets = {**completed_targets, **targets}
     
-    tool_info = {name: shutil.which(cmd) or "" for name, cmd in TOOLS.items()}
+    # Resolve through the same logic the pipeline uses: custom paths, PATH and
+    # Go/Homebrew/Scoop bin dirs. shutil.which() alone under-reports installs.
+    tool_info = {}
+    for name in TOOLS.keys():
+        try:
+            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+        except Exception:
+            tool_info[name] = ""
     return {
         "last_updated": state.get("last_updated"),
         "targets": all_targets,
@@ -14706,7 +15439,14 @@ def build_state_payload_paginated(page: int = 1, per_page: int = 50, full: bool 
     last_updated_row = cursor.fetchone()
     last_updated = last_updated_row[0] if last_updated_row and last_updated_row[0] else None
     
-    tool_info = {name: shutil.which(cmd) or "" for name, cmd in TOOLS.items()}
+    # Resolve through the same logic the pipeline uses: custom paths, PATH and
+    # Go/Homebrew/Scoop bin dirs. shutil.which() alone under-reports installs.
+    tool_info = {}
+    for name in TOOLS.keys():
+        try:
+            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+        except Exception:
+            tool_info[name] = ""
     
     payload = {
         "last_updated": last_updated,
@@ -17906,6 +18646,23 @@ form.addEventListener('submit', async (e) => {
         if self.path == "/api/system-resources":
             self._send_json(get_system_resource_snapshot())
             return
+        if self.path.startswith("/api/tools"):
+            params = parse_qs(urlparse(self.path).query)
+            refresh = params.get("refresh", ["false"])[0].lower() in ("true", "1", "yes")
+            if refresh:
+                detect_platform(refresh=True)
+                _PKG_AVAILABILITY_CACHE.clear()
+            self._send_json({"success": True, **tool_status_snapshot()})
+            return
+        if self.path.startswith("/api/js-findings"):
+            params = parse_qs(urlparse(self.path).query)
+            try:
+                limit = max(1, min(200, int(params.get("limit", ["10"])[0])))
+            except (TypeError, ValueError):
+                limit = 10
+            self._send_json({"success": True,
+                             **js_findings_overview(limit_targets=limit, limit_secrets=limit)})
+            return
         if self.path == "/api/dynamic-mode":
             self._send_json(get_dynamic_mode_status())
             return
@@ -18396,6 +19153,7 @@ form.addEventListener('submit', async (e) => {
             "/api/backup/restore",
             "/api/backup/delete",
             "/api/cleanup/run",
+            "/api/tools/install",
             "/api/subdomain/mark",
             "/api/subdomain/comment",
             "/api/subdomain/run-tool",
@@ -18454,6 +19212,36 @@ form.addEventListener('submit', async (e) => {
                 self._send_json({"success": True, "message": message, "stats": stats}, status=HTTPStatus.OK)
             except Exception as exc:
                 self._send_json({"success": False, "message": f"Cleanup failed: {str(exc)}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.path == "/api/tools/install":
+            requested = payload.get("tools") or payload.get("tool") or []
+            if isinstance(requested, str):
+                requested = [part.strip() for part in re.split(r"[,\s]+", requested) if part.strip()]
+            unknown = [name for name in requested if name not in TOOLS]
+            if unknown:
+                self._send_json({"success": False,
+                                 "message": f"Unknown tool(s): {', '.join(unknown)}"},
+                                status=HTTPStatus.BAD_REQUEST)
+                return
+            targets = requested or [name for name in TOOLS.keys()]
+
+            def _install_async() -> None:
+                for name in targets:
+                    try:
+                        ensure_tool_installed(name)
+                    except Exception as exc:
+                        log(f"Install attempt for {name} failed: {exc}")
+
+            threading.Thread(target=_install_async, name="tool-install", daemon=True).start()
+            info = detect_platform()
+            self._send_json({
+                "success": True,
+                "message": (f"Installing {len(targets)} tool(s) on {info['system_label']}. "
+                            "Watch Logs for progress, then refresh."),
+                "tools": targets,
+                "platform": info["system_label"],
+            })
             return
 
         if self.path == "/api/jobs/pause":

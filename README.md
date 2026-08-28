@@ -20,8 +20,11 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 - **Command history & exports** – Every command executed is logged; you can export JSON or CSV snapshots at any time.
 - **Monitors** – Point the UI at a newline-delimited URL (supports wildcards like `*.corp.com` or `corp.*`). The monitor polls the file, launches new jobs when entries appear, and surfaces health/status in its own tab.
 - **Concurrency controls** – Configure max running jobs and per-tool worker caps so scans behave on your box.
-- **Auto-install helpers** – Best-effort installers kick in when a required tool is missing.
 - **Docker support** – Multi-platform Docker container with all tools pre-installed. Works on Linux (amd64, arm64, armv7).
+- **OS-aware tool installation** – Detects the OS, distribution and package managers actually present (APT/DNF/pacman/zypper/apk/snap/Homebrew/MacPorts/Scoop/winget/Chocolatey/go/pip), installs each tool with a method that fits, skips anything that would hang on a sudo prompt, and prints instructions matching *your* machine instead of assuming Ubuntu.
+- **JS findings on the dashboard** – Secrets, hidden endpoints and parameters found in JavaScript are summarised on the Overview page, per target, so you see them without opening each report.
+- **"How to use this tool" page** – A getting-started view in the UI with a live tool-availability check, per-OS install commands, a one-click install of what's missing, and a troubleshooting table.
+- **Bundled nuclei templates** – `nuclei-templates/` ships 34 hand-written templates for high/critical CVEs that have no template in the official `projectdiscovery/nuclei-templates` repo (Vault, Zabbix, Argo CD, Kibana, Harbor, Traefik, Cisco ASA/FTD, 18 WordPress plugins and more). They run alongside the official set on every nuclei step; toggle under Settings.
 - **Bug bounty agent API** – Load a program's full scope, launch recon across it, and read back assets, findings and a ranked attack surface over `/api/agent/*`, authenticated with scoped, revocable API keys. See [AGENT_API.md](AGENT_API.md).
 
 1. Dynamic queue management to fit YOUR pc: <img width="1055" height="976" alt="image" src="https://github.com/user-attachments/assets/c59393dd-2036-411e-b082-13c7f21241a4" />
