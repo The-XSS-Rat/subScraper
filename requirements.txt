@@ -1,0 +1,19 @@
+# Runtime dependencies for Recon Command Center (main.py).
+#
+# The application is deliberately close to the standard library: the HTTP
+# server, SQLite, subprocess and urllib are all stdlib. Only the dependency
+# below is needed to run it, and even that one is optional.
+
+# System resource monitoring (CPU/memory/disk/network) and dynamic job scaling.
+# Without it the app still runs; the System Resources view and dynamic mode
+# report that monitoring is unavailable.
+psutil>=5.9.0
+
+# --- Not installed from here -----------------------------------------------
+# The recon tools (amass, subfinder, httpx, nuclei, nikto, ffuf, gowitness,
+# ...) are separate binaries, not Python packages. The app detects your OS and
+# installs them with a package manager that fits - see the "How to use this
+# tool" page in the UI, or GET /api/tools. Sublist3r is the one recon tool that
+# is a Python package, and it is installed through that same flow.
+#
+# Test dependencies live in requirements-dev.txt.

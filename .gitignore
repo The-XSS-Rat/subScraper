@@ -1,6 +1,8 @@
 
 *.json
 *.txt
+!requirements.txt
+!requirements-dev.txt
 *.jsonl
 __pycache__/
 recon_data/

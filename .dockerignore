@@ -35,6 +35,7 @@ Thumbs.db
 *.md
 !README.md
 !DOCKER_BUILD.md
+!nuclei-templates/README.md
 
 # Test files
 tests/

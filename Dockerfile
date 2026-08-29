@@ -78,9 +78,15 @@ RUN apt-get update && apt-get install -y nmap && rm -rf /var/lib/apt/lists/*
 # Create working directory
 WORKDIR /app
 
+# Python dependencies (psutil for resource monitoring; see requirements.txt)
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
 # Copy application files
 COPY main.py /app/
 COPY README.md /app/
+# Nuclei templates bundled with this repo - run alongside the official set
+COPY nuclei-templates/ /app/nuclei-templates/
 
 # Create data directory
 # This directory stores all application data including:
