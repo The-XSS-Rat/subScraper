@@ -186,21 +186,28 @@ class ToolGate:
                     work_item = self._queue.popleft()
                     self._count += 1
             
-            # Execute work outside the lock
+            # Run the item on its own thread so a limit of N really means N
+            # items in flight. Executing it here would serialise the queue no
+            # matter how high the limit was set.
             if work_item:
-                try:
-                    func, result_callback, error_callback = work_item
-                    result = func()
-                    if result_callback:
-                        result_callback(result)
-                except Exception as exc:
-                    if error_callback:
-                        error_callback(exc)
-                finally:
-                    with self._cond:
-                        if self._count > 0:
-                            self._count -= 1
-                        self._cond.notify_all()
+                threading.Thread(target=self._execute, args=(work_item,),
+                                 name="ToolGate-Task", daemon=True).start()
+
+    def _execute(self, work_item) -> None:
+        """Run one queued work item and release its slot afterwards."""
+        func, result_callback, error_callback = work_item
+        try:
+            result = func()
+            if result_callback:
+                result_callback(result)
+        except Exception as exc:
+            if error_callback:
+                error_callback(exc)
+        finally:
+            with self._cond:
+                if self._count > 0:
+                    self._count -= 1
+                self._cond.notify_all()
     
     def stop_worker(self) -> None:
         """Stop the background worker thread."""
@@ -258,22 +265,79 @@ class ToolGate:
         self.release()
 
 
+# How many concurrent workers each tool gets when its own max_parallel_* is
+# left at 0. Five keeps a normal laptop busy without drowning it; the System
+# Resources view and dynamic mode are there to catch the cases where it does.
+DEFAULT_TOOL_WORKERS = 5
+MAX_TOOL_WORKERS = 50
+
+# Steps whose host list is split across several parallel tool processes. These
+# tools take a batch of hosts per run, so N workers means N processes each
+# handling a slice of the batch.
+SHARDED_TOOLS = {"httpx", "nuclei", "nikto"}
+
+TOOL_PARALLEL_FIELDS = {
+    "amass": "max_parallel_amass",
+    "subfinder": "max_parallel_subfinder",
+    "assetfinder": "max_parallel_assetfinder",
+    "findomain": "max_parallel_findomain",
+    "sublist3r": "max_parallel_sublist3r",
+    "crtsh": "max_parallel_crtsh",
+    "github-subdomains": "max_parallel_github_subdomains",
+    "dnsx": "max_parallel_dnsx",
+    "ffuf": "max_parallel_ffuf",
+    "httpx": "max_parallel_httpx",
+    "waybackurls": "max_parallel_waybackurls",
+    "gau": "max_parallel_gau",
+    "gowitness": "max_parallel_gowitness",
+    "nuclei": "max_parallel_nuclei",
+    "nikto": "max_parallel_nikto",
+}
+
+
+def default_tool_workers(config: Optional[Dict[str, Any]] = None) -> int:
+    """Worker count applied to any tool that has no explicit override."""
+    cfg = config if config is not None else get_config()
+    try:
+        value = int(cfg.get("default_tool_workers", DEFAULT_TOOL_WORKERS) or DEFAULT_TOOL_WORKERS)
+    except (TypeError, ValueError):
+        value = DEFAULT_TOOL_WORKERS
+    return max(1, min(MAX_TOOL_WORKERS, value))
+
+
+def tool_worker_limit(tool: str, config: Optional[Dict[str, Any]] = None) -> int:
+    """
+    Workers for one tool: its own max_parallel_* when set, otherwise the global
+    default. 0 or blank means "inherit", which is what makes one setting enough
+    to scale every tool.
+    """
+    cfg = config if config is not None else get_config()
+    field = TOOL_PARALLEL_FIELDS.get(tool)
+    raw = cfg.get(field) if field else None
+    if raw in (None, "", 0, "0"):
+        return default_tool_workers(cfg)
+    try:
+        return max(1, min(MAX_TOOL_WORKERS, int(raw)))
+    except (TypeError, ValueError):
+        return default_tool_workers(cfg)
+
+
 TOOL_GATES: Dict[str, ToolGate] = {
-    "amass": ToolGate(1),
-    "subfinder": ToolGate(1),
-    "assetfinder": ToolGate(1),
-    "findomain": ToolGate(1),
-    "sublist3r": ToolGate(1),
-    "crtsh": ToolGate(1),
-    "github-subdomains": ToolGate(1),
-    "dnsx": ToolGate(1),
-    "ffuf": ToolGate(1),
-    "httpx": ToolGate(1),
-    "waybackurls": ToolGate(1),
-    "gau": ToolGate(1),
-    "gowitness": ToolGate(1),
-    "nuclei": ToolGate(1),
-    "nikto": ToolGate(1),
+    "amass": ToolGate(DEFAULT_TOOL_WORKERS),
+    "subfinder": ToolGate(DEFAULT_TOOL_WORKERS),
+    "assetfinder": ToolGate(DEFAULT_TOOL_WORKERS),
+    "findomain": ToolGate(DEFAULT_TOOL_WORKERS),
+    "sublist3r": ToolGate(DEFAULT_TOOL_WORKERS),
+    "crtsh": ToolGate(DEFAULT_TOOL_WORKERS),
+    "github-subdomains": ToolGate(DEFAULT_TOOL_WORKERS),
+    "dnsx": ToolGate(DEFAULT_TOOL_WORKERS),
+    "ffuf": ToolGate(DEFAULT_TOOL_WORKERS),
+    "httpx": ToolGate(DEFAULT_TOOL_WORKERS),
+    "waybackurls": ToolGate(DEFAULT_TOOL_WORKERS),
+    "gau": ToolGate(DEFAULT_TOOL_WORKERS),
+    "gowitness": ToolGate(DEFAULT_TOOL_WORKERS),
+    "nuclei": ToolGate(DEFAULT_TOOL_WORKERS),
+    "nikto": ToolGate(DEFAULT_TOOL_WORKERS),
 }
 
 # State payload cache for improved performance
@@ -1540,6 +1604,78 @@ def apply_template_flags(
     return cmd + extras
 
 
+def split_into_shards(items: List[Any], shards: int) -> List[List[Any]]:
+    """Split a work list into at most `shards` balanced chunks."""
+    items = list(items)
+    shards = max(1, min(int(shards or 1), len(items) or 1))
+    if shards <= 1 or len(items) <= 1:
+        return [items] if items else []
+    size, remainder = divmod(len(items), shards)
+    chunks: List[List[Any]] = []
+    start = 0
+    for index in range(shards):
+        end = start + size + (1 if index < remainder else 0)
+        if start >= end:
+            break
+        chunks.append(items[start:end])
+        start = end
+    return chunks
+
+
+def run_tool_shards(tool: str, items: List[Any], worker, *,
+                    config: Optional[Dict[str, Any]] = None,
+                    job_domain: Optional[str] = None) -> List[Any]:
+    """
+    Run `worker(chunk)` over the item list in parallel, one gate slot per shard,
+    for tools that only handle a single target per process. Results come back in
+    shard order; a shard that raises is logged and contributes nothing.
+    """
+    chunks = split_into_shards(items, tool_worker_limit(tool, config))
+    if not chunks:
+        return []
+    gate = TOOL_GATES.get(tool)
+
+    def run_chunk(chunk: List[Any]) -> Any:
+        if gate is not None:
+            with gate:
+                return worker(chunk)
+        return worker(chunk)
+
+    if len(chunks) == 1:
+        return [run_chunk(chunks[0])]
+
+    if job_domain:
+        job_log_append(job_domain,
+                       f"{tool}: splitting {len(items)} target(s) across {len(chunks)} worker(s).",
+                       "scheduler")
+
+    results: List[Any] = [None] * len(chunks)
+    errors: List[str] = []
+    lock = threading.Lock()
+
+    def runner(index: int, chunk: List[Any]) -> None:
+        try:
+            value = run_chunk(chunk)
+            with lock:
+                results[index] = value
+        except Exception as exc:
+            log(f"{tool} worker {index + 1} failed: {exc}")
+            with lock:
+                errors.append(str(exc))
+
+    threads = [threading.Thread(target=runner, args=(index, chunk),
+                                name=f"{tool}-worker-{index + 1}", daemon=True)
+               for index, chunk in enumerate(chunks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if errors and job_domain:
+        job_log_append(job_domain, f"{tool}: {len(errors)} worker(s) failed: {errors[0]}", tool)
+    return results
+
+
 def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
     global MAX_RUNNING_JOBS, GLOBAL_RATE_LIMIT_DELAY, DYNAMIC_MODE_ENABLED
     global DYNAMIC_MODE_BASE_JOBS, DYNAMIC_MODE_MAX_JOBS, DYNAMIC_MODE_CPU_THRESHOLD, DYNAMIC_MODE_MEMORY_THRESHOLD
@@ -1611,31 +1747,9 @@ def apply_concurrency_limits(cfg: Dict[str, Any]) -> None:
     except (TypeError, ValueError):
         GLOBAL_RATE_LIMIT_DELAY = 0.0
     
-    parallel_fields = {
-        "amass": "max_parallel_amass",
-        "subfinder": "max_parallel_subfinder",
-        "assetfinder": "max_parallel_assetfinder",
-        "findomain": "max_parallel_findomain",
-        "sublist3r": "max_parallel_sublist3r",
-        "crtsh": "max_parallel_crtsh",
-        "github-subdomains": "max_parallel_github_subdomains",
-        "dnsx": "max_parallel_dnsx",
-        "ffuf": "max_parallel_ffuf",
-        "httpx": "max_parallel_httpx",
-        "waybackurls": "max_parallel_waybackurls",
-        "gau": "max_parallel_gau",
-        "gowitness": "max_parallel_gowitness",
-        "nuclei": "max_parallel_nuclei",
-        "nikto": "max_parallel_nikto",
-    }
-    for tool, field in parallel_fields.items():
-        gate = TOOL_GATES.setdefault(tool, ToolGate(1))
-        limit = cfg.get(field, 1)
-        try:
-            limit_int = max(1, int(limit))
-        except (TypeError, ValueError):
-            limit_int = 1
-        gate.update_limit(limit_int)
+    for tool in TOOL_PARALLEL_FIELDS:
+        gate = TOOL_GATES.setdefault(tool, ToolGate(DEFAULT_TOOL_WORKERS))
+        gate.update_limit(tool_worker_limit(tool, cfg))
     schedule_jobs()
 
 
@@ -1710,21 +1824,25 @@ def default_config() -> Dict[str, Any]:
         "subfinder_threads": 32,
         "assetfinder_threads": 10,
         "findomain_threads": 40,
-        "max_parallel_amass": 1,
-        "max_parallel_subfinder": 1,
-        "max_parallel_assetfinder": 1,
-        "max_parallel_findomain": 1,
-        "max_parallel_sublist3r": 1,
-        "max_parallel_crtsh": 1,
-        "max_parallel_github_subdomains": 1,
-        "max_parallel_dnsx": 1,
-        "max_parallel_ffuf": 1,
-        "max_parallel_httpx": 1,
-        "max_parallel_waybackurls": 1,
-        "max_parallel_gau": 1,
-        "max_parallel_gowitness": 1,
-        "max_parallel_nuclei": 1,
-        "max_parallel_nikto": 1,
+        # Workers per tool. Each max_parallel_* of 0 (the default) inherits
+        # default_tool_workers, so one setting scales every tool at once.
+        "default_tool_workers": DEFAULT_TOOL_WORKERS,
+        "_tool_workers_migrated": False,
+        "max_parallel_amass": 0,
+        "max_parallel_subfinder": 0,
+        "max_parallel_assetfinder": 0,
+        "max_parallel_findomain": 0,
+        "max_parallel_sublist3r": 0,
+        "max_parallel_crtsh": 0,
+        "max_parallel_github_subdomains": 0,
+        "max_parallel_dnsx": 0,
+        "max_parallel_ffuf": 0,
+        "max_parallel_httpx": 0,
+        "max_parallel_waybackurls": 0,
+        "max_parallel_gau": 0,
+        "max_parallel_gowitness": 0,
+        "max_parallel_nuclei": 0,
+        "max_parallel_nikto": 0,
         "max_running_jobs": 1,
         "global_rate_limit": 0.0,
         "tool_flag_templates": {name: "" for name in TEMPLATE_AWARE_TOOLS},
@@ -3075,6 +3193,31 @@ def save_config(cfg: Dict[str, Any]) -> None:
         raise
 
 
+def _migrate_tool_worker_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Configs written before per-tool worker counts were introduced pinned every
+    tool to 1 slot, which was the old default rather than a deliberate choice.
+    Those are switched to "inherit", so the single Workers-per-tool setting
+    takes effect. Anything the user actually raised is left alone.
+    """
+    if cfg.get("_tool_workers_migrated"):
+        return cfg
+    fields = list(TOOL_PARALLEL_FIELDS.values())
+    values = [cfg.get(field) for field in fields]
+    changed = bool(values) and all(value == 1 for value in values)
+    if changed:
+        for field in fields:
+            cfg[field] = 0
+        log(f"Tool worker settings were all at the old default of 1; they now follow "
+            f"'Workers per tool' ({default_tool_workers(cfg)}).")
+    cfg["_tool_workers_migrated"] = True
+    # Only persist when something actually moved, so simply reading the config
+    # never rewrites it.
+    if changed:
+        save_config(cfg)
+    return cfg
+
+
 def load_config() -> Dict[str, Any]:
     """Load configuration from SQLite database."""
     ensure_dirs()
@@ -3098,6 +3241,7 @@ def load_config() -> Dict[str, Any]:
         # No config in database, save defaults
         save_config(cfg)
     cfg["tool_flag_templates"] = _normalize_tool_flag_templates(cfg.get("tool_flag_templates"))
+    cfg = _migrate_tool_worker_settings(cfg)
     with CONFIG_LOCK:
         CONFIG.clear()
         CONFIG.update(cfg)
@@ -3320,7 +3464,7 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
             changed = True
 
     concurrency_fields = {
-        "max_running_jobs": "Max concurrent jobs",
+        "max_running_jobs": "Max concurrent jobs",  # not inheritable: jobs, not tools
         "max_parallel_amass": "Amass parallel slots",
         "max_parallel_subfinder": "Subfinder parallel slots",
         "max_parallel_assetfinder": "Assetfinder parallel slots",
@@ -3343,13 +3487,29 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
     }
     for field, label in concurrency_fields.items():
         if field in values:
-            try:
-                new_limit = max(1, int(values.get(field)))
-            except (TypeError, ValueError):
-                return False, f"{label} must be an integer >= 1.", cfg
+            raw_value = values.get(field)
+            # A blank or 0 per-tool slot count means "use default_tool_workers".
+            inheritable = field.startswith("max_parallel_")
+            if inheritable and raw_value in (None, "", "0", 0):
+                new_limit = 0
+            else:
+                try:
+                    new_limit = max(1, min(MAX_TOOL_WORKERS if inheritable else 1000, int(raw_value)))
+                except (TypeError, ValueError):
+                    suffix = " (or 0 to use the default)" if inheritable else ""
+                    return False, f"{label} must be an integer >= 1{suffix}.", cfg
             if cfg.get(field, 1) != new_limit:
                 cfg[field] = new_limit
                 changed = True
+
+    if "default_tool_workers" in values:
+        try:
+            new_workers = max(1, min(MAX_TOOL_WORKERS, int(values.get("default_tool_workers"))))
+        except (TypeError, ValueError):
+            return False, f"Workers per tool must be an integer between 1 and {MAX_TOOL_WORKERS}.", cfg
+        if cfg.get("default_tool_workers", DEFAULT_TOOL_WORKERS) != new_workers:
+            cfg["default_tool_workers"] = new_workers
+            changed = True
 
     if "tool_flag_templates" in values:
         new_templates = _normalize_tool_flag_templates(values.get("tool_flag_templates"))
@@ -3950,8 +4110,9 @@ TOOL_PACKAGES: Dict[str, Dict[str, str]] = {
              "go": "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"},
     "ffuf": {"apt": "ffuf", "brew": "ffuf", "pacman": "ffuf", "dnf": "ffuf",
              "go": "github.com/ffuf/ffuf/v2@latest"},
-    "httpx": {"brew": "httpx",
-              "go": "github.com/projectdiscovery/httpx/cmd/httpx@latest"},
+    # Homebrew's core "httpx" formula is the Python HTTP client, a different
+    # tool that this app rejects on purpose - so only go install is offered.
+    "httpx": {"go": "github.com/projectdiscovery/httpx/cmd/httpx@latest"},
     "waybackurls": {"apt": "waybackurls", "brew": "waybackurls",
                     "go": "github.com/tomnomnom/waybackurls@latest"},
     "gau": {"apt": "gau", "brew": "gau", "go": "github.com/lc/gau/v2/cmd/gau@latest"},
@@ -3985,7 +4146,9 @@ TOOL_NOTES = {
     "nikto": "Needs Perl. On Windows install Strawberry Perl, then run nikto.pl from a clone of the repo.",
     "gowitness": "Needs Chrome or Chromium installed for screenshots.",
     "github-subdomains": "Works best with a GitHub API token (Settings -> API keys).",
-    "httpx": "Must be ProjectDiscovery's httpx. The Python package of the same name is a different tool and is rejected on purpose.",
+    "httpx": ("Must be ProjectDiscovery's httpx. The Python package and Homebrew's core 'httpx' "
+              "formula are a different tool and are rejected on purpose - install with go, or "
+              "'brew install projectdiscovery/tap/httpx'."),
     "sublist3r": "Python tool - installed with pip, not with a system package manager on most distros.",
 }
 
@@ -6113,19 +6276,11 @@ def run_downstream_pipeline(
             job_sleep(job_domain, 5)
             continue
         update_step("httpx", status="running", message=f"httpx scanning {len(new_hosts)} pending hosts", progress=40)
-        batch_file = write_subdomains_file(domain, new_hosts, suffix="_httpx_batch")
-        if job_domain:
-            job_log_append(job_domain, "Waiting for httpx slot...", "scheduler")
-        with TOOL_GATES["httpx"]:
-            if job_domain:
-                job_log_append(job_domain, "httpx slot acquired.", "scheduler")
-            httpx_json = httpx_scan(batch_file, domain, config=config, job_domain=job_domain)
-        try:
-            batch_file.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
+        httpx_json = run_batch_sharded(
+            "httpx", new_hosts, domain,
+            lambda batch_file, suffix: httpx_scan(batch_file, domain, config=config,
+                                                  job_domain=job_domain, out_suffix=suffix),
+            config=config, job_domain=job_domain)
         if not httpx_json:
             job_log_append(job_domain, "httpx batch failed. Continuing with pipeline.", "httpx")
             update_step("httpx", status="error", message="httpx batch failed (timeouts or connection issues). Continuing with pipeline.", progress=100)
@@ -6216,19 +6371,11 @@ def run_downstream_pipeline(
             job_sleep(job_domain, 5)
             continue
         update_step("nuclei", status="running", message=f"nuclei scanning {len(new_hosts)} pending hosts", progress=40)
-        batch_file = write_subdomains_file(domain, new_hosts, suffix="_nuclei_batch")
-        if job_domain:
-            job_log_append(job_domain, "Waiting for nuclei slot...", "scheduler")
-        with TOOL_GATES["nuclei"]:
-            if job_domain:
-                job_log_append(job_domain, "nuclei slot acquired.", "scheduler")
-            nuclei_json = nuclei_scan(batch_file, domain, config=config, job_domain=job_domain)
-        try:
-            batch_file.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
+        nuclei_json = run_batch_sharded(
+            "nuclei", new_hosts, domain,
+            lambda batch_file, suffix: nuclei_scan(batch_file, domain, config=config,
+                                                   job_domain=job_domain, out_suffix=suffix),
+            config=config, job_domain=job_domain)
         if not nuclei_json:
             job_log_append(job_domain, "nuclei batch failed.", "nuclei")
             update_step("nuclei", status="error", message="nuclei batch failed. Check logs for details.", progress=100)
@@ -6300,12 +6447,7 @@ def run_downstream_pipeline(
                 job_sleep(job_domain, 5)
                 continue
             update_step("nikto", status="running", message=f"Nikto scanning {len(new_hosts)} pending hosts", progress=40)
-            if job_domain:
-                job_log_append(job_domain, "Waiting for Nikto slot...", "scheduler")
-            with TOOL_GATES["nikto"]:
-                if job_domain:
-                    job_log_append(job_domain, "Nikto slot acquired.", "scheduler")
-                nikto_json = nikto_scan(new_hosts, domain, config=config, job_domain=job_domain)
+            nikto_json = nikto_scan(new_hosts, domain, config=config, job_domain=job_domain)
             if not nikto_json:
                 job_log_append(job_domain, "Nikto batch failed.", "nikto")
                 update_step("nikto", status="error", message="Nikto batch failed. Check logs for details.", progress=100)
@@ -6405,7 +6547,7 @@ def write_subdomains_file(domain: str, subs: List[str], suffix: Optional[str] = 
 
 
 def httpx_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = None,
-               job_domain: Optional[str] = None) -> Path:
+               job_domain: Optional[str] = None, out_suffix: str = "") -> Path:
     """
     Run httpx HTTP probing with enhanced error handling.
     
@@ -6414,7 +6556,7 @@ def httpx_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = 
     """
     if not ensure_tool_installed("httpx"):
         return None
-    out_json = DATA_DIR / f"httpx_{domain}.json"
+    out_json = DATA_DIR / f"httpx_{domain}{out_suffix}.json"
     cmd = [
         TOOLS["httpx"],
         "-l", str(subs_file),
@@ -6451,6 +6593,70 @@ def httpx_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = 
     else:
         # Failed and no output
         return None
+
+
+def _merge_jsonl_files(parts: List[Path], destination: Path) -> Optional[Path]:
+    """Concatenate JSONL shard outputs into one file and drop the shards."""
+    written = 0
+    try:
+        with open(destination, "w", encoding="utf-8") as out_handle:
+            for part in parts:
+                if not part or not part.exists():
+                    continue
+                with open(part, "r", encoding="utf-8", errors="replace") as in_handle:
+                    for line in in_handle:
+                        line = line.strip()
+                        if line:
+                            out_handle.write(line + "\n")
+                            written += 1
+    except Exception as exc:
+        log(f"Failed merging shard output into {destination.name}: {exc}")
+        return None
+    for part in parts:
+        try:
+            if part and part.exists():
+                part.unlink()
+        except Exception:
+            pass
+    return destination if written else None
+
+
+def run_batch_sharded(tool: str, hosts: List[str], domain: str,
+                      scanner, config: Optional[Dict[str, Any]] = None,
+                      job_domain: Optional[str] = None) -> Optional[Path]:
+    """
+    Run a batch tool over `hosts` using its configured worker count: the host
+    list is split, each shard gets its own input file, its own process and its
+    own gate slot, and the JSONL outputs are merged back into the single file
+    the rest of the pipeline expects.
+    """
+    if not hosts:
+        return None
+    destination = DATA_DIR / f"{tool}_{domain}.json"
+    shard_index = {"n": 0}
+    lock = threading.Lock()
+
+    def run_shard(chunk: List[str]) -> Optional[Path]:
+        with lock:
+            shard_index["n"] += 1
+            index = shard_index["n"]
+        suffix = f"_w{index}"
+        batch_file = write_subdomains_file(domain, chunk, suffix=f"_{tool}_batch{suffix}")
+        try:
+            return scanner(batch_file, suffix)
+        finally:
+            try:
+                batch_file.unlink()
+            except Exception:
+                pass
+
+    results = run_tool_shards(tool, hosts, run_shard, config=config, job_domain=job_domain)
+    parts = [path for path in results if isinstance(path, Path)]
+    if not parts:
+        return None
+    if len(parts) == 1 and parts[0] == destination:
+        return destination
+    return _merge_jsonl_files(parts, destination)
 
 
 def _normalize_identifier(value: str) -> str:
@@ -6745,10 +6951,10 @@ def nuclei_template_args(config: Optional[Dict[str, Any]] = None,
 
 
 def nuclei_scan(subs_file: Path, domain: str, config: Optional[Dict[str, Any]] = None,
-                job_domain: Optional[str] = None) -> Path:
+                job_domain: Optional[str] = None, out_suffix: str = "") -> Path:
     if not ensure_tool_installed("nuclei"):
         return None
-    out_json = DATA_DIR / f"nuclei_{domain}.json"
+    out_json = DATA_DIR / f"nuclei_{domain}{out_suffix}.json"
     cmd = [
         TOOLS["nuclei"],
         "-l", str(subs_file),
@@ -6835,7 +7041,38 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
         return None
     out_json = DATA_DIR / f"nikto_{domain}.json"
 
+    # Nikto scans one host per process with no threading of its own, so the
+    # host list is split across the configured number of workers.
+    def scan_chunk(hosts: List[str]) -> List[Dict[str, Any]]:
+        return _nikto_scan_hosts(hosts, domain, config=config, job_domain=job_domain)
+
+    shard_results = run_tool_shards("nikto", list(subs), scan_chunk,
+                                    config=config, job_domain=job_domain)
     results: List[Dict[str, Any]] = []
+    for chunk_results in shard_results:
+        if chunk_results:
+            results.extend(chunk_results)
+
+    try:
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+        log(f"Nikto scan complete: {len(results)} findings written to {out_json.name}")
+        if job_domain:
+            job_log_append(job_domain,
+                           f"Nikto found {len(results)} total findings across {len(subs)} host(s), "
+                           f"saved to {out_json.name}", source="nikto")
+    except Exception as e:
+        log(f"Error writing Nikto JSON: {e}")
+        return None
+
+    return out_json if out_json.exists() else None
+
+
+def _nikto_scan_hosts(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
+                      job_domain: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Scan one slice of hosts with nikto, sequentially, returning its findings."""
+    results: List[Dict[str, Any]] = []
+    out_json = DATA_DIR / f"nikto_{domain}.json"
     for host in subs:
         target = f"http://{host}"
         cmd = [
@@ -6862,7 +7099,7 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
             )
         except FileNotFoundError:
             log("Nikto binary not found during run.")
-            return None
+            return results
         except Exception as e:
             log(f"Nikto error for {host}: {e}")
             if job_domain:
@@ -6883,18 +7120,7 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
             log(f"Nikto failed for {host}: {stderr_text[:300]}")
             continue
 
-    try:
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
-        # Log the results summary
-        log(f"Nikto scan complete: {len(results)} findings written to {out_json.name}")
-        if job_domain:
-            job_log_append(job_domain, f"Nikto found {len(results)} total findings across {len(subs)} host(s), saved to {out_json.name}", source="nikto")
-    except Exception as e:
-        log(f"Error writing Nikto JSON: {e}")
-        return None
-
-    return out_json if out_json.exists() else None
+    return results
 
 
 # ================== STATE ENRICHMENT ==================
@@ -8788,6 +9014,17 @@ button:hover { background:#1d4ed8; }
               <label>Global rate limit (seconds between tool calls, 0 = disabled)
                 <input id="settings-global-rate-limit" type="number" name="global_rate_limit" min="0" step="0.1" />
               </label>
+              <label>Workers per tool
+                <input id="settings-default-tool-workers" type="number" name="default_tool_workers" min="1" max="50" />
+                <small style="color:#94a3b8; font-size:0.85rem; display:block; margin-top:4px;">
+                  How many copies of each tool may run at once. Applies to every tool whose own slot count below is 0.
+                  httpx, nuclei and nikto also split a batch of hosts across this many processes, so raising it speeds up a single scan.
+                </small>
+              </label>
+              <div style="display:flex; gap:8px; align-items:center; margin:8px 0 16px;">
+                <button type="button" class="btn small" id="settings-reset-tool-slots">Use this for every tool</button>
+                <span class="muted" id="settings-tool-slots-hint" style="font-size:0.85rem;">Clears the per-tool overrides below.</span>
+              </div>
               <h4>Per-Tool Thread Controls</h4>
               <label>Subfinder threads
                 <input id="settings-subfinder-threads" type="number" name="subfinder_threads" min="1" />
@@ -8799,57 +9036,58 @@ button:hover { background:#1d4ed8; }
                 <input id="settings-findomain-threads" type="number" name="findomain_threads" min="1" />
               </label>
               <h4>Per-Tool Parallel Slots</h4>
+              <p class="muted" style="font-size:0.85rem; margin-top:0;">Leave at 0 to follow "Workers per tool" above. Set a number only where a tool needs its own limit.</p>
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">Subdomain Enumeration Tools</h5>
               <label>Amass parallel slots
-                <input id="settings-amass" type="number" name="max_parallel_amass" min="1" />
+                <input id="settings-amass" type="number" name="max_parallel_amass" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Subfinder parallel slots
-                <input id="settings-subfinder" type="number" name="max_parallel_subfinder" min="1" />
+                <input id="settings-subfinder" type="number" name="max_parallel_subfinder" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Assetfinder parallel slots
-                <input id="settings-assetfinder" type="number" name="max_parallel_assetfinder" min="1" />
+                <input id="settings-assetfinder" type="number" name="max_parallel_assetfinder" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Findomain parallel slots
-                <input id="settings-findomain" type="number" name="max_parallel_findomain" min="1" />
+                <input id="settings-findomain" type="number" name="max_parallel_findomain" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Sublist3r parallel slots
-                <input id="settings-sublist3r" type="number" name="max_parallel_sublist3r" min="1" />
+                <input id="settings-sublist3r" type="number" name="max_parallel_sublist3r" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Crt.sh parallel slots
-                <input id="settings-crtsh" type="number" name="max_parallel_crtsh" min="1" />
+                <input id="settings-crtsh" type="number" name="max_parallel_crtsh" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>GitHub-Subdomains parallel slots
-                <input id="settings-github-subdomains" type="number" name="max_parallel_github_subdomains" min="1" />
+                <input id="settings-github-subdomains" type="number" name="max_parallel_github_subdomains" min="0" max="50" placeholder="0 = use default" />
               </label>
               
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">DNS & HTTP Tools</h5>
               <label>DNSx parallel slots
-                <input id="settings-dnsx" type="number" name="max_parallel_dnsx" min="1" />
+                <input id="settings-dnsx" type="number" name="max_parallel_dnsx" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>HTTPx parallel slots
-                <input id="settings-httpx" type="number" name="max_parallel_httpx" min="1" />
+                <input id="settings-httpx" type="number" name="max_parallel_httpx" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>FFUF parallel slots
-                <input id="settings-ffuf" type="number" name="max_parallel_ffuf" min="1" />
+                <input id="settings-ffuf" type="number" name="max_parallel_ffuf" min="0" max="50" placeholder="0 = use default" />
               </label>
               
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">URL Discovery Tools</h5>
               <label>Waybackurls parallel slots
-                <input id="settings-waybackurls" type="number" name="max_parallel_waybackurls" min="1" />
+                <input id="settings-waybackurls" type="number" name="max_parallel_waybackurls" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>GAU parallel slots
-                <input id="settings-gau" type="number" name="max_parallel_gau" min="1" />
+                <input id="settings-gau" type="number" name="max_parallel_gau" min="0" max="50" placeholder="0 = use default" />
               </label>
               
               <h5 style="color: var(--muted); font-size: 14px; margin-top: 16px;">Scanning & Analysis Tools</h5>
               <label>Nuclei parallel slots
-                <input id="settings-nuclei" type="number" name="max_parallel_nuclei" min="1" />
+                <input id="settings-nuclei" type="number" name="max_parallel_nuclei" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Nikto parallel slots
-                <input id="settings-nikto" type="number" name="max_parallel_nikto" min="1" />
+                <input id="settings-nikto" type="number" name="max_parallel_nikto" min="0" max="50" placeholder="0 = use default" />
               </label>
               <label>Screenshot parallel slots
-                <input id="settings-gowitness" type="number" name="max_parallel_gowitness" min="1" />
+                <input id="settings-gowitness" type="number" name="max_parallel_gowitness" min="0" max="50" placeholder="0 = use default" />
               </label>
             </div>
             
@@ -9059,6 +9297,17 @@ button:hover { background:#1d4ed8; }
         </div>
 
         <div class="card">
+          <h3>Going faster</h3>
+          <p><strong>Settings &rarr; Workers per tool</strong> (default 5) controls how many copies of each tool may run at once. httpx, nuclei and nikto also split a batch of hosts across that many processes, so raising it speeds up a single target rather than only helping when several jobs run side by side.</p>
+          <ul class="tips">
+            <li>Per-tool slots below it stay at 0 to follow that number. Set one only where a tool needs its own limit - a rate-limited API, say.</li>
+            <li><strong>Max concurrent jobs</strong> is separate: it controls how many targets run at once, not how many workers each tool gets.</li>
+            <li>Watch <strong>System Resources</strong> after raising it. Dynamic mode will pull job counts back down if the box struggles.</li>
+            <li>From the command line: <code>python3 main.py --tool-workers 5</code>.</li>
+          </ul>
+        </div>
+
+        <div class="card">
           <h3>3 &middot; Watch it run</h3>
           <ul class="tips">
             <li><strong>Active Jobs</strong> shows each pipeline step, its progress and its log. Jobs can be paused, resumed, or have a stuck step skipped.</li>
@@ -9256,6 +9505,17 @@ setView(initialView || 'overview');
 // Wire up the "How to use this tool" view (function declarations are hoisted)
 initHowtoView();
 
+// "Use this for every tool": drop the per-tool overrides so they follow the
+// Workers per tool setting.
+if (settingsResetToolSlots) {
+  settingsResetToolSlots.addEventListener('click', () => {
+    document.querySelectorAll('input[name^="max_parallel_"]').forEach(input => { input.value = 0; });
+    settingsFormDirty = true;
+    const hint = document.getElementById('settings-tool-slots-hint');
+    if (hint) hint.textContent = 'Overrides cleared - save to apply.';
+  });
+}
+
 // Settings tabs handler
 const settingsTabs = document.querySelectorAll('.settings-tab');
 const settingsTabContents = document.querySelectorAll('.settings-subtab-content');
@@ -9320,6 +9580,8 @@ const settingsAssetfinderThreads = document.getElementById('settings-assetfinder
 const settingsFindomainThreads = document.getElementById('settings-findomain-threads');
 const settingsGlobalRateLimit = document.getElementById('settings-global-rate-limit');
 const settingsMaxJobs = document.getElementById('settings-max-jobs');
+const settingsDefaultToolWorkers = document.getElementById('settings-default-tool-workers');
+const settingsResetToolSlots = document.getElementById('settings-reset-tool-slots');
 const settingsAmass = document.getElementById('settings-amass');
 const settingsSubfinder = document.getElementById('settings-subfinder');
 const settingsAssetfinder = document.getElementById('settings-assetfinder');
@@ -13031,6 +13293,17 @@ function restoreAllCollapsibleStates() {
     }
   });
 }
+// Effective worker count for a tool: its own slot setting, or the global
+// "workers per tool" value when that slot is left at 0 (inherit).
+function toolSlots(config, tool) {
+  const own = config[`max_parallel_${tool}`];
+  const fallback = config.default_tool_workers || 5;
+  if (own === undefined || own === null || own === '' || Number(own) === 0) {
+    return `${fallback} (default)`;
+  }
+  return own;
+}
+
 function renderSettings(config, tools) {
   settingsSummary.innerHTML = `
     <div class="paths-grid">
@@ -13040,10 +13313,11 @@ function renderSettings(config, tools) {
       <div><strong>screenshots</strong><br><code>${escapeHtml(config.screenshots_dir || '')}</code></div>
       <div><strong>Concurrency</strong><br>
         Jobs: ${escapeHtml(config.max_running_jobs || 1)} ·
-        ffuf: ${escapeHtml(config.max_parallel_ffuf || 1)} ·
-        nuclei: ${escapeHtml(config.max_parallel_nuclei || 1)} ·
-        Nikto: ${escapeHtml(config.max_parallel_nikto || 1)} ·
-        Screenshots: ${escapeHtml(config.max_parallel_gowitness || 1)}
+        Workers per tool: ${escapeHtml(config.default_tool_workers || 5)} ·
+        ffuf: ${escapeHtml(toolSlots(config, 'ffuf'))} ·
+        nuclei: ${escapeHtml(toolSlots(config, 'nuclei'))} ·
+        Nikto: ${escapeHtml(toolSlots(config, 'nikto'))} ·
+        Screenshots: ${escapeHtml(toolSlots(config, 'gowitness'))}
       </div>
       <div><strong>Enumerators</strong><br>
         Amass: ${config.enable_amass === false ? 'disabled' : `enabled (timeout=${escapeHtml(config.amass_timeout || 600)}s)`} ·
@@ -13087,21 +13361,22 @@ function renderSettings(config, tools) {
     settingsFindomainThreads.value = config.findomain_threads || 40;
     settingsGlobalRateLimit.value = config.global_rate_limit || 0;
     settingsMaxJobs.value = config.max_running_jobs || 1;
-    settingsAmass.value = config.max_parallel_amass || 1;
-    settingsSubfinder.value = config.max_parallel_subfinder || 1;
-    settingsAssetfinder.value = config.max_parallel_assetfinder || 1;
-    settingsFindomain.value = config.max_parallel_findomain || 1;
-    settingsSublist3r.value = config.max_parallel_sublist3r || 1;
-    settingsCrtsh.value = config.max_parallel_crtsh || 1;
-    settingsGithubSubdomains.value = config.max_parallel_github_subdomains || 1;
-    settingsDnsx.value = config.max_parallel_dnsx || 1;
-    settingsHttpx.value = config.max_parallel_httpx || 1;
-    settingsFFUF.value = config.max_parallel_ffuf || 1;
-    settingsWaybackurls.value = config.max_parallel_waybackurls || 1;
-    settingsGau.value = config.max_parallel_gau || 1;
-    settingsNuclei.value = config.max_parallel_nuclei || 1;
-    settingsNikto.value = config.max_parallel_nikto || 1;
-    settingsGowitness.value = config.max_parallel_gowitness || 1;
+    if (settingsDefaultToolWorkers) settingsDefaultToolWorkers.value = config.default_tool_workers || 5;
+    settingsAmass.value = config.max_parallel_amass ?? 0;
+    settingsSubfinder.value = config.max_parallel_subfinder ?? 0;
+    settingsAssetfinder.value = config.max_parallel_assetfinder ?? 0;
+    settingsFindomain.value = config.max_parallel_findomain ?? 0;
+    settingsSublist3r.value = config.max_parallel_sublist3r ?? 0;
+    settingsCrtsh.value = config.max_parallel_crtsh ?? 0;
+    settingsGithubSubdomains.value = config.max_parallel_github_subdomains ?? 0;
+    settingsDnsx.value = config.max_parallel_dnsx ?? 0;
+    settingsHttpx.value = config.max_parallel_httpx ?? 0;
+    settingsFFUF.value = config.max_parallel_ffuf ?? 0;
+    settingsWaybackurls.value = config.max_parallel_waybackurls ?? 0;
+    settingsGau.value = config.max_parallel_gau ?? 0;
+    settingsNuclei.value = config.max_parallel_nuclei ?? 0;
+    settingsNikto.value = config.max_parallel_nikto ?? 0;
+    settingsGowitness.value = config.max_parallel_gowitness ?? 0;
     settingsDynamicMode.checked = config.dynamic_mode_enabled || false;
     settingsDynamicBaseJobs.value = config.dynamic_mode_base_jobs || 1;
     settingsDynamicMaxJobs.value = config.dynamic_mode_max_jobs || 10;
@@ -13327,6 +13602,7 @@ if (settingsForm) {
         findomain_threads: settingsFindomainThreads ? settingsFindomainThreads.value : '',
         global_rate_limit: settingsGlobalRateLimit ? settingsGlobalRateLimit.value : '',
         max_running_jobs: settingsMaxJobs ? settingsMaxJobs.value : '',
+        default_tool_workers: settingsDefaultToolWorkers ? settingsDefaultToolWorkers.value : '',
         max_parallel_amass: settingsAmass ? settingsAmass.value : '',
         max_parallel_subfinder: settingsSubfinder ? settingsSubfinder.value : '',
         max_parallel_assetfinder: settingsAssetfinder ? settingsAssetfinder.value : '',
@@ -19820,6 +20096,14 @@ def main():
         "--key",
         help="Path to SSL private key file (for HTTPS). If not provided with --https, a self-signed key will be generated."
     )
+    parser.add_argument(
+        "--tool-workers",
+        type=int,
+        metavar="N",
+        help=(f"How many copies of each tool may run at once (default {DEFAULT_TOOL_WORKERS}, max "
+              f"{MAX_TOOL_WORKERS}). httpx, nuclei and nikto also split a host batch across this many "
+              "processes. Saved to the config, so it sticks for later runs.")
+    )
 
     args = parser.parse_args()
 
@@ -19830,6 +20114,13 @@ def main():
     
     # Check if this is the first run and run setup wizard
     cfg = get_config()
+
+    if args.tool_workers is not None:
+        success, message, cfg = update_config_settings({"default_tool_workers": args.tool_workers})
+        log(message if not success else f"Workers per tool set to {cfg.get('default_tool_workers')}.")
+        if not success:
+            sys.exit(1)
+
     setup_completed = cfg.get("setup_completed", False)
     
     if not setup_completed and not args.skip_setup:

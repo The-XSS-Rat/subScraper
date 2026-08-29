@@ -19,7 +19,7 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 - **Screenshots gallery with pagination** – Browse large collections of screenshots with pagination controls (configurable page size, top/bottom navigation). See [CLEANUP_AND_PAGINATION.md](CLEANUP_AND_PAGINATION.md) for details.
 - **Command history & exports** – Every command executed is logged; you can export JSON or CSV snapshots at any time.
 - **Monitors** – Point the UI at a newline-delimited URL (supports wildcards like `*.corp.com` or `corp.*`). The monitor polls the file, launches new jobs when entries appear, and surfaces health/status in its own tab.
-- **Concurrency controls** – Configure max running jobs and per-tool worker caps so scans behave on your box.
+- **Concurrency controls** – One "workers per tool" setting (default 5) scales every tool at once; per-tool caps override it where a tool needs its own limit. httpx, nuclei and nikto split a host batch across those workers, so raising it speeds up a single scan, not just parallel jobs. Set it in Settings or with `--tool-workers N`.
 - **Docker support** – Multi-platform Docker container with all tools pre-installed. Works on Linux (amd64, arm64, armv7).
 - **OS-aware tool installation** – Detects the OS, distribution and package managers actually present (APT/DNF/pacman/zypper/apk/snap/Homebrew/MacPorts/Scoop/winget/Chocolatey/go/pip), installs each tool with a method that fits, skips anything that would hang on a sudo prompt, and prints instructions matching *your* machine instead of assuming Ubuntu.
 - **JS findings on the dashboard** – Secrets, hidden endpoints and parameters found in JavaScript are summarised on the Overview page, per target, so you see them without opening each report.

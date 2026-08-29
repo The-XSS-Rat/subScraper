@@ -613,7 +613,11 @@ class TestToolConcurrencyLimits:
             config_key = f"max_parallel_{tool.replace('-', '_')}"
             assert config_key in config, f"Missing config setting: {config_key}"
             assert isinstance(config[config_key], int), f"Config {config_key} should be an integer"
-            assert config[config_key] >= 1, f"Config {config_key} should be >= 1"
+            # 0 means "inherit default_tool_workers"; the resolved limit is what
+            # has to be usable.
+            assert config[config_key] >= 0, f"Config {config_key} should be >= 0"
+            assert main.tool_worker_limit(tool, config) >= 1, \
+                f"Config {config_key} must resolve to at least one worker"
     
     def test_apply_concurrency_limits_updates_gates(self):
         """Test that apply_concurrency_limits properly updates tool gates"""
