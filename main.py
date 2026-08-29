@@ -8002,6 +8002,7 @@ button:hover { background:#1d4ed8; }
 .workflow-tool.url-discovery { border-color:#ec4899; background:rgba(236,72,153,0.1); color:#f9a8d4; }
 .workflow-tool.scanning { border-color:#10b981; background:rgba(16,185,129,0.1); color:#a7f3d0; }
 .workflow-tool.capture { border-color:#6366f1; background:rgba(99,102,241,0.1); color:#c7d2fe; }
+.workflow-tool.js-analysis { border-color:#eab308; background:rgba(234,179,8,0.1); color:#fde68a; }
 .workflow-arrow { color:#64748b; font-size:18px; }
 .workflow-description { font-size:12px; color:var(--muted); margin-top:8px; margin-left:20px; }
 .btn { display:inline-block; padding:8px 16px; border-radius:8px; background:var(--accent); color:white; font-weight:600; border:none; cursor:pointer; transition:background .2s ease; text-decoration:none; }
@@ -10880,19 +10881,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 2: Subdomain Brute Force</div>
-      <div class="workflow-tools">
-        <span class="workflow-tool brute-force">FFUF</span>
-      </div>
-      <div class="workflow-description">DNS brute-forcing using wordlist to discover additional subdomains</div>
-    </div>
-    
-    <div style="text-align:center; margin:16px 0;">
-      <span class="workflow-arrow">↓</span>
-    </div>
-    
-    <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 3: HTTP Probing</div>
+      <div class="workflow-stage-title">Phase 2: HTTP Probing</div>
       <div class="workflow-tools">
         <span class="workflow-tool probing">HTTPX</span>
       </div>
@@ -10904,7 +10893,7 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 4: Visual Capture</div>
+      <div class="workflow-stage-title">Phase 3: Visual Capture</div>
       <div class="workflow-tools">
         <span class="workflow-tool capture">Gowitness</span>
       </div>
@@ -10916,21 +10905,45 @@ function renderWorkflowDiagram() {
     </div>
     
     <div class="workflow-stage">
-      <div class="workflow-stage-title">Phase 5: Vulnerability Scanning</div>
+      <div class="workflow-stage-title">Phase 4: Vulnerability Scanning</div>
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nuclei</span>
+      </div>
+      <div class="workflow-description">Template-based vulnerability scanning, using the official template set plus the templates bundled with this repo</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 5: JavaScript Analysis</div>
+      <div class="workflow-tools">
+        <span class="workflow-tool js-analysis">JS Scan</span>
+      </div>
+      <div class="workflow-description">Fetches JavaScript from live hosts and archived URLs, then extracts secrets, hidden endpoints and parameter names. Results appear in the JS Findings card above and on each domain page.</div>
+    </div>
+    
+    <div style="text-align:center; margin:16px 0;">
+      <span class="workflow-arrow">↓</span>
+    </div>
+    
+    <div class="workflow-stage">
+      <div class="workflow-stage-title">Phase 6: Web Server Scanning</div>
+      <div class="workflow-tools">
         <span class="workflow-tool scanning">Nikto</span>
       </div>
-      <div class="workflow-description">Automated vulnerability scanning and security checks on discovered targets</div>
+      <div class="workflow-description">Web server misconfiguration and dated-software checks. Slow, and skipped when a run opts out of it.</div>
     </div>
     
     <div style="margin-top:24px; padding:16px; background:#0b152c; border-radius:12px; border:1px solid #1f2937;">
-      <div style="color:#fbbf24; font-weight:600; margin-bottom:8px;">📋 Manual Content Discovery</div>
+      <div style="color:#fbbf24; font-weight:600; margin-bottom:8px;">📋 Manual, from subdomain pages</div>
       <div class="workflow-tools">
+        <span class="workflow-tool brute-force">FFUF</span>
         <span class="workflow-tool url-discovery">Waybackurls</span>
         <span class="workflow-tool url-discovery">GAU</span>
       </div>
-      <div class="workflow-description">URL discovery tools can be triggered manually from subdomain detail pages</div>
+      <div class="workflow-description">Vhost brute-forcing and archived-URL discovery are triggered per subdomain, not by the pipeline. Their URLs feed the JS scan on the next run.</div>
     </div>
   `;
   

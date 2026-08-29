@@ -484,3 +484,23 @@ class TestBundledNucleiTemplates:
     def test_settings_toggle_in_ui(self):
         assert 'id="settings-bundled-nuclei-templates"' in main.INDEX_HTML
         assert "use_bundled_nuclei_templates" in main.INDEX_HTML
+
+
+class TestWorkflowDiagram:
+    """The Overview diagram must match the steps the pipeline actually runs."""
+
+    def test_js_scan_is_a_phase(self):
+        assert "Phase 5: JavaScript Analysis" in main.INDEX_HTML
+        assert 'class="workflow-tool js-analysis">JS Scan<' in main.INDEX_HTML
+
+    def test_phases_cover_every_pipeline_step(self):
+        diagram_steps = {"amass", "subfinder", "assetfinder", "findomain", "sublist3r",
+                         "crtsh", "github-subdomains", "dnsx", "httpx", "screenshots",
+                         "nuclei", "jsscan", "nikto"}
+        assert set(main.PIPELINE_STEPS) == diagram_steps
+
+    def test_manual_only_tools_are_not_shown_as_phases(self):
+        # ffuf, waybackurls and gau are triggered per subdomain, not by the pipeline.
+        for tool in ("FFUF", "Waybackurls", "GAU"):
+            assert tool in main.INDEX_HTML.split("Manual, from subdomain pages")[1][:600]
+        assert "Phase 2: Subdomain Brute Force" not in main.INDEX_HTML
