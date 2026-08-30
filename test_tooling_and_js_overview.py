@@ -203,6 +203,7 @@ class TestUnattendedInstallSafety:
                       os_release={"ID": "debian"}, sudo_ok=False)
         monkeypatch.setattr(main, "_package_available", lambda manager, package: True)
         monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: None)
+        main.invalidate_tool_path_cache()
         ran = []
         monkeypatch.setattr(main, "_run_install_step", lambda tool, step: ran.append(step) or True)
         assert main.ensure_tool_installed("nikto") is False
@@ -218,6 +219,7 @@ class TestUnattendedInstallSafety:
             return "/opt/homebrew/bin/nuclei" if calls["n"] > 1 else None
 
         monkeypatch.setattr(main, "_resolve_tool_path", resolve)
+        main.invalidate_tool_path_cache()
         steps = []
         monkeypatch.setattr(main, "_run_install_step", lambda tool, step: steps.append(step["manager"]) or True)
         assert main.ensure_tool_installed("nuclei") is True
@@ -356,12 +358,14 @@ class TestToolingEndpoints:
 
     def test_missing_tool_carries_instructions(self, http_api, monkeypatch):
         monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: None)
+        main.invalidate_tool_path_cache()          # tool paths are cached between polls
         status, payload = http_api("GET", "/api/tools")
         assert status == 200
         nuclei = next(tool for tool in payload["tools"] if tool["tool"] == "nuclei")
         assert nuclei["installed"] is False
         assert nuclei["instructions"]
         assert payload["platform"]["system_label"] in nuclei["instructions"]
+        main.invalidate_tool_path_cache()
 
     def test_install_rejects_unknown_tool(self, http_api):
         status, payload = http_api("POST", "/api/tools/install", {"tools": ["definitely-not-a-tool"]})
@@ -504,3 +508,58 @@ class TestWorkflowDiagram:
         for tool in ("FFUF", "Waybackurls", "GAU"):
             assert tool in main.INDEX_HTML.split("Manual, from subdomain pages")[1][:600]
         assert "Phase 2: Subdomain Brute Force" not in main.INDEX_HTML
+
+
+class TestToolPathCaching:
+    """
+    Tool status is read on every dashboard poll, and resolving httpx/nuclei runs
+    the binary with -version. Those probes have to be cached.
+    """
+
+    def setup_method(self):
+        main.invalidate_tool_path_cache()
+
+    def teardown_method(self):
+        main.invalidate_tool_path_cache()
+
+    def test_second_lookup_does_not_reprobe(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main, "_resolve_tool_path",
+                            lambda tool: calls.append(tool) or "/usr/bin/nuclei")
+        assert main.resolve_tool_path_cached("nuclei") == "/usr/bin/nuclei"
+        assert main.resolve_tool_path_cached("nuclei") == "/usr/bin/nuclei"
+        assert main.resolve_tool_path_cached("nuclei") == "/usr/bin/nuclei"
+        assert calls == ["nuclei"]
+
+    def test_missing_tool_is_cached_too(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: calls.append(tool) or None)
+        assert main.resolve_tool_path_cached("nikto") is None
+        assert main.resolve_tool_path_cached("nikto") is None
+        assert calls == ["nikto"]
+
+    def test_expired_entry_is_refreshed(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: calls.append(tool) or "/bin/x")
+        main.resolve_tool_path_cached("httpx")
+        main.resolve_tool_path_cached("httpx", max_age=0)
+        assert len(calls) == 2
+
+    def test_invalidate_clears_one_or_all(self, monkeypatch):
+        monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: "/bin/x")
+        main.resolve_tool_path_cached("httpx")
+        main.resolve_tool_path_cached("nuclei")
+        main.invalidate_tool_path_cache("httpx")
+        assert "httpx" not in main.TOOL_PATH_CACHE
+        assert "nuclei" in main.TOOL_PATH_CACHE
+        main.invalidate_tool_path_cache()
+        assert main.TOOL_PATH_CACHE == {}
+
+    def test_state_payload_uses_the_cache(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main, "_resolve_tool_path", lambda tool: calls.append(tool) or "/bin/x")
+        for _ in range(3):
+            for name in main.TOOLS:
+                if name != "crtsh":
+                    main.resolve_tool_path_cached(name)
+        assert len(calls) == len(main.TOOLS) - 1     # one probe per tool, not per poll

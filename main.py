@@ -3964,6 +3964,37 @@ def add_completed_job(domain: str, job_data: Dict[str, Any]) -> None:
     save_completed_jobs()
 
 
+# Resolving a tool means stat()ing candidate paths and, for httpx and nuclei,
+# running the binary with -version to make sure it is the right project's tool.
+# The dashboard asks for tool status on every poll, so the answer is cached.
+TOOL_PATH_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+TOOL_PATH_CACHE_LOCK = threading.Lock()
+TOOL_PATH_CACHE_TTL = 300.0  # seconds
+
+
+def invalidate_tool_path_cache(tool: Optional[str] = None) -> None:
+    """Drop cached tool locations after an install, or when asked to re-check."""
+    with TOOL_PATH_CACHE_LOCK:
+        if tool:
+            TOOL_PATH_CACHE.pop(tool, None)
+        else:
+            TOOL_PATH_CACHE.clear()
+
+
+def resolve_tool_path_cached(tool: str, max_age: Optional[float] = None) -> Optional[str]:
+    """Cached _resolve_tool_path() for the polling paths (state payload, UI)."""
+    ttl = TOOL_PATH_CACHE_TTL if max_age is None else max_age
+    now = time.time()
+    with TOOL_PATH_CACHE_LOCK:
+        cached = TOOL_PATH_CACHE.get(tool)
+        if cached and (now - cached[0]) < ttl:
+            return cached[1]
+    resolved = _resolve_tool_path(tool)
+    with TOOL_PATH_CACHE_LOCK:
+        TOOL_PATH_CACHE[tool] = (time.time(), resolved)
+    return resolved
+
+
 def _running_on_windows() -> bool:
     """Single place to ask "is this Windows?" so tests can simulate it."""
     return os.name == "nt"
@@ -4529,7 +4560,7 @@ def ensure_tool_installed(tool: str) -> bool:
         TOOLS[tool] = "crtsh"  # virtual, API-based
         return True
 
-    resolved = _resolve_tool_path(tool)
+    resolved = resolve_tool_path_cached(tool)
     if resolved:
         TOOLS[tool] = resolved
         log(f"{tool} already installed.")
@@ -4550,6 +4581,7 @@ def ensure_tool_installed(tool: str) -> bool:
     for step in runnable:
         if not _run_install_step(tool, step):
             continue
+        invalidate_tool_path_cache(tool)
         resolved = _resolve_tool_path(tool)
         if resolved:
             TOOLS[tool] = resolved
@@ -4567,7 +4599,7 @@ def tool_status_snapshot(include_instructions: bool = True) -> Dict[str, Any]:
     info = detect_platform()
     tools: List[Dict[str, Any]] = []
     for name in TOOLS.keys():
-        path = "crtsh" if name == "crtsh" else (_resolve_tool_path(name) or "")
+        path = "crtsh" if name == "crtsh" else (resolve_tool_path_cached(name) or "")
         entry: Dict[str, Any] = {
             "tool": name,
             "installed": bool(path),
@@ -9505,17 +9537,6 @@ setView(initialView || 'overview');
 // Wire up the "How to use this tool" view (function declarations are hoisted)
 initHowtoView();
 
-// "Use this for every tool": drop the per-tool overrides so they follow the
-// Workers per tool setting.
-if (settingsResetToolSlots) {
-  settingsResetToolSlots.addEventListener('click', () => {
-    document.querySelectorAll('input[name^="max_parallel_"]').forEach(input => { input.value = 0; });
-    settingsFormDirty = true;
-    const hint = document.getElementById('settings-tool-slots-hint');
-    if (hint) hint.textContent = 'Overrides cleared - save to apply.';
-  });
-}
-
 // Settings tabs handler
 const settingsTabs = document.querySelectorAll('.settings-tab');
 const settingsTabContents = document.querySelectorAll('.settings-subtab-content');
@@ -9582,6 +9603,17 @@ const settingsGlobalRateLimit = document.getElementById('settings-global-rate-li
 const settingsMaxJobs = document.getElementById('settings-max-jobs');
 const settingsDefaultToolWorkers = document.getElementById('settings-default-tool-workers');
 const settingsResetToolSlots = document.getElementById('settings-reset-tool-slots');
+
+// "Use this for every tool": drop the per-tool overrides so they follow the
+// Workers per tool setting.
+if (settingsResetToolSlots) {
+  settingsResetToolSlots.addEventListener('click', () => {
+    document.querySelectorAll('input[name^="max_parallel_"]').forEach(input => { input.value = 0; });
+    settingsFormDirty = true;
+    const hint = document.getElementById('settings-tool-slots-hint');
+    if (hint) hint.textContent = 'Overrides cleared - save to apply.';
+  });
+}
 const settingsAmass = document.getElementById('settings-amass');
 const settingsSubfinder = document.getElementById('settings-subfinder');
 const settingsAssetfinder = document.getElementById('settings-assetfinder');
@@ -15481,7 +15513,7 @@ def build_state_payload_summary() -> Dict[str, Any]:
     tool_info = {}
     for name in TOOLS.keys():
         try:
-            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+            tool_info[name] = ("crtsh" if name == "crtsh" else (resolve_tool_path_cached(name) or ""))
         except Exception:
             tool_info[name] = ""
     return {
@@ -15547,7 +15579,7 @@ def build_state_payload() -> Dict[str, Any]:
     tool_info = {}
     for name in TOOLS.keys():
         try:
-            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+            tool_info[name] = ("crtsh" if name == "crtsh" else (resolve_tool_path_cached(name) or ""))
         except Exception:
             tool_info[name] = ""
     return {
@@ -15733,7 +15765,7 @@ def build_state_payload_paginated(page: int = 1, per_page: int = 50, full: bool 
     tool_info = {}
     for name in TOOLS.keys():
         try:
-            tool_info[name] = ("crtsh" if name == "crtsh" else (_resolve_tool_path(name) or ""))
+            tool_info[name] = ("crtsh" if name == "crtsh" else (resolve_tool_path_cached(name) or ""))
         except Exception:
             tool_info[name] = ""
     
@@ -18941,6 +18973,7 @@ form.addEventListener('submit', async (e) => {
             if refresh:
                 detect_platform(refresh=True)
                 _PKG_AVAILABILITY_CACHE.clear()
+                invalidate_tool_path_cache()
             self._send_json({"success": True, **tool_status_snapshot()})
             return
         if self.path.startswith("/api/js-findings"):
