@@ -478,6 +478,52 @@ class TestHTTPHandlerAllEndpoints:
         main.CommandCenterHandler.do_GET(handler)
         handler._send_bytes.assert_called_once()
 
+    def test_get_api_export_domain_txt(self):
+        """Test GET /api/export/domain/example.com/txt"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {}
+                    }
+                }
+            }
+        }
+        handler = self.create_mock_handler('/api/export/domain/example.com/txt')
+        with patch('main.load_state', return_value=state):
+            main.CommandCenterHandler.do_GET(handler)
+        assert handler.send_response.called
+        assert handler.wfile.write.called
+
+    def test_get_api_export_domain_csv(self):
+        """Test GET /api/export/domain/example.com/csv"""
+        state = {
+            "targets": {
+                "example.com": {
+                    "subdomains": {
+                        "www.example.com": {}
+                    }
+                }
+            }
+        }
+        handler = self.create_mock_handler('/api/export/domain/example.com/csv')
+        with patch('main.load_state', return_value=state):
+            main.CommandCenterHandler.do_GET(handler)
+        assert handler.send_response.called
+        assert handler.wfile.write.called
+
+    def test_get_api_export_domain_not_found(self):
+        """Test GET /api/export/domain/missing.com/txt returns 404"""
+        state = {"targets": {}}
+        handler = self.create_mock_handler('/api/export/domain/missing.com/txt')
+        with patch('main.load_state', return_value=state):
+            main.CommandCenterHandler.do_GET(handler)
+        handler._send_json.assert_called_once()
+        call_args = handler._send_json.call_args
+        response_body = call_args[0][0]
+        assert response_body.get("success") is False
+        assert call_args[1].get("status") is not None or len(call_args[0]) > 1
+
 
 class TestCLIArgumentParsing:
     """Test CLI argument parsing and main function"""
