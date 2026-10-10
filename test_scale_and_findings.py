@@ -159,8 +159,11 @@ class TestJobSnapshotScaling:
 
 @pytest.fixture
 def temp_db(tmp_path):
+    """Isolate both the database and DATA_DIR, so no test writes into recon_data/."""
     db_file = tmp_path / "recon.db"
-    with patch.object(main, "DB_FILE", db_file), patch.object(main, "DB_CONN", None):
+    with patch.object(main, "DB_FILE", db_file), \
+         patch.object(main, "DB_CONN", None), \
+         patch.object(main, "DATA_DIR", tmp_path):
         main.init_database()
         yield db_file
         conn = main.DB_CONN
@@ -437,3 +440,148 @@ class TestPipelineWiring:
                  patch.object(main, "DATA_DIR", Path(tmp)):
                 main.httpx_scan(subs, "x.com")
         assert "-cname" in captured["cmd"]
+
+
+# --------------------------------------------------------------------------
+# Nikto targeting and scheduling
+# --------------------------------------------------------------------------
+
+def _seed_hosts(domain, hosts):
+    """hosts: {name: url-or-None}. None means httpx found nothing serving."""
+    state = {"targets": {}}
+    main.ensure_target_state(state, domain)
+    main.add_subdomains_to_state(state, domain, list(hosts), "test")
+    submap = state["targets"][domain]["subdomains"]
+    for host, url in hosts.items():
+        if url:
+            submap[host]["httpx"] = {"url": url, "status_code": 200, "cname": []}
+    with patch.object(main, "request_dashboard_refresh", lambda: None):
+        main.save_state(state)
+
+
+class TestNiktoTargeting:
+    def test_only_serving_hosts_become_targets(self):
+        submap = {
+            "live.x.com": {"httpx": {"url": "https://live.x.com", "status_code": 200}},
+            "dead.x.com": {"httpx": None},
+            "nostatus.x.com": {"httpx": {"url": "https://nostatus.x.com"}},
+            "nourl.x.com": {"httpx": {"status_code": 200}},
+        }
+        targets = main.nikto_targets(submap, sorted(submap))
+        assert targets == [("live.x.com", "https://live.x.com")]
+
+    def test_target_uses_the_scheme_httpx_found(self):
+        """
+        Nikto used to be pointed at http://<host> regardless. On a target whose
+        live hosts are HTTPS-only that means scanning a closed port 80 and
+        waiting out the timeout for every one of them.
+        """
+        submap = {"a.x.com": {"httpx": {"url": "https://a.x.com:8443", "status_code": 200}}}
+        assert main.nikto_targets(submap, ["a.x.com"]) == [("a.x.com", "https://a.x.com:8443")]
+
+
+class TestNiktoLoop:
+    def test_all_dead_hosts_terminate_without_running_nikto(self, temp_db):
+        """
+        The dead hosts still have to be marked off. If they are filtered out of
+        the work list but left pending, the loop sees them again every pass and
+        never finishes.
+        """
+        _seed_hosts("d.com", {f"h{i}.d.com": None for i in range(5)})
+        done = threading.Event(); done.set()
+
+        with patch.object(main, "nikto_scan") as scan, \
+             patch.object(main, "request_dashboard_refresh", lambda: None):
+            main._run_nikto_loop("d.com", {}, None, done)
+
+        scan.assert_not_called()
+        target = main.load_state("d.com")["targets"]["d.com"]
+        assert target["flags"]["nikto_done"] is True
+        for entry in target["subdomains"].values():
+            assert entry["scans"]["nikto"]
+
+    def test_live_hosts_are_scanned_and_dead_ones_skipped(self, temp_db):
+        _seed_hosts("d.com", {
+            "live1.d.com": "https://live1.d.com",
+            "live2.d.com": "https://live2.d.com",
+            "dead1.d.com": None,
+            "dead2.d.com": None,
+        })
+        done = threading.Event(); done.set()
+        seen = []
+
+        def fake_scan(targets, domain, config=None, job_domain=None):
+            seen.append(sorted(h for h, _ in targets))
+            path = main.DATA_DIR / f"nikto_{domain}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("[]")
+            return path
+
+        with patch.object(main, "nikto_scan", fake_scan), \
+             patch.object(main, "request_dashboard_refresh", lambda: None):
+            main._run_nikto_loop("d.com", {}, None, done)
+
+        assert seen == [["live1.d.com", "live2.d.com"]]
+        assert main.load_state("d.com")["targets"]["d.com"]["flags"]["nikto_done"] is True
+
+    def test_live_hosts_past_the_cap_are_deferred_not_marked_done(self, temp_db):
+        """
+        The per-batch cap bounds a pass, it does not silently drop hosts: a live
+        host over the cap must come back on the next pass, not be recorded as
+        scanned without having been.
+        """
+        _seed_hosts("d.com", {f"h{i}.d.com": f"https://h{i}.d.com" for i in range(5)})
+        done = threading.Event(); done.set()
+        batches = []
+
+        def fake_scan(targets, domain, config=None, job_domain=None):
+            batches.append(sorted(h for h, _ in targets))
+            path = main.DATA_DIR / f"nikto_{domain}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("[]")
+            return path
+
+        with patch.object(main, "nikto_scan", fake_scan), \
+             patch.object(main, "request_dashboard_refresh", lambda: None):
+            main._run_nikto_loop("d.com", {"nikto_max_hosts": 2}, None, done)
+
+        assert [len(b) for b in batches] == [2, 2, 1]
+        # Every host scanned exactly once, none skipped.
+        assert sorted(h for b in batches for h in b) == sorted(f"h{i}.d.com" for i in range(5))
+
+
+class TestNiktoCommand:
+    def _capture(self, cfg):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["timeout"] = kwargs.get("timeout")
+            raise FileNotFoundError  # stop before parsing
+
+        with patch.object(main.subprocess, "run", fake_run):
+            main._nikto_scan_hosts([("a.x.com", "https://a.x.com")], "x.com", config=cfg)
+        return captured
+
+    def test_process_timeout_is_set(self):
+        """
+        -maxtime does not bound an unreachable host: nikto blocks in connect
+        before it applies, which measured ~80s per blackholed host. Only a
+        timeout on the process itself caps that.
+        """
+        captured = self._capture({"nikto_host_timeout": 60})
+        assert captured["timeout"] == 90
+
+    def test_non_interactive_flags_are_passed(self):
+        cmd = self._capture({})["cmd"]
+        assert "-nointeractive" in cmd
+        assert cmd[cmd.index("-ask") + 1] == "no"
+
+    def test_timeouts_are_configurable(self):
+        cmd = self._capture({"nikto_host_timeout": 45, "nikto_request_timeout": 5})["cmd"]
+        assert cmd[cmd.index("-maxtime") + 1] == "45s"
+        assert cmd[cmd.index("-timeout") + 1] == "5"
+
+    def test_scans_the_url_not_a_hardcoded_scheme(self):
+        cmd = self._capture({})["cmd"]
+        assert cmd[cmd.index("-h") + 1] == "https://a.x.com"

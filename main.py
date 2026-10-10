@@ -1820,6 +1820,10 @@ def default_config() -> Dict[str, Any]:
         "enable_js_scan": True,
         "enable_takeover_scan": True,
         "enable_cors_scan": True,
+        "nikto_host_timeout": 120,
+        "nikto_request_timeout": 10,
+        "nikto_max_hosts": 200,
+        "nikto_async": True,
         "use_bundled_nuclei_templates": True,
         "js_scan_max_files": 300,
         "js_scan_max_html_hosts": 60,
@@ -3451,7 +3455,7 @@ def update_config_settings(values: Dict[str, Any]) -> Tuple[bool, str, Dict[str,
 
     for key in ["enable_subfinder", "enable_assetfinder", "enable_findomain", "enable_sublist3r", "enable_screenshots", "enable_crtsh", "enable_github_subdomains", "enable_dnsx", "enable_waybackurls", "enable_gau", "enable_js_scan",
                 "enable_takeover_scan", "enable_cors_scan",
-                "use_bundled_nuclei_templates"]:
+                "nikto_async", "use_bundled_nuclei_templates"]:
         if key in values:
             new_value = bool_from_value(values.get(key), cfg.get(key, True))
             if cfg.get(key, True) != new_value:
@@ -6847,6 +6851,87 @@ def summarize_cors(cors: Optional[Dict[str, Any]], max_findings: int = 5) -> Opt
     }
 
 
+def _run_nikto_loop(domain: str, config: Dict[str, Any], job_domain: Optional[str],
+                    enumerators_done_event: threading.Event) -> None:
+    """
+    Run nikto over a target's hosts until no unscanned hosts remain.
+
+    Runs either inline as the last pipeline step or on its own thread, so it
+    must not assume the job record still exists.
+    """
+    def update_step(step_name: str, status: Optional[str] = None,
+                    message: Optional[str] = None, progress: Optional[int] = None) -> None:
+        job_step_update(job_domain, step_name, status=status, message=message, progress=progress)
+
+    nikto_processed: set = set()
+    while True:
+        state = load_state(domain)
+        tgt_state = ensure_target_state(state, domain)
+        flags = tgt_state["flags"]
+        submap = tgt_state["subdomains"]
+        pending = [
+            host for host in sorted(submap.keys())
+            if host not in nikto_processed and not (submap.get(host) or {}).get("scans", {}).get("nikto")
+        ]
+        if not flags.get("nikto_done") and not nikto_processed:
+            log(f"=== nikto scan for {domain} ({len(submap)} hosts tracked) ===")
+        if not pending:
+            if enumerators_done_event.is_set():
+                flags["nikto_done"] = True
+                save_state(state)
+                update_step("nikto", status="completed", message="Nikto scan finished.", progress=100)
+                break
+            job_sleep(job_domain, 5)
+            continue
+
+        # Only hosts httpx found serving are worth a nikto process, but every
+        # pending host is marked scanned regardless — otherwise the dead ones
+        # stay pending forever and this loop never terminates.
+        live = nikto_targets(submap, pending)
+        live_hosts = {host for host, _ in live}
+        # Hosts with nothing serving are marked off without a nikto process;
+        # live hosts past the per-batch cap stay pending for the next pass
+        # rather than being marked scanned without having been scanned.
+        not_serving = [host for host in pending if host not in live_hosts]
+        max_hosts = max(1, int(config.get("nikto_max_hosts", 200) or 200))
+        targets = live[:max_hosts]
+        deferred = len(live) - len(targets)
+
+        if not targets:
+            mark_hosts_scanned(state, domain, not_serving, "nikto")
+            nikto_processed.update(not_serving)
+            save_state(state)
+            job_log_append(job_domain,
+                           f"Nikto: no live hosts among {len(pending)} pending; nothing to scan.",
+                           "nikto")
+            continue
+
+        done_now = [host for host, _ in targets] + not_serving
+        update_step("nikto", status="running",
+                    message=(f"Nikto scanning {len(targets)} live host(s)"
+                             + (f", {len(not_serving)} not serving" if not_serving else "")
+                             + (f", {deferred} queued for the next batch" if deferred else "")),
+                    progress=40)
+        nikto_json = nikto_scan(targets, domain, config=config, job_domain=job_domain)
+        if not nikto_json:
+            job_log_append(job_domain, "Nikto batch failed.", "nikto")
+            update_step("nikto", status="error",
+                        message="Nikto batch failed. Check logs for details.", progress=100)
+            # Mark these hosts as processed (failed) so we don't retry them
+            mark_hosts_scanned(state, domain, pending, "nikto")
+            nikto_processed.update(pending)
+            flags["nikto_done"] = True
+            save_state(state)
+            break
+        enrich_state_with_nikto(state, domain, nikto_json)
+        mark_hosts_scanned(state, domain, done_now, "nikto")
+        nikto_processed.update(done_now)
+        save_state(state)
+        job_log_append(job_domain,
+                       f"Nikto scanned {len(targets)} live host(s); "
+                       f"{len(not_serving)} not serving.", "nikto")
+
+
 def run_downstream_pipeline(
     domain: str,
     wordlist: Optional[str],
@@ -7143,43 +7228,25 @@ def run_downstream_pipeline(
     # ---------- nikto ----------
     if skip_nikto:
         update_step("nikto", status="skipped", message="Nikto skipped per run options.", progress=0)
+    elif config.get("nikto_async", True):
+        # Nikto is by far the slowest step and nothing downstream depends on it,
+        # so the run does not wait for it. The thread keeps writing findings into
+        # the target's state; job_step_update and job_log_append no-op once the
+        # job record is gone, and every line still lands in the history table.
+        update_step("nikto", status="running",
+                    message="Nikto running in the background; the rest of the run is complete.",
+                    progress=40)
+        job_log_append(job_domain,
+                       "Nikto started in the background. Findings will appear on the domain "
+                       "page as they land.", "nikto")
+        threading.Thread(
+            target=_run_nikto_loop,
+            args=(domain, config, job_domain, enumerators_done_event),
+            name=f"nikto-{domain}",
+            daemon=True,
+        ).start()
     else:
-        nikto_processed: set = set()
-        while True:
-            state = load_state(domain)
-            tgt_state = ensure_target_state(state, domain)
-            flags = tgt_state["flags"]
-            submap = tgt_state["subdomains"]
-            new_hosts = [
-                host for host in sorted(submap.keys())
-                if host not in nikto_processed and not (submap.get(host) or {}).get("scans", {}).get("nikto")
-            ]
-            if not flags.get("nikto_done") and not nikto_processed:
-                log(f"=== nikto scan for {domain} ({len(submap)} hosts tracked) ===")
-            if not new_hosts:
-                if enumerators_done_event.is_set():
-                    flags["nikto_done"] = True
-                    save_state(state)
-                    update_step("nikto", status="completed", message="Nikto scan finished.", progress=100)
-                    break
-                job_sleep(job_domain, 5)
-                continue
-            update_step("nikto", status="running", message=f"Nikto scanning {len(new_hosts)} pending hosts", progress=40)
-            nikto_json = nikto_scan(new_hosts, domain, config=config, job_domain=job_domain)
-            if not nikto_json:
-                job_log_append(job_domain, "Nikto batch failed.", "nikto")
-                update_step("nikto", status="error", message="Nikto batch failed. Check logs for details.", progress=100)
-                # Mark these hosts as processed (failed) so we don't retry them
-                mark_hosts_scanned(state, domain, new_hosts, "nikto")
-                nikto_processed.update(new_hosts)
-                flags["nikto_done"] = True
-                save_state(state)
-                break
-            enrich_state_with_nikto(state, domain, nikto_json)
-            mark_hosts_scanned(state, domain, new_hosts, "nikto")
-            nikto_processed.update(new_hosts)
-            save_state(state)
-            job_log_append(job_domain, f"Nikto scanned {len(new_hosts)} hosts.", "nikto")
+        _run_nikto_loop(domain, config, job_domain, enumerators_done_event)
 
     log("Pipeline finished for this run.")
 
@@ -7754,7 +7821,32 @@ def _parse_nikto_output(host: str, stdout_text: str) -> List[Dict[str, Any]]:
     return findings
 
 
-def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
+def nikto_targets(submap: Dict[str, Any], hosts: List[str]) -> List[Tuple[str, str]]:
+    """
+    Narrow a host list to what nikto can usefully scan: hosts httpx found
+    serving, addressed on the scheme and port it actually answered on.
+
+    This is where nikto's runtime came from. It was handed every subdomain ever
+    discovered, addressed as http://<host>, which is port 80 regardless of where
+    the service actually is. On one real target that meant 22,598 nikto
+    processes for 269 serving hosts — roughly 30 minutes of wall clock spent
+    confirming that dead hosts are dead — and of those 269, all but 3 answered
+    only on 443, where "no web server found on :80" is all port 80 had to say.
+    Addressing the URL httpx recorded fixes both the host set and the port.
+    """
+    targets: List[Tuple[str, str]] = []
+    for host in hosts:
+        entry = submap.get(host) or {}
+        httpx_data = entry.get("httpx") or {}
+        status = httpx_data.get("status_code")
+        url = httpx_data.get("url")
+        if not status or not url:
+            continue
+        targets.append((host, url))
+    return targets
+
+
+def nikto_scan(targets: List[Tuple[str, str]], domain: str, config: Optional[Dict[str, Any]] = None,
                job_domain: Optional[str] = None) -> Path:
     if not ensure_tool_installed("nikto"):
         return None
@@ -7762,10 +7854,10 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
 
     # Nikto scans one host per process with no threading of its own, so the
     # host list is split across the configured number of workers.
-    def scan_chunk(hosts: List[str]) -> List[Dict[str, Any]]:
-        return _nikto_scan_hosts(hosts, domain, config=config, job_domain=job_domain)
+    def scan_chunk(chunk: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
+        return _nikto_scan_hosts(chunk, domain, config=config, job_domain=job_domain)
 
-    shard_results = run_tool_shards("nikto", list(subs), scan_chunk,
+    shard_results = run_tool_shards("nikto", list(targets), scan_chunk,
                                     config=config, job_domain=job_domain)
     results: List[Dict[str, Any]] = []
     for chunk_results in shard_results:
@@ -7778,7 +7870,7 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
         log(f"Nikto scan complete: {len(results)} findings written to {out_json.name}")
         if job_domain:
             job_log_append(job_domain,
-                           f"Nikto found {len(results)} total findings across {len(subs)} host(s), "
+                           f"Nikto found {len(results)} total findings across {len(targets)} host(s), "
                            f"saved to {out_json.name}", source="nikto")
     except Exception as e:
         log(f"Error writing Nikto JSON: {e}")
@@ -7787,16 +7879,31 @@ def nikto_scan(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = 
     return out_json if out_json.exists() else None
 
 
-def _nikto_scan_hosts(subs: List[str], domain: str, config: Optional[Dict[str, Any]] = None,
+def _nikto_scan_hosts(targets: List[Tuple[str, str]], domain: str,
+                      config: Optional[Dict[str, Any]] = None,
                       job_domain: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Scan one slice of hosts with nikto, sequentially, returning its findings."""
+    """Scan one slice of (host, url) pairs with nikto, sequentially."""
     results: List[Dict[str, Any]] = []
     out_json = DATA_DIR / f"nikto_{domain}.json"
-    for host in subs:
-        target = f"http://{host}"
+    cfg = config or {}
+    host_timeout = max(30, int(cfg.get("nikto_host_timeout", 120) or 120))
+    request_timeout = max(2, int(cfg.get("nikto_request_timeout", 10) or 10))
+
+    for host, target in targets:
         cmd = [
             TOOLS["nikto"],
             "-h", target,
+            # Nikto's own budget. Without it a slow host is scanned until nikto
+            # decides it is finished, which on a tarpit is effectively never.
+            "-maxtime", f"{host_timeout}s",
+            # Per-request cap. Nikto retries the initial connect, so this does
+            # not bound an unreachable host on its own, but it roughly halves
+            # how long one costs before the process timeout below steps in.
+            "-timeout", str(request_timeout),
+            # Never block on a prompt; a prompt in a background shard hangs the
+            # whole shard with no output to explain why.
+            "-nointeractive",
+            "-ask", "no",
         ]
         context = {
             "DOMAIN": domain,
@@ -7807,6 +7914,7 @@ def _nikto_scan_hosts(subs: List[str], domain: str, config: Optional[Dict[str, A
         cmd = apply_template_flags("nikto", cmd, context, config)
         log(f"Running nikto against {target}")
         if job_domain:
+            job_pause_point(job_domain)
             job_log_append(job_domain, f"Nikto scanning {target}", source="nikto")
         try:
             proc = subprocess.run(
@@ -7815,7 +7923,17 @@ def _nikto_scan_hosts(subs: List[str], domain: str, config: Optional[Dict[str, A
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
+                # Belt to -maxtime's braces: -maxtime bounds nikto's testing,
+                # this bounds the process. A host that blackholes packets blocks
+                # in connect() where -maxtime never gets a chance to fire.
+                timeout=host_timeout + 30,
             )
+        except subprocess.TimeoutExpired:
+            log(f"Nikto timed out for {host} after {host_timeout + 30}s; moving on.")
+            if job_domain:
+                job_log_append(job_domain,
+                               f"Nikto timed out for {host}; moving on.", source="nikto")
+            continue
         except FileNotFoundError:
             log("Nikto binary not found during run.")
             return results
@@ -9633,6 +9751,10 @@ button:hover { background:#1d4ed8; }
                 Enable CORS misconfiguration check
               </label>
               <label class="checkbox">
+                <input id="settings-nikto-async" type="checkbox" name="nikto_async" />
+                Run Nikto in the background (finish the run without waiting for it)
+              </label>
+              <label class="checkbox">
                 <input id="settings-bundled-nuclei-templates" type="checkbox" name="use_bundled_nuclei_templates" />
                 Use bundled nuclei templates (CVEs missing from the official set)
               </label>
@@ -10388,6 +10510,7 @@ const settingsEnableGau = document.getElementById('settings-enable-gau');
 const settingsEnableJsScan = document.getElementById('settings-enable-js-scan');
 const settingsEnableTakeoverScan = document.getElementById('settings-enable-takeover-scan');
 const settingsEnableCorsScan = document.getElementById('settings-enable-cors-scan');
+const settingsNiktoAsync = document.getElementById('settings-nikto-async');
 const settingsBundledNucleiTemplates = document.getElementById('settings-bundled-nuclei-templates');
 const settingsSubfinderThreads = document.getElementById('settings-subfinder-threads');
 const settingsAssetfinderThreads = document.getElementById('settings-assetfinder-threads');
@@ -12161,7 +12284,7 @@ function renderWorkflowDiagram() {
       <div class="workflow-tools">
         <span class="workflow-tool scanning">Nikto</span>
       </div>
-      <div class="workflow-description">Web server misconfiguration and dated-software checks. Slow, and skipped when a run opts out of it.</div>
+      <div class="workflow-description">Web server misconfiguration and dated-software checks. Only hosts HTTPX found serving are scanned, on the scheme and port they answered on, since a host with nothing listening costs around 80 seconds to learn nothing from. Runs in the background by default, so the rest of the run finishes without waiting for it.</div>
     </div>
     
     <div style="margin-top:24px; padding:16px; background:#0b152c; border-radius:12px; border:1px solid #1f2937;">
@@ -14325,6 +14448,7 @@ function renderSettings(config, tools) {
     if (settingsEnableJsScan) settingsEnableJsScan.checked = config.enable_js_scan !== false;
     if (settingsEnableTakeoverScan) settingsEnableTakeoverScan.checked = config.enable_takeover_scan !== false;
     if (settingsEnableCorsScan) settingsEnableCorsScan.checked = config.enable_cors_scan !== false;
+    if (settingsNiktoAsync) settingsNiktoAsync.checked = config.nikto_async !== false;
     if (settingsBundledNucleiTemplates) settingsBundledNucleiTemplates.checked = config.use_bundled_nuclei_templates !== false;
     settingsSubfinderThreads.value = config.subfinder_threads || 32;
     settingsAssetfinderThreads.value = config.assetfinder_threads || 10;
@@ -14571,6 +14695,7 @@ if (settingsForm) {
         enable_js_scan: settingsEnableJsScan ? settingsEnableJsScan.checked : true,
         enable_takeover_scan: settingsEnableTakeoverScan ? settingsEnableTakeoverScan.checked : true,
         enable_cors_scan: settingsEnableCorsScan ? settingsEnableCorsScan.checked : true,
+        nikto_async: settingsNiktoAsync ? settingsNiktoAsync.checked : true,
         use_bundled_nuclei_templates: settingsBundledNucleiTemplates ? settingsBundledNucleiTemplates.checked : true,
         subfinder_threads: settingsSubfinderThreads ? settingsSubfinderThreads.value : '',
         assetfinder_threads: settingsAssetfinderThreads ? settingsAssetfinderThreads.value : '',
