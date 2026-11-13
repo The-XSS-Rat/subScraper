@@ -2,7 +2,7 @@
 
 ## Issue
 
-When entering wildcard domains like `*.openai.com`, the tool was accepting wildcard DNS records discovered by enumeration tools (e.g., `*.cdn.openai.com`, `*.static.openai.com`). While this didn't directly cause recursive job creation, it was incorrect behavior that could lead to confusion and potential issues.
+When entering wildcard domains like `*.example.com`, the tool was accepting wildcard DNS records discovered by enumeration tools (e.g., `*.cdn.example.com`, `*.static.example.com`). While this didn't directly cause recursive job creation, it was incorrect behavior that could lead to confusion and potential issues.
 
 ## Root Cause
 
@@ -42,41 +42,41 @@ def is_valid_subdomain(text: str) -> bool:
 ## Expected Behavior
 
 ### 1. User Input Processing
-When a user enters `*.openai.com`:
+When a user enters `*.example.com`:
 - `expand_wildcard_targets()` strips the `*.` prefix
-- Creates **exactly ONE** job for `openai.com` with `broad_scope=True`
+- Creates **exactly ONE** job for `example.com` with `broad_scope=True`
 - No recursive jobs are created
 
 ### 2. Tool Discovery
 When enumeration tools discover subdomains:
-- Normal subdomains like `api.openai.com` are accepted
-- Wildcard DNS records like `*.cdn.openai.com` are **filtered out**
+- Normal subdomains like `api.example.com` are accepted
+- Wildcard DNS records like `*.cdn.example.com` are **filtered out**
 - Only valid concrete subdomains are added to the state
 - No new jobs are created from discovered subdomains
 
 ### 3. Complete Flow Example
 
 ```
-User Input: *.openai.com
+User Input: *.example.com
 
-1. expand_wildcard_targets('*.openai.com')
-   → [('openai.com', True)]
-   → Creates 1 job for openai.com
+1. expand_wildcard_targets('*.example.com')
+   → [('example.com', True)]
+   → Creates 1 job for example.com
 
 2. Enumeration tools discover:
-   - api.openai.com          ✓ Valid
-   - chat.openai.com         ✓ Valid
-   - *.cdn.openai.com        ✗ Filtered (wildcard)
-   - auth.openai.com         ✓ Valid
-   - *.static.openai.com     ✗ Filtered (wildcard)
+   - api.example.com          ✓ Valid
+   - chat.example.com         ✓ Valid
+   - *.cdn.example.com        ✗ Filtered (wildcard)
+   - auth.example.com         ✓ Valid
+   - *.static.example.com     ✗ Filtered (wildcard)
 
 3. State updated with valid subdomains only
-   - api.openai.com
-   - chat.openai.com
-   - auth.openai.com
+   - api.example.com
+   - chat.example.com
+   - auth.example.com
 
 4. No new jobs created
-   → Still only 1 job for openai.com
+   → Still only 1 job for example.com
 ```
 
 ## Testing
@@ -109,11 +109,11 @@ python3 test_main.py
 
 Or test manually:
 ```bash
-python3 main.py '*.openai.com' --skip-nikto
+python3 main.py '*.example.com' --skip-nikto
 ```
 
 The tool will:
-- Create exactly 1 job for `openai.com`
+- Create exactly 1 job for `example.com`
 - Filter out any wildcard DNS records discovered
 - Never create recursive jobs
 

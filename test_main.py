@@ -1829,8 +1829,8 @@ class TestWildcardSubdomainFiltering:
     """
     Tests for wildcard subdomain filtering to prevent recursive job issues.
     
-    When entering *.openai.com, the tool should:
-    1. Strip the * and create ONE job for openai.com with broad_scope=True
+    When entering *.example.com, the tool should:
+    1. Strip the * and create ONE job for example.com with broad_scope=True
     2. Reject any wildcard subdomains discovered by enumeration tools
     3. Never create recursive jobs for discovered wildcard DNS records
     """
@@ -1838,18 +1838,18 @@ class TestWildcardSubdomainFiltering:
     def test_is_valid_subdomain_rejects_wildcards(self):
         """Test that is_valid_subdomain rejects wildcard patterns"""
         # These should be REJECTED (wildcards from tool output)
-        assert main.is_valid_subdomain('*.openai.com') == False
-        assert main.is_valid_subdomain('*.api.openai.com') == False
+        assert main.is_valid_subdomain('*.example.com') == False
+        assert main.is_valid_subdomain('*.api.example.com') == False
         assert main.is_valid_subdomain('*.test.example.com') == False
         assert main.is_valid_subdomain('*test.com') == False
         assert main.is_valid_subdomain('test*.com') == False
         assert main.is_valid_subdomain('test.*.com') == False
         
         # These should be ACCEPTED (normal subdomains)
-        assert main.is_valid_subdomain('api.openai.com') == True
-        assert main.is_valid_subdomain('chat.openai.com') == True
-        assert main.is_valid_subdomain('openai.com') == True
-        assert main.is_valid_subdomain('deep.api.openai.com') == True
+        assert main.is_valid_subdomain('api.example.com') == True
+        assert main.is_valid_subdomain('chat.example.com') == True
+        assert main.is_valid_subdomain('example.com') == True
+        assert main.is_valid_subdomain('deep.api.example.com') == True
         assert main.is_valid_subdomain('test-api.example.com') == True
         assert main.is_valid_subdomain('test_api.example.com') == True
     
@@ -1857,10 +1857,10 @@ class TestWildcardSubdomainFiltering:
         """Test that read_lines_file filters out wildcard subdomains"""
         # Create temporary file with mixed content
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write("api.openai.com\n")
-            f.write("*.wildcard.openai.com\n")  # Should be filtered
-            f.write("chat.openai.com\n")
-            f.write("*.another.openai.com\n")  # Should be filtered
+            f.write("api.example.com\n")
+            f.write("*.wildcard.example.com\n")  # Should be filtered
+            f.write("chat.example.com\n")
+            f.write("*.another.example.com\n")  # Should be filtered
             f.write("valid.subdomain.com\n")
             f.write("*.test.example.com\n")  # Should be filtered
             temp_path = f.name
@@ -1869,13 +1869,13 @@ class TestWildcardSubdomainFiltering:
             result = main.read_lines_file(Path(temp_path))
             
             # Should only contain non-wildcard subdomains
-            assert 'api.openai.com' in result
-            assert 'chat.openai.com' in result
+            assert 'api.example.com' in result
+            assert 'chat.example.com' in result
             assert 'valid.subdomain.com' in result
             
             # Should NOT contain wildcard entries
-            assert '*.wildcard.openai.com' not in result
-            assert '*.another.openai.com' not in result
+            assert '*.wildcard.example.com' not in result
+            assert '*.another.example.com' not in result
             assert '*.test.example.com' not in result
             
             # Verify count
@@ -1884,18 +1884,18 @@ class TestWildcardSubdomainFiltering:
             os.unlink(temp_path)
     
     def test_expand_wildcard_creates_single_job(self):
-        """Test that *.openai.com creates exactly ONE job for openai.com"""
+        """Test that *.example.com creates exactly ONE job for example.com"""
         config = main.default_config()
         
         # Test subdomain wildcard
-        targets_with_flags = main.expand_wildcard_targets('*.openai.com', config)
+        targets_with_flags = main.expand_wildcard_targets('*.example.com', config)
         
         # Should create exactly ONE target
         assert len(targets_with_flags) == 1
         
-        # Should be openai.com (without the *)
+        # Should be example.com (without the *)
         domain, is_broad = targets_with_flags[0]
-        assert domain == 'openai.com'
+        assert domain == 'example.com'
         
         # Should be marked as broad scope
         assert is_broad == True
@@ -1945,8 +1945,8 @@ class TestWildcardSubdomainFiltering:
         don't create recursive jobs
         """
         # This test documents the expected behavior:
-        # 1. User enters *.openai.com
-        # 2. System creates ONE job for openai.com
+        # 1. User enters *.example.com
+        # 2. System creates ONE job for example.com
         # 3. Tools discover subdomains, possibly including wildcard DNS records
         # 4. Wildcard DNS records are filtered and NOT added to state
         # 5. NO new jobs are created for discovered subdomains
@@ -1954,14 +1954,14 @@ class TestWildcardSubdomainFiltering:
         config = main.default_config()
         
         # Simulate user input
-        targets_with_flags = main.expand_wildcard_targets('*.openai.com', config)
+        targets_with_flags = main.expand_wildcard_targets('*.example.com', config)
         assert len(targets_with_flags) == 1
         
         # Simulate tool output containing wildcards
         tool_output = [
-            'api.openai.com',
-            '*.wildcard.openai.com',  # Wildcard DNS record
-            'chat.openai.com',
+            'api.example.com',
+            '*.wildcard.example.com',  # Wildcard DNS record
+            'chat.example.com',
         ]
         
         # Filter using is_valid_subdomain (as read_lines_file does)
@@ -1969,9 +1969,9 @@ class TestWildcardSubdomainFiltering:
         
         # Should only have non-wildcard entries
         assert len(filtered) == 2
-        assert 'api.openai.com' in filtered
-        assert 'chat.openai.com' in filtered
-        assert '*.wildcard.openai.com' not in filtered
+        assert 'api.example.com' in filtered
+        assert 'chat.example.com' in filtered
+        assert '*.wildcard.example.com' not in filtered
 
 
 class TestSubdomainExport:

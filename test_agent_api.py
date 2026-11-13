@@ -111,31 +111,31 @@ def program(api, keys):
         "id": "testcorp",
         "name": "TestCorp BBP",
         "platform": "hackerone",
-        "in_scope": ["*.testcorp.com", "https://api.testcorp-labs.com/graphql"],
-        "out_of_scope": ["*.internal.testcorp.com", "blog.testcorp.com"],
+        "in_scope": ["*.example.com", "https://api.testcorp-labs.com/graphql"],
+        "out_of_scope": ["*.internal.example.com", "blog.example.com"],
     }, key=keys["full"]["api_key"])
 
     state = main.load_state()
-    main.add_subdomains_to_state(state, "testcorp.com",
-                                 ["www.testcorp.com", "admin.testcorp.com", "blog.testcorp.com",
-                                  "dev.testcorp.com", "vpn.internal.testcorp.com"], "test")
-    target = main.ensure_target_state(state, "testcorp.com")
+    main.add_subdomains_to_state(state, "example.com",
+                                 ["www.example.com", "admin.example.com", "blog.example.com",
+                                  "dev.example.com", "vpn.internal.example.com"], "test")
+    target = main.ensure_target_state(state, "example.com")
     subs = target["subdomains"]
-    subs["admin.testcorp.com"]["httpx"] = {"url": "https://admin.testcorp.com", "status_code": 403,
+    subs["admin.example.com"]["httpx"] = {"url": "https://admin.example.com", "status_code": 403,
                                            "title": "Admin Login", "webserver": "nginx",
                                            "tech": ["Jenkins"], "content_length": 120}
-    subs["admin.testcorp.com"]["nuclei"] = [{"template_id": "jenkins-panel", "name": "Jenkins Panel",
-                                             "severity": "high", "matched_at": "https://admin.testcorp.com"}]
-    subs["www.testcorp.com"]["httpx"] = {"url": "https://www.testcorp.com", "status_code": 200,
+    subs["admin.example.com"]["nuclei"] = [{"template_id": "jenkins-panel", "name": "Jenkins Panel",
+                                             "severity": "high", "matched_at": "https://admin.example.com"}]
+    subs["www.example.com"]["httpx"] = {"url": "https://www.example.com", "status_code": 200,
                                          "title": "Home", "tech": []}
-    subs["blog.testcorp.com"]["nuclei"] = [{"template_id": "x", "name": "Out of scope finding",
-                                            "severity": "critical", "matched_at": "https://blog.testcorp.com"}]
-    subs["dev.testcorp.com"]["nikto"] = [{"host": "dev.testcorp.com", "msg": "Directory indexing found",
-                                          "severity": "low", "uri": "https://dev.testcorp.com/files/"}]
-    target["endpoints"] = ["https://www.testcorp.com/api/v1/users?id=1",
-                           "https://www.testcorp.com/static/app.js"]
+    subs["blog.example.com"]["nuclei"] = [{"template_id": "x", "name": "Out of scope finding",
+                                            "severity": "critical", "matched_at": "https://blog.example.com"}]
+    subs["dev.example.com"]["nikto"] = [{"host": "dev.example.com", "msg": "Directory indexing found",
+                                          "severity": "low", "uri": "https://dev.example.com/files/"}]
+    target["endpoints"] = ["https://www.example.com/api/v1/users?id=1",
+                           "https://www.example.com/static/app.js"]
     target["js_scan"] = {"secrets": [{"type": "aws_key", "match": "AKIA***",
-                                      "source": "https://www.testcorp.com/static/app.js"}],
+                                      "source": "https://www.example.com/static/app.js"}],
                          "params": ["id", "redirect"], "endpoints": [], "files": [], "summary": {}}
     main.save_state(state)
     return "testcorp"
@@ -233,7 +233,7 @@ class TestApiKeyManagement:
 
     def test_key_restricted_to_program(self, api, keys, program):
         api.call("POST", "/api/agent/programs", {"id": "othercorp", "name": "Other",
-                                                 "in_scope": ["othercorp.com"]},
+                                                 "in_scope": ["example.org"]},
                  key=keys["full"]["api_key"])
         _, scoped = api.call("POST", "/api/agent/keys",
                              {"name": "one-program", "scopes": ["programs:read"],
@@ -257,13 +257,13 @@ class TestScopeEvaluation:
     """Wildcards, out-of-scope precedence and suffix confusion."""
 
     @pytest.mark.parametrize("asset,expected", [
-        ("testcorp.com", True),               # wildcard covers the apex
-        ("www.testcorp.com", True),
-        ("blog.testcorp.com", False),         # explicit exclusion
-        ("vpn.internal.testcorp.com", False),  # wildcard exclusion
+        ("example.com", True),               # wildcard covers the apex
+        ("www.example.com", True),
+        ("blog.example.com", False),         # explicit exclusion
+        ("vpn.internal.example.com", False),  # wildcard exclusion
         ("https://api.testcorp-labs.com/graphql", True),
         ("evil.com", False),
-        ("testcorp.com.evil.com", False),     # suffix confusion
+        ("example.com.evil.com", False),     # suffix confusion
     ])
     def test_program_scope_check(self, api, keys, program, asset, expected):
         status, payload = api.call("POST", f"/api/agent/programs/{program}/scope/check",
@@ -290,7 +290,7 @@ class TestScopeEvaluation:
         status, payload = api.call("GET", f"/api/agent/programs/{program}/scope",
                                    key=keys["full"]["api_key"])
         assert status == 200
-        assert set(payload["root_targets"]) == {"testcorp.com", "api.testcorp-labs.com"}
+        assert set(payload["root_targets"]) == {"example.com", "api.testcorp-labs.com"}
 
 
 class TestProgramCrud:
@@ -340,14 +340,14 @@ class TestAssetsAndFindings:
                                    key=keys["full"]["api_key"])
         assert status == 200
         hosts = {asset["host"] for asset in payload["assets"]}
-        assert {"www.testcorp.com", "admin.testcorp.com", "dev.testcorp.com"} <= hosts
-        assert "blog.testcorp.com" not in hosts
-        assert "vpn.internal.testcorp.com" not in hosts
+        assert {"www.example.com", "admin.example.com", "dev.example.com"} <= hosts
+        assert "blog.example.com" not in hosts
+        assert "vpn.internal.example.com" not in hosts
 
     def test_include_out_of_scope_opt_in(self, api, keys, program):
         _, payload = api.call("GET", f"/api/agent/programs/{program}/assets?include_out_of_scope=true",
                               key=keys["full"]["api_key"])
-        blog = next(a for a in payload["assets"] if a["host"] == "blog.testcorp.com")
+        blog = next(a for a in payload["assets"] if a["host"] == "blog.example.com")
         assert blog["in_scope"] is False
 
     def test_live_only_filter(self, api, keys, program):
@@ -368,7 +368,7 @@ class TestAssetsAndFindings:
         assert status == 200
         assert {f["source"] for f in payload["findings"]} == {"nuclei", "nikto", "js_secret"}
         assert payload["findings"][0]["severity"] == "high"  # sorted worst-first
-        assert all(f["host"] != "blog.testcorp.com" for f in payload["findings"])
+        assert all(f["host"] != "blog.example.com" for f in payload["findings"])
 
     def test_findings_severity_filter(self, api, keys, program):
         _, payload = api.call("GET", f"/api/agent/programs/{program}/findings?severity=high",
@@ -383,7 +383,7 @@ class TestAssetsAndFindings:
     def test_endpoints_and_params(self, api, keys, program):
         _, payload = api.call("GET", f"/api/agent/programs/{program}/endpoints?search=api",
                               key=keys["full"]["api_key"])
-        assert [e["url"] for e in payload["endpoints"]] == ["https://www.testcorp.com/api/v1/users?id=1"]
+        assert [e["url"] for e in payload["endpoints"]] == ["https://www.example.com/api/v1/users?id=1"]
         assert "id" in payload["params"]
 
     def test_surface_ranks_with_reasons(self, api, keys, program):
@@ -391,7 +391,7 @@ class TestAssetsAndFindings:
                                    key=keys["full"]["api_key"])
         assert status == 200
         top = payload["surface"][0]
-        assert top["host"] == "admin.testcorp.com"
+        assert top["host"] == "admin.example.com"
         assert top["score"] > 0
         assert any("auth-gated" in reason for reason in top["reasons"])
 
@@ -403,7 +403,7 @@ class TestInvestigation:
         assert status == 200
         assert payload["totals"]["subdomains"] == 5
         assert payload["severity_totals"]["high"] == 1
-        assert {t["target"] for t in payload["targets"]} == {"testcorp.com", "api.testcorp-labs.com"}
+        assert {t["target"] for t in payload["targets"]} == {"example.com", "api.testcorp-labs.com"}
 
     def test_investigate_requires_scan_scope(self, api, keys, program):
         status, _ = api.call("POST", f"/api/agent/programs/{program}/investigate", {},
@@ -412,7 +412,7 @@ class TestInvestigation:
 
     def test_out_of_scope_targets_refused(self, api, keys, program):
         status, payload = api.call("POST", f"/api/agent/programs/{program}/investigate",
-                                   {"targets": ["blog.testcorp.com", "vpn.internal.testcorp.com"]},
+                                   {"targets": ["blog.example.com", "vpn.internal.example.com"]},
                                    key=keys["full"]["api_key"])
         assert status == 400
         assert len(payload["refused"]) == 2
@@ -424,10 +424,10 @@ class TestInvestigation:
                             lambda domain, wordlist, skip_nikto, interval:
                             (dispatched.append(domain) or (True, f"Recon started for {domain}.")))
         status, payload = api.call("POST", f"/api/agent/programs/{program}/investigate",
-                                   {"targets": ["www.testcorp.com"], "skip_nikto": True},
+                                   {"targets": ["www.example.com"], "skip_nikto": True},
                                    key=keys["full"]["api_key"])
         assert status == 202
-        assert dispatched == ["www.testcorp.com"]
+        assert dispatched == ["www.example.com"]
         assert payload["dispatched"][0]["success"] is True
 
     def test_investigate_whole_scope(self, api, keys, program, monkeypatch):
@@ -438,7 +438,7 @@ class TestInvestigation:
         status, _ = api.call("POST", f"/api/agent/programs/{program}/investigate", {},
                              key=keys["full"]["api_key"])
         assert status == 202
-        assert set(dispatched) == {"testcorp.com", "api.testcorp-labs.com"}
+        assert set(dispatched) == {"example.com", "api.testcorp-labs.com"}
 
 
 class TestStatePersistence:
@@ -446,11 +446,11 @@ class TestStatePersistence:
 
     def test_endpoints_and_js_scan_persist(self, api, program):
         state = main.load_state()
-        target = state["targets"]["testcorp.com"]
+        target = state["targets"]["example.com"]
         assert target["endpoints"]
         assert target["js_scan"]["secrets"]
         main.save_state(state)
-        reloaded = main.load_state()["targets"]["testcorp.com"]
+        reloaded = main.load_state()["targets"]["example.com"]
         assert reloaded["endpoints"] == target["endpoints"]
         assert reloaded["js_scan"]["secrets"] == target["js_scan"]["secrets"]
 

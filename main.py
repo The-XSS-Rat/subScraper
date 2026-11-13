@@ -3308,7 +3308,7 @@ def _parse_multiple_domains(value: str) -> List[str]:
     Examples:
       "example.com, test.com"
       "*.example.com\n*.test.com"
-      "*-*-*-*.tangos.nl, *.adsl.xs4all.be"
+      "*-*-*-*.example.net, *.adsl.example.org"
     """
     if not value:
         return []
@@ -7551,7 +7551,7 @@ def _screenshot_host_keys(stem: str) -> List[str]:
     """
     Derive normalized host keys from a gowitness screenshot filename stem.
 
-    gowitness v3 names files like "https---youtube-ui.l.google.com-443"
+    gowitness v3 names files like "https---www.example.com-443"
     (scheme "---" host "-" port). Extract the host so it matches the target
     host/URL, and also emit the port-stripped variant for robustness.
     """
@@ -9405,7 +9405,7 @@ button:hover { background:#1d4ed8; }
             <h3>Start New Recon</h3>
             <form id="launch-form">
               <label for="launch-domain">Domain(s) / TLD(s)
-                <textarea id="launch-domain" name="domain" rows="4" placeholder="example.com&#10;*.test.com, *.corp.com&#10;*.subdomain.example.*" required aria-required="true" aria-describedby="domain-help"></textarea>
+                <textarea id="launch-domain" name="domain" rows="4" placeholder="example.com&#10;*.test.com, *.example.net&#10;*.subdomain.example.*" required aria-required="true" aria-describedby="domain-help"></textarea>
                 <small id="domain-help" style="color: #94a3b8; font-size: 0.85rem; display: block; margin-top: 4px;">
                   Enter one or more domains/wildcards. Separate with commas or newlines.
                 </small>
@@ -9443,7 +9443,7 @@ button:hover { background:#1d4ed8; }
               <input id="import-file" type="file" accept=".txt,.csv,.asciipb,.pb,.json,.list,text/plain" />
             </label>
             <label for="import-content">…or paste a list / asciipb content
-              <textarea id="import-content" name="content" rows="6" placeholder="accounts.google.com&#10;admin.google.com&#10;# or Google bug-hunters asciipb:&#10;domain: { fqdn: &quot;flash.android.com&quot; tier: TIER0 }"></textarea>
+              <textarea id="import-content" name="content" rows="6" placeholder="accounts.example.com&#10;admin.example.com&#10;# or Google bug-hunters asciipb:&#10;domain: { fqdn: &quot;flash.example.com&quot; tier: TIER0 }"></textarea>
             </label>
             <label class="checkbox">
               <input id="import-skip-nikto" type="checkbox" name="skip_nikto" />
@@ -16196,8 +16196,8 @@ def resume_target_scan(domain: str, wordlist: Optional[str] = None,
 
 
 # Registrable-domain (eTLD+1) extraction. Not a full public-suffix list, just
-# the common multi-label suffixes so hosts like foo.google.co.uk group under
-# google.co.uk instead of the wrong co.uk.
+# the common multi-label suffixes so hosts like foo.example.co.uk group under
+# example.co.uk instead of the wrong co.uk.
 _MULTI_LABEL_SUFFIXES = {
     "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk", "sch.uk",
     "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
