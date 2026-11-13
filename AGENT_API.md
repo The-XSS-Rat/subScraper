@@ -77,15 +77,15 @@ A program holds two lists. Entries may be bare domains, wildcards or URLs:
 
 ```json
 {
-  "in_scope":     ["*.acme.com", "https://api.acme-labs.com/graphql", "shop.acme.io"],
-  "out_of_scope": ["*.internal.acme.com", "blog.acme.com"]
+  "in_scope":     ["*.example.com", "https://api.example-labs.com/graphql", "shop.example.io"],
+  "out_of_scope": ["*.internal.example.com", "blog.example.com"]
 }
 ```
 
 Matching rules:
 
-* `*.acme.com` matches `acme.com` **and** every subdomain (the usual bug bounty reading).
-* Other `*` placements are glob-matched (`acme-*.com`).
+* `*.example.com` matches `example.com` **and** every subdomain (the usual bug bounty reading).
+* Other `*` placements are glob-matched (`example-*.com`).
 * URLs are reduced to their host for matching.
 * **Out-of-scope always wins.** Excluded hosts are never scanned, never returned as
   assets, and their findings are suppressed unless you explicitly pass
@@ -126,8 +126,8 @@ curl -s -X POST localhost:8000/api/agent/programs \
         "name": "Acme Corp BBP",
         "platform": "hackerone",
         "handle": "acme",
-        "in_scope": ["*.acme.com", "https://api.acme-labs.com/graphql"],
-        "out_of_scope": ["*.internal.acme.com", "blog.acme.com"],
+        "in_scope": ["*.example.com", "https://api.example-labs.com/graphql"],
+        "out_of_scope": ["*.internal.example.com", "blog.example.com"],
         "notes": "No DoS, no social engineering."
       }'
 ```
@@ -142,7 +142,7 @@ Runs the full pipeline (subdomain enum → dnsx/httpx → ffuf → screenshots �
 JS scan → nikto) for every in-scope root. Returns `202` with per-target dispatch results.
 
 ```json
-{"targets": ["acme.com"], "skip_nikto": true, "wordlist": "/path/wl.txt", "interval": 600}
+{"targets": ["example.com"], "skip_nikto": true, "wordlist": "/path/wl.txt", "interval": 600}
 ```
 
 * `targets` is optional — omit it to investigate the whole scope.
@@ -174,7 +174,7 @@ tech fingerprints, suggestive titles, and manual "interesting" marks.
 
 ```json
 {
-  "host": "admin.acme.com",
+  "host": "admin.example.com",
   "score": 63,
   "status_code": 403,
   "reasons": ["live host", "auth-gated (403)", "1 high finding(s)",
@@ -192,7 +192,7 @@ POST /api/agent/scope/check                 programs:read   check assets against
 ```bash
 curl -s -X POST localhost:8000/api/agent/programs/acme/scope/check \
   -H "Authorization: Bearer $KEY" \
-  -d '{"assets": ["www.acme.com", "blog.acme.com", "shop.acme.io.evil.com"]}'
+  -d '{"assets": ["www.example.com", "blog.example.com", "shop.example.io.evil.com"]}'
 ```
 
 Each result carries `in_scope`, the rule that `matched`, and a human `reason` — this is
@@ -207,7 +207,7 @@ KEY=rcc_...
 
 curl -s -H "Authorization: Bearer $KEY" localhost:8000/api/agent/whoami
 curl -s -X POST -H "Authorization: Bearer $KEY" localhost:8000/api/agent/programs \
-     -d '{"id":"acme","name":"Acme","in_scope":["*.acme.com"],"out_of_scope":["blog.acme.com"]}'
+     -d '{"id":"acme","name":"Acme","in_scope":["*.example.com"],"out_of_scope":["blog.example.com"]}'
 curl -s -X POST -H "Authorization: Bearer $KEY" localhost:8000/api/agent/programs/acme/investigate -d '{}'
 
 # poll until investigation_state != "running"

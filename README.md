@@ -18,7 +18,7 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 - **Actionable reports** – Each target gets a dedicated page with sortable/filterable tables, paginated views, per-tool sections, command history, severity badges, and a progress overview.
 - **Screenshots gallery with pagination** – Browse large collections of screenshots with pagination controls (configurable page size, top/bottom navigation). See [CLEANUP_AND_PAGINATION.md](CLEANUP_AND_PAGINATION.md) for details.
 - **Command history & exports** – Every command executed is logged; you can export JSON or CSV snapshots at any time.
-- **Monitors** – Point the UI at a newline-delimited URL (supports wildcards like `*.corp.com` or `corp.*`). The monitor polls the file, launches new jobs when entries appear, and surfaces health/status in its own tab.
+- **Monitors** – Point the UI at a newline-delimited URL (supports wildcards like `*.example.com` or `example.*`). The monitor polls the file, launches new jobs when entries appear, and surfaces health/status in its own tab.
 - **Concurrency controls** – One "workers per tool" setting (default 5) scales every tool at once; per-tool caps override it where a tool needs its own limit. httpx, nuclei and nikto split a host batch across those workers, so raising it speeds up a single scan, not just parallel jobs. Set it in Settings or with `--tool-workers N`.
 - **Docker support** – Multi-platform Docker container with all tools pre-installed. Works on Linux (amd64, arm64, armv7).
 - **OS-aware tool installation** – Detects the OS, distribution and package managers actually present (APT/DNF/pacman/zypper/apk/snap/Homebrew/MacPorts/Scoop/winget/Chocolatey/go/pip), installs each tool with a method that fits, skips anything that would hang on a sudo prompt, and prints instructions matching *your* machine instead of assuming Ubuntu.
@@ -27,18 +27,18 @@ Recon Command Center is a single-file orchestrator for common reconnaissance pip
 - **Bundled nuclei templates** – `nuclei-templates/` ships 34 hand-written templates for high/critical CVEs that have no template in the official `projectdiscovery/nuclei-templates` repo (Vault, Zabbix, Argo CD, Kibana, Harbor, Traefik, Cisco ASA/FTD, 18 WordPress plugins and more). They run alongside the official set on every nuclei step; toggle under Settings.
 - **Bug bounty agent API** – Load a program's full scope, launch recon across it, and read back assets, findings and a ranked attack surface over `/api/agent/*`, authenticated with scoped, revocable API keys. See [AGENT_API.md](AGENT_API.md).
 
-1. Dynamic queue management to fit YOUR pc: <img width="1055" height="976" alt="image" src="https://github.com/user-attachments/assets/c59393dd-2036-411e-b082-13c7f21241a4" />
-2. Auto backup + backup and restore: <img width="1881" height="973" alt="image" src="https://github.com/user-attachments/assets/8fc07597-c205-48de-b4d7-d6399a2a70da" />
-3. Enter a domain or wildcard domain: <img width="933" height="312" alt="image" src="https://github.com/user-attachments/assets/8ced9ef3-2637-402f-9834-0a2698f5ef1d" />
-4. Get a detailed report: <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/5b3e6db4-6a9b-4d37-993d-4b44d1f74273" />
-5. A screenshot gallery: <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1d025fd0-5fb5-4e9c-abaa-819998c27e09" />
-6. Full logging and monitoring: <img width="1901" height="979" alt="image" src="https://github.com/user-attachments/assets/b1afb276-2f1e-491a-8209-58670db5e7e4" />
-7. Monitoring your system so you can make sure not to overload it: <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/09c9639e-baf3-425c-af78-5fe24280cf4c" />
-8. Pipeline of your favourite tools: <img width="1922" height="990" alt="image" src="https://github.com/user-attachments/assets/abea5578-1e36-4501-a21d-262602189463" />
-9. Flow overview: <img width="1689" height="877" alt="image" src="https://github.com/user-attachments/assets/501e65b0-d6d5-48ca-bc37-e38663c0ae86" />
-10. Detailed subdomain pages: <img width="910" height="813" alt="image" src="https://github.com/user-attachments/assets/7319fb1c-53b2-49be-808f-2c388c32d3bf" />
-11. Add your own flags to the tools: <img width="1882" height="980" alt="image" src="https://github.com/user-attachments/assets/e55cf545-cb68-4796-b7f2-531cab71691f" />]
-12. Endpoint enum: <img width="1235" height="808" alt="image" src="https://github.com/user-attachments/assets/91c74810-42a2-46b3-87df-2e604348338d" />
+1. Dynamic queue management to fit YOUR pc
+2. Auto backup + backup and restore
+3. Enter a domain or wildcard domain
+4. Get a detailed report
+5. A screenshot gallery
+6. Full logging and monitoring
+7. Monitoring your system so you can make sure not to overload it
+8. Pipeline of your favourite tools
+9. Flow overview
+10. Detailed subdomain pages
+11. Add your own flags to the tools
+12. Endpoint enum
 
 
 ## Usage
@@ -83,8 +83,8 @@ python3 main.py --https --cert /path/to/cert.pem --key /path/to/key.pem
 python3 main.py example.com --wordlist ./w.txt --skip-nikto
 
 # Wildcards are supported
-python3 main.py 'acme.*'        # expands using Settings ➜ wildcard TLDs
-python3 main.py '*.apps.acme.com'
+python3 main.py 'example.*'        # expands using Settings ➜ wildcard TLDs
+python3 main.py '*.apps.example.com'
 ```
 
 ### Docker Installation

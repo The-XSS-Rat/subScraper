@@ -1,9 +1,19 @@
-
+# Scan output and runtime state (third-party target data: never commit)
+recon_data/
+screenshots/
+history/
 *.json
+*.jsonl
 *.txt
 !requirements.txt
 !requirements-dev.txt
-*.jsonl
+resume.cfg
+.coverage
+
+# Python
 __pycache__/
-recon_data/
+*.py[cod]
+
+# Local / OS
+.env
 .DS_Store

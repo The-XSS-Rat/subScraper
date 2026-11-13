@@ -68,7 +68,7 @@ class TestJobSnapshotScaling:
         each with a full step tree and log tail — was pure waste. With a large
         backlog it was the single biggest item in the response.
         """
-        main.RUNNING_JOBS["live.com"] = _make_job("live.com", "running")
+        main.RUNNING_JOBS["example.com"] = _make_job("example.com", "running")
         for i in range(2000):
             domain = f"q{i}.com"
             main.RUNNING_JOBS[domain] = _make_job(domain, "queued")
@@ -76,7 +76,7 @@ class TestJobSnapshotScaling:
 
         snapshot = main.snapshot_running_jobs()
 
-        assert [job["domain"] for job in snapshot] == ["live.com"]
+        assert [job["domain"] for job in snapshot] == ["example.com"]
         assert all(job["status"] != "queued" for job in snapshot)
 
     def test_snapshot_payload_stays_small_with_a_large_backlog(self):
@@ -84,7 +84,7 @@ class TestJobSnapshotScaling:
             domain = f"q{i}.com"
             main.RUNNING_JOBS[domain] = _make_job(domain, "queued")
             main.JOB_QUEUE.append(domain)
-        main.RUNNING_JOBS["live.com"] = _make_job("live.com", "running")
+        main.RUNNING_JOBS["example.com"] = _make_job("example.com", "running")
 
         payload = json.dumps({
             "running_jobs": main.snapshot_running_jobs(),
@@ -105,7 +105,7 @@ class TestJobSnapshotScaling:
         assert main.count_queued_jobs() == 1000
 
     def test_job_logs_are_tail_capped(self):
-        main.RUNNING_JOBS["live.com"] = _make_job("live.com", "running", log_lines=5000)
+        main.RUNNING_JOBS["example.com"] = _make_job("example.com", "running", log_lines=5000)
         logs = main.snapshot_running_jobs()[0]["logs"]
         assert len(logs) == main.MAX_LOGS_IN_SNAPSHOT
 
